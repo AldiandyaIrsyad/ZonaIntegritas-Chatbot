@@ -1,0 +1,8 @@
+[tools]
+python = "3.11"
+
+[env]
+_.python.venv = { path = ".venv", create = true }
+
+[tasks.dev]
+run = "uvicorn main:app --reload"
