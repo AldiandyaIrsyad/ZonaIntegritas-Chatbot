@@ -6,204 +6,153 @@
 {% include "components/sidebar.html" %}
 
 <!-- Main Chat Area -->
-<main class="flex-1 flex flex-col h-full bg-white dark:bg-darkbg relative min-w-0">
+<main x-data="chatInterface()" class="flex-1 flex flex-col h-full bg-white dark:bg-darkbg relative min-w-0">
   <!-- Header -->
   <header class="h-14 flex items-center justify-between px-4 sticky top-0 z-10 text-sm font-medium">
-    <div id="current-chat-title" class="truncate text-slate-500 dark:text-gray-400">Mock LLM</div>
+    <div class="truncate text-slate-500 dark:text-gray-400" x-text="title">Mock LLM</div>
   </header>
 
   <!-- Messages -->
   <div id="chat-messages" class="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 scroll-smooth pb-40">
-    {% include "components/empty_state.html" %}
+    <template x-if="messages.length === 0">
+      {% include "components/empty_state.html" %}
+    </template>
+
+    <template x-for="(msg, index) in messages" :key="index">
+      <div :class="['flex gap-4 max-w-3xl mx-auto w-full', msg.role === 'user' ? 'flex-row-reverse' : '']">
+        
+        <!-- Avatar -->
+        <div :class="['w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-1', msg.role === 'user' ? 'bg-slate-200 dark:bg-[#2f2f2f] text-slate-600 dark:text-gray-300' : 'bg-brand text-white']">
+          <template x-if="msg.role === 'user'">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clip-rule="evenodd" /></svg>
+          </template>
+          <template x-if="msg.role === 'llm'">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v3h8v-3zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-3a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v3h-3zM4.75 12.094A5.973 5.973 0 004 15v3H1v-3a3 3 0 013.75-2.906z" /></svg>
+          </template>
+        </div>
+
+        <!-- Content Bubble -->
+        <div :class="['max-w-[calc(100%-3rem)] flex-1', msg.role === 'user' ? 'flex flex-col items-end' : '']">
+          <div 
+            :class="['whitespace-pre-wrap break-words leading-relaxed', msg.role === 'user' ? 'bg-slate-200 dark:bg-[#2f2f2f] text-slate-900 dark:text-gray-100 px-4 py-2.5 rounded-2xl rounded-tr-md' : 'text-slate-900 dark:text-gray-200 py-1.5']"
+            x-text="msg.content"
+          ></div>
+        </div>
+
+      </div>
+    </template>
   </div>
 
   {% include "components/chat_input.html" %}
 </main>
 
 <script>
-  const chatForm = document.getElementById('chat-form');
-  const messageInput = document.getElementById('message-input');
-  const chatMessages = document.getElementById('chat-messages');
-  const sendButton = document.getElementById('send-button');
-  const emptyState = document.getElementById('empty-state');
-  const currentChatTitle = document.getElementById('current-chat-title');
-
-  window.currentSessionId = null;
-
-  // Auto-resize textarea
-  messageInput.addEventListener('input', function() {
-    this.style.height = 'auto';
-    this.style.height = (this.scrollHeight) + 'px';
-  });
-
-  // Enter to send (Shift+Enter for new line)
-  messageInput.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      chatForm.requestSubmit();
-    }
-  });
-
-  function addMessageToUI(role, content) {
-    if (emptyState && emptyState.style.display !== 'none') {
-      emptyState.style.display = 'none';
-    }
-
-    const msgDiv = document.createElement('div');
-    msgDiv.className = `flex gap-4 max-w-3xl mx-auto w-full ${role === 'user' ? 'flex-row-reverse' : ''}`;
-    
-    // Avatar
-    const avatar = document.createElement('div');
-    avatar.className = `w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-1 ${
-      role === 'user' ? 'bg-slate-200 dark:bg-[#2f2f2f] text-slate-600 dark:text-gray-300' : 'bg-brand text-white'
-    }`;
-    if (role === 'user') {
-      avatar.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clip-rule="evenodd" /></svg>';
-    } else {
-      avatar.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v3h8v-3zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-3a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v3h-3zM4.75 12.094A5.973 5.973 0 004 15v3H1v-3a3 3 0 013.75-2.906z" /></svg>';
-    }
-
-    // Content Bubble
-    const bubbleWrapper = document.createElement('div');
-    bubbleWrapper.className = `max-w-[calc(100%-3rem)] flex-1 ${role === 'user' ? 'flex flex-col items-end' : ''}`;
-    
-    const bubble = document.createElement('div');
-    bubble.className = `whitespace-pre-wrap break-words leading-relaxed ${
-      role === 'user' 
-        ? 'bg-slate-200 dark:bg-[#2f2f2f] text-slate-900 dark:text-gray-100 px-4 py-2.5 rounded-2xl rounded-tr-md' 
-        : 'text-slate-900 dark:text-gray-200 py-1.5'
-    }`;
-    
-    bubble.textContent = content;
-    bubbleWrapper.appendChild(bubble);
-    
-    msgDiv.appendChild(avatar);
-    msgDiv.appendChild(bubbleWrapper);
-    
-    chatMessages.appendChild(msgDiv);
-    
-    // Smooth scroll
-    window.requestAnimationFrame(() => {
-      chatMessages.scrollTo({ top: chatMessages.scrollHeight, behavior: 'smooth' });
-    });
-    
-    return bubble;
-  }
-
-  window.loadSession = async function(sessionId) {
-    try {
-      const res = await fetch(`/api/sessions/${sessionId}`);
-      const data = await res.json();
+  document.addEventListener('alpine:init', () => {
+    Alpine.data('chatInterface', () => ({
+      messages: [],
+      currentSessionId: new URLSearchParams(window.location.search).get('session_id') || null,
+      title: 'New Chat',
+      input: '',
+      isSubmitting: false,
       
-      if (data.error) return;
-      
-      window.currentSessionId = sessionId;
-      currentChatTitle.textContent = data.title;
-      
-      // Clear messages
-      chatMessages.innerHTML = '';
-      if (data.messages.length === 0) {
-        chatMessages.appendChild(emptyState);
-        emptyState.style.display = 'flex';
-      } else {
-        emptyState.style.display = 'none';
-        data.messages.forEach(msg => {
-          addMessageToUI(msg.role, msg.content);
-        });
-      }
-      
-      if (window.loadSessions) window.loadSessions(); // Update active state
-    } catch (e) {
-      console.error("Failed to load session", e);
-    }
-  }
-
-  window.createNewSession = async function() {
-    window.currentSessionId = null;
-    currentChatTitle.textContent = "New Chat";
-    chatMessages.innerHTML = '';
-    chatMessages.appendChild(emptyState);
-    emptyState.style.display = 'flex';
-    if (window.loadSessions) window.loadSessions();
-  }
-
-  chatForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const message = messageInput.value.trim();
-    if (!message) return;
-
-    if (!window.currentSessionId) {
-      try {
-        const res = await fetch('/api/sessions', { method: 'POST' });
-        const data = await res.json();
-        window.currentSessionId = data.id;
-      } catch (err) {
-        console.error("Failed to create session", err);
-        return;
-      }
-    }
-
-    addMessageToUI('user', message);
-    
-    // Reset textarea
-    messageInput.value = '';
-    messageInput.style.height = 'auto';
-    messageInput.disabled = true;
-    sendButton.disabled = true;
-
-    const llmBubble = addMessageToUI('llm', '');
-    
-    try {
-      const response = await fetch(`/api/sessions/${window.currentSessionId}/stream`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message }),
-      });
-
-      if (!response.ok) throw new Error('Network response was not ok');
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      init() {
+        if (this.currentSessionId) {
+          this.loadSession(this.currentSessionId);
+        }
         
-        const chunk = decoder.decode(value, { stream: true });
-        llmBubble.textContent += chunk;
-        chatMessages.scrollTop = chatMessages.scrollHeight;
-      }
-      
-      // Reload sessions to update title if it changed
-      if (window.loadSessions) window.loadSessions();
-      
-    } catch (error) {
-      console.error('Error:', error);
-      llmBubble.textContent = 'Error: Failed to fetch response.';
-      llmBubble.classList.add('text-red-500');
-    } finally {
-      messageInput.disabled = false;
-      sendButton.disabled = false;
-      messageInput.focus();
-    }
-  });
-
-  // Init
-  const urlParams = new URLSearchParams(window.location.search);
-  const sid = urlParams.get('session_id');
-
-  if (sid) {
-    window.loadSession(sid).then(() => {
-        if (window.loadSessions) window.loadSessions();
-    });
-  } else {
-    if (window.loadSessions) {
-        window.loadSessions().then(() => {
-            if (!window.currentSessionId) {
-                window.createNewSession();
-            }
+        window.addEventListener('load-session', (e) => {
+          this.currentSessionId = e.detail.id;
+          this.loadSession(this.currentSessionId);
         });
-    }
-  }
+        
+        window.addEventListener('new-session', () => {
+          this.currentSessionId = null;
+          this.title = 'New Chat';
+          this.messages = [];
+        });
+      },
+      
+      async loadSession(id) {
+        try {
+          const res = await fetch(`/api/sessions/${id}`);
+          const data = await res.json();
+          if (data.error) return;
+          this.title = data.title;
+          this.messages = data.messages;
+          this.scrollToBottom();
+        } catch (e) {
+          console.error(e);
+        }
+      },
+      
+      scrollToBottom() {
+        this.$nextTick(() => {
+          const el = document.getElementById('chat-messages');
+          if (el) el.scrollTop = el.scrollHeight;
+        });
+      },
+      
+      autoResize(e) {
+        e.target.style.height = 'auto';
+        e.target.style.height = (e.target.scrollHeight) + 'px';
+      },
+      
+      async submitMessage() {
+        const msg = this.input.trim();
+        if (!msg || this.isSubmitting) return;
+        
+        if (!this.currentSessionId) {
+           try {
+             const res = await fetch('/api/sessions', { method: 'POST' });
+             const data = await res.json();
+             this.currentSessionId = data.id;
+             window.dispatchEvent(new CustomEvent('session-created', { detail: { id: data.id } }));
+           } catch(e) {
+             console.error(e); return;
+           }
+        }
+        
+        this.input = '';
+        const textarea = document.getElementById('message-input');
+        if (textarea) textarea.style.height = 'auto';
+        this.isSubmitting = true;
+        
+        this.messages.push({ role: 'user', content: msg });
+        const llmIndex = this.messages.push({ role: 'llm', content: '' }) - 1;
+        this.scrollToBottom();
+        
+        try {
+           const response = await fetch(`/api/sessions/${this.currentSessionId}/stream`, {
+             method: 'POST',
+             headers: { 'Content-Type': 'application/json' },
+             body: JSON.stringify({ message: msg })
+           });
+           
+           if (!response.ok) throw new Error('Network error');
+           
+           const reader = response.body.getReader();
+           const decoder = new TextDecoder();
+           
+           while(true) {
+             const { done, value } = await reader.read();
+             if (done) break;
+             const chunk = decoder.decode(value, { stream: true });
+             this.messages[llmIndex].content += chunk;
+             this.scrollToBottom();
+           }
+           
+           window.dispatchEvent(new Event('session-updated'));
+        } catch (e) {
+           console.error(e);
+           this.messages[llmIndex].content = 'Error: Failed to fetch response.';
+        } finally {
+           this.isSubmitting = false;
+           this.$nextTick(() => {
+              if (textarea) textarea.focus();
+           });
+        }
+      }
+    }));
+  });
 </script>
 {% endblock %}

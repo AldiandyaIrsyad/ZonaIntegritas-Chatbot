@@ -2,9 +2,9 @@
 [X] CRUD for the chat. Make sure you can delete
 [X] Upload PDF passthrough to upload
 
+TODO
 
-TODO 
-
-[ ] Refactor frontend to use HTMX or Alpine.js 
-[ ] Create a new python folder package for LLMs. This will be used by service to use either API LLMs or local
+[x] Refactor frontend to use Alpine.js
+[ ] Refactor packages. use the init to run the initial setup so main is more lenient.
+[ ] Create a new python folder package for LLMs. This will be used by service to use either API LLMs or local, it's init should use .env
 [ ] Create IVM (Input Validation module)

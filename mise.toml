@@ -4,5 +4,15 @@ python = "3.11"
 [env]
 _.python.venv = { path = ".venv", create = true }
 
+[tasks."db:up"]
+description = "Start the PostgreSQL service in the background"
+run = "docker compose up -d db"
+
+[tasks."db:down"]
+description = "Stop and remove the Docker containers"
+run = "docker compose down"
+
 [tasks.dev]
+description = "Start the database and run the Uvicorn server"
+depends = ["db:up"]
 run = "uvicorn main:app --reload"
