@@ -12,5 +12,29 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama_backend
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+  ollama-provisioner:
+    image: alpine:latest
+    container_name: ollama_provisioner
+    depends_on:
+      - ollama
+    entrypoint: [ "/bin/sh", "-c" ]
+    command: >
+      "apk add --no-cache curl &&
+      echo 'Waiting for Ollama to start...' &&
+      until curl -s http://ollama:11434/api/tags > /dev/null; do sleep 2; done &&
+      echo 'Pulling lightweight model...' &&
+      curl -X POST http://ollama:11434/api/pull -d '{\"name\": \"qwen2.5:0.5b\"}' &&
+      echo 'Model ready.'"
+
 volumes:
   postgres_data:
+  ollama_data:

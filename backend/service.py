@@ -7,9 +7,16 @@ from fastapi.responses import StreamingResponse
 from backend.repository import ChatRepository, PDFRepository
 from backend.config import async_session
 
+from LLMs.LLM import LLM 
+
 class ChatService:
-    def __init__(self, repository: ChatRepository):
+    def __init__(self, repository: ChatRepository, mode: str = "api", model: str = ""):
         self.repository = repository
+
+        if mode == "api":
+            self.llm = LLM(backend=mode, model=model or "google/gemini-2.5-flash")
+        elif mode == "local":
+            self.llm = LLM(backend=mode, model=model or "qwen2.5:0.5b")
 
     async def list_sessions(self):
         sessions = await self.repository.get_all_sessions()
@@ -43,18 +50,12 @@ class ChatService:
 
         async def generate():
             response_content = ""
-            words = message_text.split(" ")
-            for i, word in enumerate(words):
-                if i > 0:
-                    yield " "
-                    response_content += " "
-                yield word
-                response_content += word
-                await asyncio.sleep(0.05)
-            
-            async with async_session() as db:
-                repo = ChatRepository(db)
-                await repo.create_message(session_id, "llm", response_content)
+            # Consumes identical interface regardless of OpenRouter/Ollama routing
+            async for chunk in self.llm.input(message_text):
+                response_content += chunk
+                yield chunk
+
+            await self.repository.create_message(session_id, "assistant", response_content)
                 
         return StreamingResponse(generate(), media_type="text/plain")
 
