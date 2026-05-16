@@ -3,8 +3,7 @@ from fastapi import FastAPI
 import uvicorn
 from dotenv import load_dotenv
 
-from backend.config import engine, Base
-from backend.routes import router
+from backend import engine, Base, router
 
 load_dotenv()
 
