@@ -7,16 +7,17 @@ from fastapi.responses import StreamingResponse
 from backend.repository import ChatRepository, PDFRepository
 from backend.config import async_session
 
-from LLMs.LLM import LLM 
+# Services
+import LLMs 
 
 class ChatService:
     def __init__(self, repository: ChatRepository, mode: str = "api", model: str = ""):
         self.repository = repository
 
         if mode == "api":
-            self.llm = LLM(backend=mode, model=model or "google/gemini-2.5-flash")
+            self.llm = LLMs.LLM(backend=mode, model=model or "google/gemini-2.5-flash")
         elif mode == "local":
-            self.llm = LLM(backend=mode, model=model or "qwen2.5:0.5b")
+            self.llm = LLMs.LLM(backend=mode, model=model or "qwen2.5:0.5b")
 
     async def list_sessions(self):
         sessions = await self.repository.get_all_sessions()

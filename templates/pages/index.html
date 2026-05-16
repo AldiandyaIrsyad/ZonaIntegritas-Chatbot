@@ -1,44 +1,74 @@
-{% extends "base.html" %}
-
-{% block title %}Chat - {{ super() }}{% endblock %}
-
-{% block layout %}
-{% include "components/sidebar.html" %}
+{% extends "base.html" %} {% block title %}Chat - {{ super() }}{% endblock %} {%
+block layout %} {% include "components/sidebar.html" %}
 
 <!-- Main Chat Area -->
-<main x-data="chatInterface()" class="flex-1 flex flex-col h-full bg-white dark:bg-darkbg relative min-w-0">
+<main
+  x-data="chatInterface()"
+  class="flex-1 flex flex-col h-full bg-white dark:bg-darkbg relative min-w-0"
+>
   <!-- Header -->
-  <header class="h-14 flex items-center justify-between px-4 sticky top-0 z-10 text-sm font-medium">
-    <div class="truncate text-slate-500 dark:text-gray-400" x-text="title">Mock LLM</div>
+  <header
+    class="h-14 flex items-center justify-between px-4 sticky top-0 z-10 text-sm font-medium"
+  >
+    <div class="truncate text-slate-500 dark:text-gray-400" x-text="title">
+      Mock LLM
+    </div>
   </header>
 
   <!-- Messages -->
-  <div id="chat-messages" class="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 scroll-smooth pb-40">
+  <div
+    id="chat-messages"
+    class="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 scroll-smooth pb-40"
+  >
     <template x-if="messages.length === 0">
       {% include "components/empty_state.html" %}
     </template>
 
     <template x-for="(msg, index) in messages" :key="index">
-      <div :class="['flex gap-4 max-w-3xl mx-auto w-full', msg.role === 'user' ? 'flex-row-reverse' : '']">
-        
+      <div
+        :class="['flex gap-4 max-w-3xl mx-auto w-full', msg.role === 'user' ? 'flex-row-reverse' : '']"
+      >
         <!-- Avatar -->
-        <div :class="['w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-1', msg.role === 'user' ? 'bg-slate-200 dark:bg-[#2f2f2f] text-slate-600 dark:text-gray-300' : 'bg-brand text-white']">
+        <div
+          :class="['w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-1', msg.role === 'user' ? 'bg-slate-200 dark:bg-[#2f2f2f] text-slate-600 dark:text-gray-300' : 'bg-brand text-white']"
+        >
           <template x-if="msg.role === 'user'">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clip-rule="evenodd" /></svg>
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              class="h-5 w-5"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+            >
+              <path
+                fill-rule="evenodd"
+                d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z"
+                clip-rule="evenodd"
+              />
+            </svg>
           </template>
           <template x-if="msg.role === 'llm'">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v3h8v-3zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-3a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v3h-3zM4.75 12.094A5.973 5.973 0 004 15v3H1v-3a3 3 0 013.75-2.906z" /></svg>
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              class="h-5 w-5"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+            >
+              <path
+                d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v3h8v-3zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-3a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v3h-3zM4.75 12.094A5.973 5.973 0 004 15v3H1v-3a3 3 0 013.75-2.906z"
+              />
+            </svg>
           </template>
         </div>
 
         <!-- Content Bubble -->
-        <div :class="['max-w-[calc(100%-3rem)] flex-1', msg.role === 'user' ? 'flex flex-col items-end' : '']">
-          <div 
+        <div
+          :class="['max-w-[calc(100%-3rem)] flex-1', msg.role === 'user' ? 'flex flex-col items-end' : '']"
+        >
+          <div
             :class="['whitespace-pre-wrap break-words leading-relaxed', msg.role === 'user' ? 'bg-slate-200 dark:bg-[#2f2f2f] text-slate-900 dark:text-gray-100 px-4 py-2.5 rounded-2xl rounded-tr-md' : 'text-slate-900 dark:text-gray-200 py-1.5']"
             x-text="msg.content"
           ></div>
         </div>
-
       </div>
     </template>
   </div>
@@ -47,31 +77,32 @@
 </main>
 
 <script>
-  document.addEventListener('alpine:init', () => {
-    Alpine.data('chatInterface', () => ({
+  document.addEventListener("alpine:init", () => {
+    Alpine.data("chatInterface", () => ({
       messages: [],
-      currentSessionId: new URLSearchParams(window.location.search).get('session_id') || null,
-      title: 'New Chat',
-      input: '',
+      currentSessionId:
+        new URLSearchParams(window.location.search).get("session_id") || null,
+      title: "New Chat",
+      input: "",
       isSubmitting: false,
-      
+
       init() {
         if (this.currentSessionId) {
           this.loadSession(this.currentSessionId);
         }
-        
-        window.addEventListener('load-session', (e) => {
+
+        window.addEventListener("load-session", (e) => {
           this.currentSessionId = e.detail.id;
           this.loadSession(this.currentSessionId);
         });
-        
-        window.addEventListener('new-session', () => {
+
+        window.addEventListener("new-session", () => {
           this.currentSessionId = null;
-          this.title = 'New Chat';
+          this.title = "New Chat";
           this.messages = [];
         });
       },
-      
+
       async loadSession(id) {
         try {
           const res = await fetch(`/api/sessions/${id}`);
@@ -84,74 +115,80 @@
           console.error(e);
         }
       },
-      
+
       scrollToBottom() {
         this.$nextTick(() => {
-          const el = document.getElementById('chat-messages');
+          const el = document.getElementById("chat-messages");
           if (el) el.scrollTop = el.scrollHeight;
         });
       },
-      
+
       autoResize(e) {
-        e.target.style.height = 'auto';
-        e.target.style.height = (e.target.scrollHeight) + 'px';
+        e.target.style.height = "auto";
+        e.target.style.height = e.target.scrollHeight + "px";
       },
-      
+
       async submitMessage() {
         const msg = this.input.trim();
         if (!msg || this.isSubmitting) return;
-        
+
         if (!this.currentSessionId) {
-           try {
-             const res = await fetch('/api/sessions', { method: 'POST' });
-             const data = await res.json();
-             this.currentSessionId = data.id;
-             window.dispatchEvent(new CustomEvent('session-created', { detail: { id: data.id } }));
-           } catch(e) {
-             console.error(e); return;
-           }
+          try {
+            const res = await fetch("/api/sessions", { method: "POST" });
+            const data = await res.json();
+            this.currentSessionId = data.id;
+            window.dispatchEvent(
+              new CustomEvent("session-created", { detail: { id: data.id } }),
+            );
+          } catch (e) {
+            console.error(e);
+            return;
+          }
         }
-        
-        this.input = '';
-        const textarea = document.getElementById('message-input');
-        if (textarea) textarea.style.height = 'auto';
+
+        this.input = "";
+        const textarea = document.getElementById("message-input");
+        if (textarea) textarea.style.height = "auto";
         this.isSubmitting = true;
-        
-        this.messages.push({ role: 'user', content: msg });
-        const llmIndex = this.messages.push({ role: 'llm', content: '' }) - 1;
+
+        this.messages.push({ role: "user", content: msg });
+        const llmIndex = this.messages.push({ role: "llm", content: "" }) - 1;
         this.scrollToBottom();
-        
+
         try {
-           const response = await fetch(`/api/sessions/${this.currentSessionId}/stream`, {
-             method: 'POST',
-             headers: { 'Content-Type': 'application/json' },
-             body: JSON.stringify({ message: msg })
-           });
-           
-           if (!response.ok) throw new Error('Network error');
-           
-           const reader = response.body.getReader();
-           const decoder = new TextDecoder();
-           
-           while(true) {
-             const { done, value } = await reader.read();
-             if (done) break;
-             const chunk = decoder.decode(value, { stream: true });
-             this.messages[llmIndex].content += chunk;
-             this.scrollToBottom();
-           }
-           
-           window.dispatchEvent(new Event('session-updated'));
+          const response = await fetch(
+            `/api/sessions/${this.currentSessionId}/stream`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ message: msg }),
+            },
+          );
+
+          if (!response.ok) throw new Error("Network error");
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const chunk = decoder.decode(value, { stream: true });
+            this.messages[llmIndex].content += chunk;
+            this.scrollToBottom();
+          }
+
+          window.dispatchEvent(new Event("session-updated"));
         } catch (e) {
-           console.error(e);
-           this.messages[llmIndex].content = 'Error: Failed to fetch response.';
+          console.error(e);
+          this.messages[llmIndex].content = "Error: Failed to fetch response.";
         } finally {
-           this.isSubmitting = false;
-           this.$nextTick(() => {
-              if (textarea) textarea.focus();
-           });
+          this.isSubmitting = false;
+          this.$nextTick(() => {
+            if (textarea) textarea.focus();
+          });
         }
-      }
+      },
     }));
   });
 </script>

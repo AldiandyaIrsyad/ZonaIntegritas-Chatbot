@@ -1,10 +1,13 @@
 [X] Make sure the list is reverse
 [X] CRUD for the chat. Make sure you can delete
 [X] Upload PDF passthrough to upload
-
-TODO
-
 [x] Refactor frontend to use Alpine.js
 [x] Refactor packages. use the init to run the initial setup so main is more lenient.
-[ ] Create a new python folder package for LLMs. This will be used by service to use either API LLMs or local, it's init should use .env
+[x] Create a new python folder package for LLMs.
+[ ] Refactor LLMs package, and service.py to streamlined the use of getenv for model usage. Create LLM_MODE, LLM_API, and LLM_Model env to be used.
+[ ] Create services folder and use that instead of LLMs, this service layer will contain IVM, RAG, PDF parser, ETC.
 [ ] Create IVM (Input Validation module)
+[ ] Make sure when LLMs answering a question it give "source" and PDFs as source.
+[ ] Initialize vector database for RAG
+[ ] Refactor service.py PDFParser to it's own, focusing on inserting to database, and chat input
+[ ] Make user able to upload PDFs.
