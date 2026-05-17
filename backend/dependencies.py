@@ -9,15 +9,7 @@ from services.LLM import LLM
 
 def get_llm_client(settings: LLMSettings) -> LLM:
     """Centralized logic for evaluating model configuration."""
-    if settings.use_local:
-        return LLM(
-            backend="local",
-            model=settings.model,
-            base_url=settings.base_url
-        )
-    
     return LLM(
-        backend="api",
         model=settings.model,
         base_url=settings.base_url,
         api_key=settings.api_key

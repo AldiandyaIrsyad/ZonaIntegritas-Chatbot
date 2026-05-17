@@ -9,12 +9,10 @@ class LLM:
     """
     def __init__(
         self, 
-        backend: str, 
         model: str, 
         api_key: Optional[SecretStr] = None, 
         base_url: Optional[str] = None
     ):
-        self.backend = backend.lower()
         self.model = model
 
         resolved_key = api_key.get_secret_value() if api_key else "ollama-dummy-token"
@@ -23,7 +21,7 @@ class LLM:
         headers = {
             "HTTP-Referer": "http://localhost:3000",
             "X-Title": "Local-Dev-App"
-        } if self.backend == "api" else {}
+        }
 
         self.client = AsyncOpenAI(
             base_url=base_url,
