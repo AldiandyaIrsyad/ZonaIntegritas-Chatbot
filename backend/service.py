@@ -34,7 +34,7 @@ class ChatService:
         }
 
     async def process_chat_message(self, session_id: str, message_text: str):
-        session = await self.repository.get_session_by_id(session_id)
+        session = await self.repository.get_session_by_id(session_id, load_messages=True)
         
         if not session:
             session = await self.repository.create_session(session_id, message_text[:20] + "...")
@@ -45,10 +45,13 @@ class ChatService:
             
         await self.repository.create_message(session_id, "user", message_text)
 
+        # Reconstruct standard history dictionary
+        raw_history = [{"role": m.role, "content": m.content} for m in session.messages]
+        raw_history.append({"role": "user", "content": message_text})
+
         async def generate():
             response_content = ""
-            # Consumes identical interface regardless of OpenRouter/Ollama routing
-            async for chunk in self.llm.input(message_text):
+            async for chunk in self.llm.input(raw_history, max_tokens=4000):
                 response_content += chunk
                 yield chunk
 
