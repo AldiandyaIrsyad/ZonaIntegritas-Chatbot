@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import AsyncMock, patch
 from typing import AsyncGenerator
 
-from LLMs.LLM import LLM 
+from services.LLM import LLM 
 
 
 # --- Mock Classes for OpenAI Stream Simulation ---

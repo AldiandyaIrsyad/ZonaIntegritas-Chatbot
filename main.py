@@ -1,11 +1,8 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import uvicorn
-from dotenv import load_dotenv
 
 from backend import engine, Base, router
-
-load_dotenv()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

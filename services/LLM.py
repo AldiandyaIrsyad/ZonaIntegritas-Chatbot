@@ -1,6 +1,6 @@
-import os
 from typing import AsyncGenerator, Optional
 from openai import AsyncOpenAI
+from pydantic import SecretStr
 
 class LLM:
     """
@@ -11,29 +11,25 @@ class LLM:
         self, 
         backend: str, 
         model: str, 
-        api_key: Optional[str] = None, 
+        api_key: Optional[SecretStr] = None, 
         base_url: Optional[str] = None
     ):
         self.backend = backend.lower()
         self.model = model
 
-        if self.backend == "api":
-            # OpenRouter configuration
-            self.client = AsyncOpenAI(
-                base_url=base_url or "https://openrouter.ai/api/v1",
-                api_key=api_key or os.getenv("OPENROUTER_API_KEY"),
-                default_headers={
-                    "HTTP-Referer": "http://localhost:3000", # Required by OpenRouter
-                    "X-Title": "Local-Dev-App"
-                }
-            )
-        elif self.backend == "local":
-            self.client = AsyncOpenAI(
-                base_url=base_url or "http://localhost:11434/v1",
-                api_key="ollama-dummy-token"
-            )
-        else:
-            raise ValueError("Invalid backend specified; use 'api' or 'local'.")
+        resolved_key = api_key.get_secret_value() if api_key else "ollama-dummy-token"
+        
+
+        headers = {
+            "HTTP-Referer": "http://localhost:3000",
+            "X-Title": "Local-Dev-App"
+        } if self.backend == "api" else {}
+
+        self.client = AsyncOpenAI(
+            base_url=base_url,
+            api_key=resolved_key,
+            default_headers=headers
+        )
 
     async def input(self, text: str) -> AsyncGenerator[str, None]:
         """Streams raw text chunks from the activated backend wrapper."""

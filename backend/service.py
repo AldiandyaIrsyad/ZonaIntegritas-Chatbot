@@ -8,16 +8,12 @@ from backend.repository import ChatRepository, PDFRepository
 from backend.config import async_session
 
 # Services
-import LLMs 
+import services 
 
 class ChatService:
-    def __init__(self, repository: ChatRepository, mode: str = "api", model: str = ""):
+    def __init__(self, repository: ChatRepository, llm: services.LLM):
         self.repository = repository
-
-        if mode == "api":
-            self.llm = LLMs.LLM(backend=mode, model=model or "google/gemini-2.5-flash")
-        elif mode == "local":
-            self.llm = LLMs.LLM(backend=mode, model=model or "qwen2.5:0.5b")
+        self.llm = llm
 
     async def list_sessions(self):
         sessions = await self.repository.get_all_sessions()
