@@ -4,6 +4,8 @@ from openai import AsyncOpenAI
 from pydantic import SecretStr
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage, trim_messages
 
+from src.core.config import LLMSettings
+
 class LLM:
     """
     Unified LLM Gateway interfacing with OpenRouter (API) 
@@ -93,3 +95,14 @@ class LLM:
         async for chunk in response:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
+
+def get_llm_client(settings: LLMSettings) -> LLM:
+    """
+    Factory function for Dependency Injection.
+    Isolates the instantiation logic from the consuming vertical slices.
+    """
+    return LLM(
+        model=settings.model,
+        base_url=settings.base_url,
+        api_key=settings.api_key
+    )

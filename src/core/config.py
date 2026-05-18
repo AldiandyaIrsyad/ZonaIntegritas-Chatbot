@@ -16,7 +16,7 @@ class LLMSettings(BaseSettings):
 
 class DatabaseSettings(BaseSettings):
     user: str = "postgres"
-    password: str = "UdlpHsAngnTleKokBMvdGGpod"
+    password: str = "loremipsum"
     db: str = "postgres"
     host: str = "localhost"
     port: str = "5432"
