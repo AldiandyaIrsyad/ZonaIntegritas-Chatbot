@@ -8,6 +8,7 @@
 [x] Create services folder and use that instead of LLMs, this service layer will contain IVM, RAG, PDF parser, ETC.
 [x] Make sure chat can read previous message as context use langchain and tiktoken for this
 [ ] Make sure there is severals roles for chat. System, User, AI, which we will use salted later.
+[ ] Add system prompt mechanism for `/admin` and into the chat.
 [ ] Create PDF parser for chat, rename the current service into chat PDF and also KB (knowledge base) PDF.
 [ ] Create IVM (Input Validation module)
 [ ] Make sure when LLMs answering a question it give "source" and PDFs as source.

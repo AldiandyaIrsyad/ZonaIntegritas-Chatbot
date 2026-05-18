@@ -1,7 +1,7 @@
 from fastapi import Request, UploadFile, Form
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from backend.service import ChatService, PDFService
+from backend.service import ChatService, KnowledgeBase
 
 templates = Jinja2Templates(directory="./templates")
 
@@ -44,7 +44,7 @@ class ChatController:
         return {"status": "success"}
 
 class PDFController:
-    def __init__(self, service: PDFService):
+    def __init__(self, service: KnowledgeBase):
         self.service = service
         
     async def admin_page(self, request: Request):

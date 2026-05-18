@@ -1,8 +1,7 @@
 from fastapi import APIRouter, Depends, Request, UploadFile, Form
 from sqlalchemy.ext.asyncio import AsyncSession
-from backend.config import get_db
 from backend.repository import ChatRepository, PDFRepository
-from backend.service import ChatService, PDFService
+from backend.service import ChatService, KnowledgeBase
 from backend.controller import ChatController, ChatRequest, PDFController, PDFUpdateRequest
 
 from backend.dependencies import get_chat_controller, get_pdf_controller

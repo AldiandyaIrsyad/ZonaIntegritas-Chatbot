@@ -5,7 +5,6 @@ import aiofiles
 from fastapi import UploadFile
 from fastapi.responses import StreamingResponse
 from backend.repository import ChatRepository, PDFRepository
-from backend.config import async_session
 
 # Services
 import services 
@@ -62,7 +61,7 @@ class ChatService:
     async def delete_session(self, session_id: str):
         return await self.repository.delete_session(session_id)
 
-class PDFService:
+class KnowledgeBase:
     def __init__(self, repository: PDFRepository):
         self.repository = repository
         self.upload_dir = "upload"

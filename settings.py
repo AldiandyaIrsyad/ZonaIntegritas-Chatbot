@@ -14,6 +14,27 @@ class LLMSettings(BaseSettings):
         extra="ignore"
     )
 
+class DatabaseSettings(BaseSettings):
+    user: str = "postgres"
+    password: str = "UdlpHsAngnTleKokBMvdGGpod"
+    db: str = "postgres"
+    host: str = "localhost"
+    port: str = "5432"
+
+    @property
+    def database_url(self) -> str:
+        return f"postgresql+asyncpg://{self.user}:{self.password}@{self.host}:{self.port}/{self.db}"
+
+    model_config = SettingsConfigDict(
+        env_file=".env", 
+        env_prefix="POSTGRES_", 
+        extra="ignore"
+    )
+
 @lru_cache
 def get_settings() -> LLMSettings:
     return LLMSettings()
+
+@lru_cache
+def get_db_settings() -> DatabaseSettings:
+    return DatabaseSettings()

@@ -6,7 +6,7 @@ _.python.venv = { path = ".venv", create = true }
 
 [tasks."db:up"]
 description = "Start the PostgreSQL service in the background"
-run = "docker compose up -d db"
+run = "docker compose up -d"
 
 [tasks."db:down"]
 description = "Stop and remove the Docker containers"
