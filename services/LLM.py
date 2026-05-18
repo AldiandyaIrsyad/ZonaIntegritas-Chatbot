@@ -60,7 +60,8 @@ class LLM:
             strategy="last",
             token_counter=self._count_tokens,
             include_system=True, 
-            allow_partial=False  
+            allow_partial=True,
+            # start_on="human" # Optional: Ensure we always start with the most recent user message if possible
         )
 
         final_payload = []
@@ -74,12 +75,18 @@ class LLM:
                 
         return final_payload
 
-    async def input(self, raw_history: List[Dict[str, str]], max_tokens: int = 4000) -> AsyncGenerator[str, None]:
+    async def input(
+            self, 
+            raw_history: List[Dict[str, str]], 
+            max_tokens: int = 4000,
+            max_completion_tokens: int = 1000
+            ) -> AsyncGenerator[str, None]:
         context_payload = self._prune_context(raw_history, max_tokens)
         
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=context_payload,
+            max_completion_tokens=max_completion_tokens,
             stream=True
         )
         
