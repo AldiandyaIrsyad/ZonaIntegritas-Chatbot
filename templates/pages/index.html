@@ -18,7 +18,7 @@ block layout %} {% include "components/sidebar.html" %}
   <!-- Messages -->
   <div
     id="chat-messages"
-    class="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 scroll-smooth pb-40"
+    class="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 scroll-smooth"
   >
     <template x-if="messages.length === 0">
       {% include "components/empty_state.html" %}
@@ -64,10 +64,31 @@ block layout %} {% include "components/sidebar.html" %}
         <div
           :class="['max-w-[calc(100%-3rem)] flex-1', msg.role === 'user' ? 'flex flex-col items-end' : '']"
         >
-          <div
-            :class="['whitespace-pre-wrap break-words leading-relaxed', msg.role === 'user' ? 'bg-slate-200 dark:bg-[#2f2f2f] text-slate-900 dark:text-gray-100 px-4 py-2.5 rounded-2xl rounded-tr-md' : 'text-slate-900 dark:text-gray-200 py-1.5']"
-            x-text="msg.content"
-          ></div>
+          <!-- ATTACHMENTS -->
+          <template x-if="msg.attachments && msg.attachments.length > 0">
+            <div class="flex flex-col gap-2 mb-2 w-full max-w-sm">
+              <template x-for="att in msg.attachments">
+                <a :href="att.url" target="_blank" class="flex items-center gap-3 p-2.5 rounded-xl border border-slate-200 dark:border-darkborder bg-white dark:bg-darkbg hover:bg-slate-50 dark:hover:bg-[#2a2a2a] transition-colors shadow-sm cursor-pointer no-underline group">
+                  <div class="p-2 rounded-lg bg-red-50 dark:bg-red-900/20 text-red-500">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                      <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clip-rule="evenodd" />
+                    </svg>
+                  </div>
+                  <div class="flex flex-col overflow-hidden">
+                    <span class="text-sm font-medium text-slate-700 dark:text-gray-200 truncate" x-text="att.name"></span>
+                    <span class="text-xs text-slate-400 dark:text-gray-500 group-hover:text-brand transition-colors">Download PDF</span>
+                  </div>
+                </a>
+              </template>
+            </div>
+          </template>
+
+          <template x-if="msg.content">
+            <div
+              :class="['whitespace-pre-wrap break-words leading-relaxed', msg.role === 'user' ? 'bg-slate-200 dark:bg-[#2f2f2f] text-slate-900 dark:text-gray-100 px-4 py-2.5 rounded-2xl rounded-tr-md' : 'text-slate-900 dark:text-gray-200 py-1.5']"
+              x-text="msg.content"
+            ></div>
+          </template>
         </div>
       </div>
     </template>
@@ -84,6 +105,7 @@ block layout %} {% include "components/sidebar.html" %}
         new URLSearchParams(window.location.search).get("session_id") || null,
       title: "New Chat",
       input: "",
+      files: [],
       isSubmitting: false,
 
       init() {
@@ -128,9 +150,30 @@ block layout %} {% include "components/sidebar.html" %}
         e.target.style.height = e.target.scrollHeight + "px";
       },
 
+      handleFileSelect(e) {
+        const selectedFiles = Array.from(e.target.files);
+        for (const file of selectedFiles) {
+          // Add to files array with a preview URL if it's an image
+          this.files.push({
+            file: file,
+            preview: file.type.startsWith('image/') ? URL.createObjectURL(file) : null
+          });
+        }
+        e.target.value = ''; // Reset input
+      },
+
+      removeFile(index) {
+        const file = this.files[index];
+        if (file.preview) {
+          URL.revokeObjectURL(file.preview);
+        }
+        this.files.splice(index, 1);
+      },
+
       async submitMessage() {
         const msg = this.input.trim();
-        if (!msg || this.isSubmitting) return;
+        if (!msg && this.files.length === 0) return;
+        if (this.isSubmitting) return;
 
         if (!this.currentSessionId) {
           try {
@@ -146,22 +189,36 @@ block layout %} {% include "components/sidebar.html" %}
           }
         }
 
+        const currentFiles = [...this.files];
         this.input = "";
+        this.files = [];
         const textarea = document.getElementById("message-input");
         if (textarea) textarea.style.height = "auto";
         this.isSubmitting = true;
 
-        this.messages.push({ role: "user", content: msg });
+        const newAttachments = [];
+        for (const f of currentFiles) {
+            if (f.file.type.includes('pdf')) {
+                newAttachments.push({ name: f.file.name, url: '#' });
+            }
+        }
+
+        this.messages.push({ role: "user", content: msg, attachments: newAttachments });
         const llmIndex = this.messages.push({ role: "llm", content: "" }) - 1;
         this.scrollToBottom();
 
         try {
+          const formData = new FormData();
+          formData.append("message", msg);
+          for (const f of currentFiles) {
+             formData.append("files", f.file);
+          }
+
           const response = await fetch(
             `/api/sessions/${this.currentSessionId}/stream`,
             {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ message: msg }),
+              body: formData,
             },
           );
 
