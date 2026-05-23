@@ -1,16 +1,10 @@
-import asyncio
 import uuid
-import os
-import aiofiles
-from fastapi import UploadFile
 from fastapi.responses import StreamingResponse
-from backend.repository import ChatRepository, PDFRepository
-
-# Services
-import services 
+from src.chat.repository import ChatRepository
+from src.infra.llm_provider import LLM
 
 class ChatService:
-    def __init__(self, repository: ChatRepository, llm: services.LLM):
+    def __init__(self, repository: ChatRepository, llm: LLM):
         self.repository = repository
         self.llm = llm
 
@@ -44,7 +38,6 @@ class ChatService:
             
         await self.repository.create_message(session_id, "user", message_text)
 
-        # Reconstruct standard history dictionary
         raw_history = [{"role": m.role, "content": m.content} for m in session.messages]
         raw_history.append({"role": "user", "content": message_text})
 
@@ -60,33 +53,3 @@ class ChatService:
 
     async def delete_session(self, session_id: str):
         return await self.repository.delete_session(session_id)
-
-class KnowledgeBase:
-    def __init__(self, repository: PDFRepository):
-        self.repository = repository
-        self.upload_dir = "upload"
-        os.makedirs(self.upload_dir, exist_ok=True)
-        
-    async def list_pdfs(self):
-        pdfs = await self.repository.get_all_pdfs()
-        return [{"id": p.id, "title": p.title, "description": p.description, "pdf_path": p.pdf_path, "active": p.active} for p in pdfs]
-        
-    async def upload_pdf(self, title: str, description: str, file: UploadFile):
-        file_extension = os.path.splitext(file.filename)[1]
-        unique_filename = f"{uuid.uuid4()}{file_extension}"
-        file_path = os.path.join(self.upload_dir, unique_filename)
-        
-        async with aiofiles.open(file_path, 'wb') as out_file:
-            content = await file.read()
-            await out_file.write(content)
-            
-        return await self.repository.create_pdf(title, description, file_path)
-        
-    async def update_pdf_status(self, pdf_id: str, active: bool):
-        return await self.repository.update_pdf_active_status(pdf_id, active)
-        
-    async def delete_pdf(self, pdf_id: str):
-        pdf = await self.repository.get_pdf_by_id(pdf_id)
-        if pdf and pdf.pdf_path and os.path.exists(pdf.pdf_path):
-            os.remove(pdf.pdf_path)
-        return await self.repository.delete_pdf(pdf_id)

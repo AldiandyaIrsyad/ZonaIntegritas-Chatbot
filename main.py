@@ -2,7 +2,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import uvicorn
 
-from backend import engine, Base, router
+from src.core.database import engine, Base
+from src.chat import chat_router
+from src.knowledge_base import kb_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -27,7 +29,9 @@ app = FastAPI(
     },
 )
 
-app.include_router(router)
+app.include_router(chat_router)
+app.include_router(kb_router)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Passing the app as an import string ("main:app") enables hot-reloading
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
