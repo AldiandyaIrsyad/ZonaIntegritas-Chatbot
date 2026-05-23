@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock, patch
 from typing import AsyncGenerator
+from pydantic import SecretStr
 
 from src.infra.llm_provider import LLM 
 
@@ -33,7 +34,7 @@ async def test_api_backend_initialization_and_stream():
     Validates OpenRouter backend routing, header injection, and stream parsing.
     Mocked to prevent external network calls and API key exposure.
     """
-    with patch("LLMs.LLM.AsyncOpenAI") as MockOpenAI:
+    with patch("src.infra.llm_provider.AsyncOpenAI") as MockOpenAI:
         mock_client_instance = MockOpenAI.return_value
         mock_client_instance.chat.completions.create = AsyncMock()
         mock_client_instance.chat.completions.create.return_value = mock_stream_generator()
@@ -41,9 +42,11 @@ async def test_api_backend_initialization_and_stream():
 
         # Initialize the API backend
         llm = LLM(
-            backend="api", 
             model="openai/gpt-3.5-turbo", 
-            api_key="test_dummy_key"
+            max_tokens=4000,
+            max_completion_tokens=1000,
+            api_key=SecretStr("test_dummy_key"),
+            base_url="https://openrouter.ai/api/v1"
         )
 
         # Verify correct initialization parameters
@@ -58,7 +61,8 @@ async def test_api_backend_initialization_and_stream():
 
         # Execute stream and collect chunks
         result_text = ""
-        async for chunk in llm.input("Test prompt"):
+        raw_history = [{"role": "user", "content": "Test prompt"}]
+        async for chunk in llm.input(raw_history):
             result_text += chunk
 
         # Assert generation logic
@@ -66,6 +70,7 @@ async def test_api_backend_initialization_and_stream():
         mock_client_instance.chat.completions.create.assert_called_once_with(
             model="openai/gpt-3.5-turbo",
             messages=[{"role": "user", "content": "Test prompt"}],
+            max_tokens=1000,
             stream=True
         )
 
@@ -78,13 +83,19 @@ async def test_local_backend_live_integration():
     target_model = "qwen2.5:0.5b" 
     
     try:
-        llm = LLM(backend="local", model=target_model)
+        llm = LLM(
+            model=target_model, 
+            max_tokens=4000, 
+            max_completion_tokens=1000, 
+            base_url="http://localhost:11434/v1"
+        )
         
         chunks_received = 0
         final_output = ""
         
         # Test stream connectivity
-        async for chunk in llm.input("Acknowledge this message with a single word."):
+        raw_history = [{"role": "user", "content": "Acknowledge this message with a single word."}]
+        async for chunk in llm.input(raw_history):
             assert isinstance(chunk, str)
             final_output += chunk
             chunks_received += 1
@@ -98,8 +109,3 @@ async def test_local_backend_live_integration():
 
     except Exception as e:
         pytest.fail(f"Local backend integration failed. Ensure Ollama is running and '{target_model}' is pulled. Error: {e}")
-
-def test_invalid_backend_rejection():
-    """Validates the constructor guard clauses."""
-    with pytest.raises(ValueError, match="Invalid backend specified"):
-        LLM(backend="unsupported", model="test-model")
