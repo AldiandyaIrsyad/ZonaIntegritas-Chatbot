@@ -11,7 +11,7 @@ def mock_chat_service():
     mock_service = AsyncMock()
     app.dependency_overrides[get_chat_service] = lambda: mock_service
     yield mock_service
-    app.dependency_overrides.clear()
+    app.dependency_overrides.pop(get_chat_service, None)
 
 def test_home_page():
     response = client.get("/")

@@ -11,7 +11,7 @@ def mock_kb_service():
     mock_service = AsyncMock()
     app.dependency_overrides[get_pdf_service] = lambda: mock_service
     yield mock_service
-    app.dependency_overrides.clear()
+    app.dependency_overrides.pop(get_pdf_service, None)
 
 def test_admin_page():
     response = client.get("/admin/")

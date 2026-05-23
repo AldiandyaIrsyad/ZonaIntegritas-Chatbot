@@ -84,7 +84,8 @@ async def test_process_chat_message(chat_service, mock_repository, mock_llm):
     assert "".join(chunks) == "Hello World"
     
     # Verify repository calls
-    mock_repository.update_session_title.assert_called_once()
+    mock_repository.update_session_title.assert_called_once_with(mock_session, "Test message")
+    mock_llm.input.assert_called_once_with([{"role": "user", "content": "Test message"}])
     mock_repository.create_message.assert_any_call("123", "user", "Test message")
     mock_repository.create_message.assert_any_call("123", "assistant", "Hello World")
 
