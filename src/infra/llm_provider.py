@@ -90,7 +90,7 @@ class LLM:
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=context_payload,
-            max_completion_tokens=self.max_completion_tokens,
+            max_tokens=self.max_completion_tokens,
             stream=True
         )
         
@@ -98,15 +98,20 @@ class LLM:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
 
+_llm_client_instance = None
+
 def get_llm_client(settings: LLMSettings) -> LLM:
     """
     Factory function for Dependency Injection.
     Isolates the instantiation logic from the consuming vertical slices.
     """
-    return LLM(
-        model=settings.model,
-        max_tokens=settings.max_tokens,
-        max_completion_tokens=settings.max_completion_tokens,
-        base_url=settings.base_url,
-        api_key=settings.api_key
-    )
+    global _llm_client_instance
+    if _llm_client_instance is None:
+        _llm_client_instance = LLM(
+            model=settings.model,
+            max_tokens=settings.max_tokens,
+            max_completion_tokens=settings.max_completion_tokens,
+            base_url=settings.base_url,
+            api_key=settings.api_key
+        )
+    return _llm_client_instance
