@@ -76,7 +76,7 @@ block layout %} {% include "components/sidebar.html" %}
           <template x-if="msg.role === 'assistant'">
             <div
               class="prose prose-slate dark:prose-invert prose-p:leading-relaxed prose-pre:bg-slate-800 dark:prose-pre:bg-slate-900 max-w-none text-slate-900 dark:text-gray-200 py-1.5 marker:text-slate-400"
-              x-html="DOMPurify.sanitize(marked.parse(msg.content))"
+              x-html="DOMPurify.sanitize(marked.parse(msg.content, { breaks: true }))"
             ></div>
           </template>
         </div>
@@ -163,7 +163,8 @@ block layout %} {% include "components/sidebar.html" %}
         this.isSubmitting = true;
 
         this.messages.push({ role: "user", content: msg });
-        const llmIndex = this.messages.push({ role: "assistant", content: "" }) - 1;
+        const llmIndex =
+          this.messages.push({ role: "assistant", content: "" }) - 1;
         this.scrollToBottom();
 
         try {
