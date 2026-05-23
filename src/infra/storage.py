@@ -27,7 +27,6 @@ class LocalStorageProvider(StorageProvider):
     def __init__(self):
         settings = get_storage_settings()
         self.upload_dir = settings.upload_dir
-        # Ensure the directory exists
         os.makedirs(self.upload_dir, exist_ok=True)
 
     async def save_file(self, file: UploadFile, file_extension: str) -> str:
@@ -44,14 +43,16 @@ class LocalStorageProvider(StorageProvider):
                 while chunk := await file.read(1024 * 1024):
                     await out_file.write(chunk)
             
-            os.replace(temp_path, final_path)
+            await asyncio.to_thread(os.replace, temp_path, final_path)
             
             return final_path
             
         except Exception as e:
-            # Clean up the temp file if something went wrong during write
             if os.path.exists(temp_path):
-                os.remove(temp_path)
+                try: 
+                    await asyncio.to_thread(os.remove, temp_path)
+                except Exception:
+                    pass
             raise e
 
     async def delete_file(self, file_path: str) -> bool:
