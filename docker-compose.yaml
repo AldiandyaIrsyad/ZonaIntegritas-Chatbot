@@ -24,6 +24,7 @@ services:
   ollama-provisioner:
     image: alpine:latest
     container_name: ollama_provisioner
+    profiles: ["provisioner"]
     depends_on:
       - ollama
     entrypoint: [ "/bin/sh", "-c" ]
