@@ -1,18 +1,13 @@
 import os
-import uuid
-import aiofiles
 from fastapi import UploadFile
 from src.knowledge_base.repository import PDFRepository
-from starlette.concurrency import run_in_threadpool
-
-
+from src.infra.storage import StorageProvider
 
 
 class KnowledgeBase:
-    def __init__(self, repository: PDFRepository):
+    def __init__(self, repository: PDFRepository, storage: StorageProvider):
         self.repository = repository
-        self.upload_dir = "upload"
-        os.makedirs(self.upload_dir, exist_ok=True)
+        self.storage = storage
         
     async def list_pdfs(self):
         pdfs = await self.repository.get_all_pdfs()
@@ -22,12 +17,8 @@ class KnowledgeBase:
         file_extension = os.path.splitext(file.filename or "")[1].lower()
         if file.content_type != "application/pdf" or file_extension != ".pdf":
             raise ValueError("Only PDF files are allowed")
-        unique_filename = f"{uuid.uuid4()}{file_extension}"
-        file_path = os.path.join(self.upload_dir, unique_filename)
-        
-        async with aiofiles.open(file_path, 'wb') as out_file:
-            while chunk := await file.read(1024 * 1024):
-                await out_file.write(chunk)
+            
+        file_path = await self.storage.save_file(file, file_extension)
             
         return await self.repository.create_pdf(title, description, file_path)
         
@@ -37,8 +28,5 @@ class KnowledgeBase:
     async def delete_pdf(self, pdf_id: str):
         pdf = await self.repository.get_pdf_by_id(pdf_id)
         if pdf and pdf.pdf_path:
-            try:
-                await run_in_threadpool(os.remove, pdf.pdf_path)
-            except FileNotFoundError:
-                pass
+            await self.storage.delete_file(pdf.pdf_path)
         return await self.repository.delete_pdf(pdf_id)

@@ -33,6 +33,15 @@ class DatabaseSettings(BaseSettings):
         extra="ignore"
     )
 
+class StorageSettings(BaseSettings):
+    upload_dir: str = "user_upload"
+
+    model_config = SettingsConfigDict(
+        env_file=".env", 
+        env_prefix="STORAGE_", 
+        extra="ignore"
+    )
+
 @lru_cache
 def get_settings() -> LLMSettings:
     return LLMSettings()
@@ -40,3 +49,7 @@ def get_settings() -> LLMSettings:
 @lru_cache
 def get_db_settings() -> DatabaseSettings:
     return DatabaseSettings()
+
+@lru_cache
+def get_storage_settings() -> StorageSettings:
+    return StorageSettings()
