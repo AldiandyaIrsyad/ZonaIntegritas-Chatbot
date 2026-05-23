@@ -5,3 +5,5 @@
 .pytest_cache/
 upload/*.pdf
 docs/
+notes.md
+user_upload/

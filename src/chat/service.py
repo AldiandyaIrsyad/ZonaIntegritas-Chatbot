@@ -43,7 +43,7 @@ class ChatService:
 
         async def generate():
             response_content = ""
-            async for chunk in self.llm.input(raw_history, max_tokens=4000):
+            async for chunk in self.llm.input(raw_history):
                 response_content += chunk
                 yield chunk
 

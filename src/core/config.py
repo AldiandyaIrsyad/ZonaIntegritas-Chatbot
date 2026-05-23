@@ -7,6 +7,8 @@ class LLMSettings(BaseSettings):
     use_local: bool = False
     base_url: str = "https://openrouter.ai/api/v1"
     model: str = "google/gemini-2.5-flash"
+    max_tokens: int = 4000
+    max_completion_tokens: int = 1000
 
     model_config = SettingsConfigDict(
         env_file=".env", 
