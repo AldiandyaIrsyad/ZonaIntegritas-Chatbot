@@ -15,7 +15,9 @@ class KnowledgeBase:
         return [{"id": p.id, "title": p.title, "description": p.description, "pdf_path": p.pdf_path, "active": p.active} for p in pdfs]
         
     async def upload_pdf(self, title: str, description: str, file: UploadFile):
-        file_extension = os.path.splitext(file.filename)[1]
+        file_extension = os.path.splitext(file.filename or "")[1].lower()
+        if file.content_type != "application/pdf" or file_extension != ".pdf":
+            raise ValueError("Only PDF files are allowed")
         unique_filename = f"{uuid.uuid4()}{file_extension}"
         file_path = os.path.join(self.upload_dir, unique_filename)
         
@@ -30,6 +32,8 @@ class KnowledgeBase:
         
     async def delete_pdf(self, pdf_id: str):
         pdf = await self.repository.get_pdf_by_id(pdf_id)
-        if pdf and pdf.pdf_path and os.path.exists(pdf.pdf_path):
-            os.remove(pdf.pdf_path)
+        if pdf and pdf.pdf_path:
+            from starlette.concurrency import run_in_threadpool
+            if await run_in_threadpool(os.path.exists, pdf.pdf_path):
+                await run_in_threadpool(os.remove, pdf.pdf_path)
         return await self.repository.delete_pdf(pdf_id)
