@@ -43,11 +43,13 @@ class ChatService:
 
         async def generate():
             response_content = ""
-            async for chunk in self.llm.input(raw_history):
-                response_content += chunk
-                yield chunk
-
-            await self.repository.create_message(session_id, "assistant", response_content)
+            try:
+                async for chunk in self.llm.input(raw_history):
+                    response_content += chunk
+                    yield chunk
+            finally:
+                if response_content:
+                    await self.repository.create_message(session_id, "assistant", response_content)
                 
         return StreamingResponse(generate(), media_type="text/plain")
 
