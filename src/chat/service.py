@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 from src.chat.repository import ChatRepository
 from src.llm.service import LLMService
 from src.rag.retrieval import RetrievalService, RetrievedContext
+import anyio
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,6 @@ class ChatService:
             finally:
                 if response_content.strip():
                     try:
-                        import anyio
                         # Use anyio.CancelScope(shield=True) instead of asyncio.shield
                         # because FastAPI/Starlette manages concurrency via AnyIO.
                         # This guarantees the block executes even if the parent request is cancelled.

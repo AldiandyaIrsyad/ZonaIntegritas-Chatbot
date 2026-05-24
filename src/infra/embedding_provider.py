@@ -93,7 +93,7 @@ class EmbeddingProvider:
                 data_obj = embeddings_data[j]
                 dense_vec = data_obj.get("embedding", [])
                 
-                sparse_dict = data_obj.get("sparse_embedding", {})
+                sparse_dict = data_obj.get("sparse_embedding") or {}
                 sparse_indices = []
                 sparse_values = []
                 for k, v in sparse_dict.items():
