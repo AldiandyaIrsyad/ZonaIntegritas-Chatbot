@@ -1,12 +1,12 @@
 import uuid
 from fastapi.responses import StreamingResponse
 from src.chat.repository import ChatRepository
-from src.infra.llm_provider import LLM
+from src.llm.service import LLMService
 
 class ChatService:
-    def __init__(self, repository: ChatRepository, llm: LLM):
+    def __init__(self, repository: ChatRepository, llm_service: LLMService):
         self.repository = repository
-        self.llm = llm
+        self.llm_service = llm_service
 
     async def list_sessions(self):
         sessions = await self.repository.get_all_sessions()
@@ -45,7 +45,7 @@ class ChatService:
             response_content = ""
             stream_completed = False
             try:
-                async for chunk in self.llm.input(raw_history):
+                async for chunk in self.llm_service.stream_response(raw_history):
                     response_content += chunk
                     yield chunk
 
