@@ -66,36 +66,45 @@ class EmbeddingProvider:
         for i in range(0, len(texts), self.batch_size):
             batch = texts[i : i + self.batch_size]
 
-            # Request dense embeddings
-            dense_response = await self._client.post(
+            # Request dense and sparse embeddings
+            response = await self._client.post(
                 "/embeddings",
                 json={
                     "model": self.model,
                     "input": batch,
+                    "return_sparse": True,
                 },
             )
-            dense_response.raise_for_status()
-            dense_data = dense_response.json()
+            response.raise_for_status()
+            response_data = response.json()
 
-            # Parse dense embeddings — sorted by index for order guarantee
-            dense_embeddings = sorted(
-                dense_data.get("data", []), key=lambda x: x["index"]
+            # Parse dense and sparse embeddings — sorted by index for order guarantee
+            embeddings_data = sorted(
+                response_data.get("data", []), key=lambda x: x["index"]
             )
 
-            if len(dense_embeddings) != len(batch):
+            if len(embeddings_data) != len(batch):
                 raise ValueError(
                     f"Embedding response size mismatch: expected {len(batch)}, "
-                    f"got {len(dense_embeddings)}"
+                    f"got {len(embeddings_data)}"
                 )
 
             for j in range(len(batch)):
-                dense_vec = dense_embeddings[j]["embedding"]
+                data_obj = embeddings_data[j]
+                dense_vec = data_obj.get("embedding", [])
+                
+                sparse_dict = data_obj.get("sparse_embedding", {})
+                sparse_indices = []
+                sparse_values = []
+                for k, v in sparse_dict.items():
+                    sparse_indices.append(int(k))
+                    sparse_values.append(float(v))
 
                 all_results.append(
                     EmbeddingResult(
                         dense=dense_vec,
-                        sparse_indices=[],
-                        sparse_values=[],
+                        sparse_indices=sparse_indices,
+                        sparse_values=sparse_values,
                     )
                 )
 

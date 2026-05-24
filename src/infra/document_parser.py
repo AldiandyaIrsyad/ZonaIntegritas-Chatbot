@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import List
 
 import httpx
+import aiofiles
 
 logger = logging.getLogger(__name__)
 

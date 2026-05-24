@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, Depends, HTTPException, UploadFile, Form
+from fastapi import APIRouter, Request, Depends, HTTPException, UploadFile, Form, BackgroundTasks
 from starlette.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -47,6 +47,7 @@ async def get_pdfs(service: KnowledgeBase = Depends(get_pdf_service)):
 
 @router.post("/api/admin/pdfs", status_code=202)
 async def upload_pdf(
+    background_tasks: BackgroundTasks,
     title: str = Form(...), 
     description: str = Form(""), 
     file: UploadFile = Form(...), 
@@ -67,7 +68,7 @@ async def upload_pdf(
     Returns:
         JSONResponse: 202 Accepted with PDF metadata and ingestion status.
     """
-    pdf = await service.upload_pdf(title, description, file)
+    pdf = await service.upload_pdf(title, description, file, background_tasks)
     return JSONResponse(
         status_code=202,
         content={
