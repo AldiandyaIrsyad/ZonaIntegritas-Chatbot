@@ -2,15 +2,30 @@ import logging
 import os
 from typing import Optional
 
-from fastapi import UploadFile
-import asyncio
-
-
+from fastapi import UploadFile, BackgroundTasks
+from src.core.database import async_session
+from src.rag.dependency import get_document_parser, get_embedding_provider, get_vector_store
 from src.infra.vector_store import QdrantStore
 from src.knowledge_base.repository import PDFRepository
 from src.infra.storage import StorageProvider
 from src.rag.ingestion import IngestionService
+
 logger = logging.getLogger(__name__)
+
+async def run_ingestion_background(pdf_id: str):
+    """Run ingestion in the background with an independent DB session."""
+    async with async_session() as db:
+        parser = get_document_parser()
+        embedder = get_embedding_provider()
+        vector_store = get_vector_store()
+        
+        service = IngestionService(
+            db=db,
+            document_parser=parser,
+            embedding_provider=embedder,
+            vector_store=vector_store
+        )
+        await service.ingest_document(pdf_id)
 
 
 class KnowledgeBase:
@@ -40,7 +55,7 @@ class KnowledgeBase:
             for p in pdfs
         ]
         
-    async def upload_pdf(self, title: str, description: str, file: UploadFile):
+    async def upload_pdf(self, title: str, description: str, file: UploadFile, background_tasks: BackgroundTasks):
         file_extension = os.path.splitext(file.filename or "")[1].lower()
         if file.content_type != "application/pdf" or file_extension != ".pdf":
             raise ValueError("Only PDF files are allowed")
@@ -53,10 +68,10 @@ class KnowledgeBase:
         # TODO(security): Consider scanning uploaded PDFs for malware
         # before ingestion. The unstructured-api parser processes the PDF
         # content, which could be a vector for exploitation.
-        asyncio.create_task(self.ingestion_service.ingest_document(pdf.id))
+        background_tasks.add_task(run_ingestion_background, pdf.id)
 
         return pdf
-        
+
     async def update_pdf_status(self, pdf_id: str, active: bool):
         """Toggle a document's active state in both Postgres and Qdrant.
 

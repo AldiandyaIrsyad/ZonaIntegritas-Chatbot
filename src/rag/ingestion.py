@@ -117,7 +117,6 @@ class IngestionService:
                 for pc in parent_chunk_data
             ]
             await self.rag_repo.save_parent_chunks(parent_chunk_models)
-            await self.db.commit()
 
             # Step 4: Split into child chunks
             all_children: list[ChildChunkData] = []

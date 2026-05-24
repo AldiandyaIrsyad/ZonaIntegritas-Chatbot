@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 from src.chat.repository import ChatRepository
 from src.llm.service import LLMService
 from src.rag.retrieval import RetrievalService, RetrievedContext
+import anyio
 
 logger = logging.getLogger(__name__)
 
@@ -67,16 +68,20 @@ class ChatService:
 
         async def generate():
             response_content = ""
-            stream_completed = False
             try:
                 async for chunk in self.llm_service.stream_response(raw_history):
                     response_content += chunk
                     yield chunk
-
-                stream_completed = True
             finally:
-                if stream_completed and response_content.strip():
-                    await self.repository.create_message(session_id, "assistant", response_content)
+                if response_content.strip():
+                    try:
+                        # Use anyio.CancelScope(shield=True) instead of asyncio.shield
+                        # because FastAPI/Starlette manages concurrency via AnyIO.
+                        # This guarantees the block executes even if the parent request is cancelled.
+                        with anyio.CancelScope(shield=True):
+                            await self.repository.create_message(session_id, "assistant", response_content)
+                    except Exception as e:
+                        logger.error(f"Failed to save partial response: {e}")
                 
         return StreamingResponse(generate(), media_type="text/plain")
 

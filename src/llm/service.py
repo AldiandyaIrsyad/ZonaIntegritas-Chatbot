@@ -1,4 +1,5 @@
 import tiktoken
+import copy
 from typing import AsyncGenerator, List, Dict
 
 from src.infra.llm_connection import LLMConnection
@@ -35,11 +36,44 @@ class LLMService:
         return total
 
     def _prune_context(self, raw_history: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        system_msgs = [m for m in raw_history if m["role"] == "system"]
+        system_msgs = [copy.deepcopy(m) for m in raw_history if m["role"] == "system"]
         chat_msgs = [m for m in raw_history if m["role"] != "system"]
+        
+        # Reserve minimum tokens for chat (200) + completion + safety buffer (50)
+        max_system_tokens = self.max_tokens - self.max_completion_tokens - 250
+        
+        if max_system_tokens <= 0:
+            raise ValueError("max_tokens is too small to accommodate completion and basic context.")
         
         system_tokens = self._count_tokens(system_msgs)
         
+        # Safely truncate system messages if they exceed the allowed limit
+        while system_tokens > max_system_tokens and system_msgs:
+            # Find the largest system message to truncate
+            largest_idx = -1
+            max_len = -1
+            for i, msg in enumerate(system_msgs):
+                content_len = len(str(msg.get("content", "")))
+                if content_len > max_len:
+                    max_len = content_len
+                    largest_idx = i
+                    
+            if largest_idx == -1 or max_len == 0:
+                break
+                
+            content = str(system_msgs[largest_idx].get("content", ""))
+            tokens = self.encoder.encode(content)
+            
+            excess = system_tokens - max_system_tokens
+            truncate_by = excess + 5  # +5 to handle unicode token boundaries
+            
+            if len(tokens) > truncate_by:
+                system_msgs[largest_idx]["content"] = self.encoder.decode(tokens[:-truncate_by])
+            else:
+                system_msgs[largest_idx]["content"] = ""
+                
+            system_tokens = self._count_tokens(system_msgs)
+
         available_tokens = (
             self.max_tokens 
             - system_tokens 
@@ -48,7 +82,7 @@ class LLMService:
         )
         
         if available_tokens <= 0:
-            raise ValueError("System prompt and max_completion_tokens exceed total max_tokens.")
+            available_tokens = 0
         
         retained_chat_msgs = []
         current_tokens = 0
