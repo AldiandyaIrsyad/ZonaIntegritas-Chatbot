@@ -10,19 +10,15 @@ class LLMConnection:
     def __init__(
         self, 
         base_url: Optional[str] = None,
-        api_key: Optional[SecretStr] = None, 
+        api_key: Optional[SecretStr] = None,
+        default_headers: Optional[dict] = None,
     ):
         resolved_key = api_key.get_secret_value() if api_key else "ollama-dummy-token"
         
-        headers = {
-            "HTTP-Referer": "http://localhost:3000",
-            "X-Title": "Local-Dev-App"
-        }
-
         self.client = AsyncOpenAI(
             base_url=base_url,
             api_key=resolved_key,
-            default_headers=headers
+            default_headers=default_headers
         )
 
 

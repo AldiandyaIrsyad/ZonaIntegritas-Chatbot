@@ -9,6 +9,10 @@ class LLMSettings(BaseSettings):
     model: str = "google/gemini-2.5-flash"
     max_tokens: int = 4000
     max_completion_tokens: int = 1000
+    default_headers: dict = {
+        "HTTP-Referer": "http://localhost:3000",
+        "X-Title": "Local-Dev-App"
+    }
 
     model_config = SettingsConfigDict(
         env_file=".env", 
