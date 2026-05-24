@@ -7,8 +7,8 @@ class LLMSettings(BaseSettings):
     use_local: bool = False
     base_url: str = "https://openrouter.ai/api/v1"
     model: str = "google/gemini-2.5-flash"
-    max_tokens: int = 4000
-    max_completion_tokens: int = 1000
+    max_tokens: int = 24000
+    max_completion_tokens: int = 12000
     default_headers: dict = {
         "HTTP-Referer": "http://localhost:3000",
         "X-Title": "Local-Dev-App"
@@ -46,6 +46,37 @@ class StorageSettings(BaseSettings):
         extra="ignore"
     )
 
+class QdrantSettings(BaseSettings):
+    host: str = "localhost"
+    port: int = 6333
+    collection_name: str = "knowledge_base"
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="QDRANT_",
+        extra="ignore"
+    )
+
+class InfinitySettings(BaseSettings):
+    base_url: str = "http://localhost:7997"
+    embedding_model: str = "BAAI/bge-m3"
+    reranker_model: str = "BAAI/bge-reranker-v2-m3"
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="INFINITY_",
+        extra="ignore"
+    )
+
+class UnstructuredSettings(BaseSettings):
+    base_url: str = "http://localhost:8001"
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="UNSTRUCTURED_",
+        extra="ignore"
+    )
+
 @lru_cache
 def get_settings() -> LLMSettings:
     return LLMSettings()
@@ -57,3 +88,15 @@ def get_db_settings() -> DatabaseSettings:
 @lru_cache
 def get_storage_settings() -> StorageSettings:
     return StorageSettings()
+
+@lru_cache
+def get_qdrant_settings() -> QdrantSettings:
+    return QdrantSettings()
+
+@lru_cache
+def get_infinity_settings() -> InfinitySettings:
+    return InfinitySettings()
+
+@lru_cache
+def get_unstructured_settings() -> UnstructuredSettings:
+    return UnstructuredSettings()
