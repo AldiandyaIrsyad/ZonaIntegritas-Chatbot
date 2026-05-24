@@ -58,7 +58,18 @@
           <div class="bg-white dark:bg-darksidebar p-4 rounded-xl border border-slate-200 dark:border-darkborder flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
             <div class="flex-1">
               <h3 class="font-medium text-slate-900 dark:text-white" x-text="pdf.title"></h3>
-              <p class="text-sm text-slate-500 dark:text-gray-400 mt-1" x-text="pdf.description || 'No description provided.'"></p>
+              <div class="flex items-center gap-2 mt-1">
+                <p class="text-sm text-slate-500 dark:text-gray-400" x-text="pdf.description || 'No description provided.'"></p>
+                <span 
+                  class="text-xs px-2 py-0.5 rounded-full font-medium capitalize"
+                  :class="{
+                    'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400': pdf.ingestion_status === 'pending' || pdf.ingestion_status === 'processing',
+                    'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400': pdf.ingestion_status === 'completed',
+                    'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400': pdf.ingestion_status === 'failed'
+                  }"
+                  x-text="pdf.ingestion_status"
+                ></span>
+              </div>
             </div>
             
             <div class="flex items-center gap-3 w-full sm:w-auto mt-3 sm:mt-0">
@@ -95,9 +106,40 @@
       file: null,
       uploading: false,
       uploadStatus: { show: false, message: '', isError: false },
+      pollInterval: null,
       
       async init() {
         await this.loadPDFs();
+        this.startPolling();
+      },
+      
+      startPolling() {
+        if (this.pollInterval) clearInterval(this.pollInterval);
+        this.pollInterval = setInterval(() => {
+          if (this.pdfs.some(p => p.ingestion_status === 'pending' || p.ingestion_status === 'processing')) {
+            this.pollStatus();
+          }
+        }, 3000);
+      },
+      
+      async pollStatus() {
+        try {
+          const res = await fetch('/api/admin/pdfs');
+          if (res.ok) {
+            const data = await res.json();
+            data.forEach(newPdf => {
+              const existing = this.pdfs.find(p => p.id === newPdf.id);
+              if (existing) {
+                existing.ingestion_status = newPdf.ingestion_status;
+                existing.active = newPdf.active;
+              } else {
+                this.pdfs.push(newPdf);
+              }
+            });
+          }
+        } catch (e) {
+          console.error("Failed to poll status", e);
+        }
       },
       
       async loadPDFs() {
