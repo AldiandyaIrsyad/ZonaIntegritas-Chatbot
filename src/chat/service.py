@@ -1,12 +1,26 @@
+import logging
 import uuid
+from typing import List, Optional
+
 from fastapi.responses import StreamingResponse
+
 from src.chat.repository import ChatRepository
 from src.llm.service import LLMService
+from src.rag.retrieval import RetrievalService, RetrievedContext
+
+logger = logging.getLogger(__name__)
+
 
 class ChatService:
-    def __init__(self, repository: ChatRepository, llm_service: LLMService):
+    def __init__(
+        self,
+        repository: ChatRepository,
+        llm_service: LLMService,
+        retrieval_service: RetrievalService,
+    ):
         self.repository = repository
         self.llm_service = llm_service
+        self.retrieval_service = retrieval_service
 
     async def list_sessions(self):
         sessions = await self.repository.get_all_sessions()
@@ -39,6 +53,16 @@ class ChatService:
         await self.repository.create_message(session_id, "user", message_text)
 
         raw_history = [{"role": m.role, "content": m.content} for m in session.messages]
+
+        # --- RAG Context Injection ---
+        # Retrieve relevant context from the knowledge base before
+        # sending the conversation to the LLM.
+        contexts = await self._retrieve_rag_context(message_text)
+        if contexts:
+            context_prompt = self._build_context_prompt(contexts)
+            # Insert as the first system message so it's always in context
+            raw_history.insert(0, {"role": "system", "content": context_prompt})
+
         raw_history.append({"role": "user", "content": message_text})
 
         async def generate():
@@ -58,3 +82,40 @@ class ChatService:
 
     async def delete_session(self, session_id: str):
         return await self.repository.delete_session(session_id)
+
+    async def _retrieve_rag_context(
+        self, query: str
+    ) -> List[RetrievedContext]:
+        """Attempt to retrieve RAG context; return empty list on failure.
+
+        RAG failures should not break the chat — the LLM can still
+        respond without knowledge base context.
+        """
+        try:
+            return await self.retrieval_service.retrieve_context(query)
+        except Exception as e:
+            logger.warning(
+                "RAG retrieval failed, proceeding without context: %s",
+                str(e),
+            )
+            return []
+
+    @staticmethod
+    def _build_context_prompt(contexts: List[RetrievedContext]) -> str:
+        """Format retrieved contexts as a system prompt for the LLM.
+
+        Each context block is attributed to its source document for
+        transparency and traceability in the LLM's response.
+        """
+        parts = [
+            "You have access to the following reference documents. "
+            "Use them to answer the user's question accurately. "
+            "If the documents don't contain relevant information, "
+            "say so rather than making up an answer."
+        ]
+
+        for ctx in contexts:
+            parts.append(f"\n---\n[Source: {ctx.source_title}]\n{ctx.text}")
+
+        parts.append("\n---")
+        return "\n".join(parts)

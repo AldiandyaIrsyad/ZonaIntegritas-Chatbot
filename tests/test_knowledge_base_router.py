@@ -28,6 +28,7 @@ def test_upload_pdf(mock_kb_service):
     mock_pdf = MagicMock()
     mock_pdf.id = "1"
     mock_pdf.title = "Test PDF"
+    mock_pdf.ingestion_status = "pending"
     mock_kb_service.upload_pdf.return_value = mock_pdf
     
     files = {'file': ('test.pdf', b'dummy content', 'application/pdf')}
@@ -35,8 +36,13 @@ def test_upload_pdf(mock_kb_service):
     
     response = client.post("/api/admin/pdfs", data=data, files=files)
     
-    assert response.status_code == 200
-    assert response.json() == {"id": "1", "title": "Test PDF", "status": "success"}
+    assert response.status_code == 202
+    assert response.json() == {
+        "id": "1",
+        "title": "Test PDF",
+        "ingestion_status": "pending",
+        "status": "accepted"
+    }
 
 def test_update_pdf_status(mock_kb_service):
     mock_pdf = MagicMock()
@@ -63,4 +69,19 @@ def test_delete_pdf(mock_kb_service):
 def test_delete_pdf_not_found(mock_kb_service):
     mock_kb_service.delete_pdf.return_value = False
     response = client.delete("/api/admin/pdfs/1")
+    assert response.status_code == 404
+
+def test_get_ingestion_status(mock_kb_service):
+    mock_kb_service.get_ingestion_status.return_value = {
+        "id": "1", "title": "Test PDF", "ingestion_status": "completed"
+    }
+    response = client.get("/api/admin/pdfs/1/ingestion-status")
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": "1", "title": "Test PDF", "ingestion_status": "completed"
+    }
+
+def test_get_ingestion_status_not_found(mock_kb_service):
+    mock_kb_service.get_ingestion_status.return_value = None
+    response = client.get("/api/admin/pdfs/1/ingestion-status")
     assert response.status_code == 404

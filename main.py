@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import uvicorn
@@ -5,11 +6,33 @@ import uvicorn
 from src.core.database import engine, Base
 from src.chat import chat_router
 from src.knowledge_base import kb_router
+from src.rag.dependency import get_vector_store
+
+# Import RAG models so SQLAlchemy registers them with Base.metadata
+import src.rag.model  # noqa: F401
+
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Create all database tables (including parent_chunks, ingestion_tasks)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # Initialize Qdrant collection (idempotent — skips if exists)
+    vector_store = get_vector_store()
+    try:
+        await vector_store.ensure_collection()
+        logger.info("Qdrant collection initialized")
+    except Exception as e:
+        # Qdrant may not be running; log warning but don't block startup
+        logger.warning(
+            "Could not initialize Qdrant collection: %s. "
+            "RAG features will be unavailable until Qdrant is running.",
+            str(e),
+        )
+
     yield
 
 app = FastAPI(

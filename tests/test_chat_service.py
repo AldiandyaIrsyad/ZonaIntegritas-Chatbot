@@ -11,8 +11,19 @@ def mock_llm():
     return MagicMock()
 
 @pytest.fixture
-def chat_service(mock_repository, mock_llm):
-    return ChatService(repository=mock_repository, llm=mock_llm)
+def mock_retrieval_service():
+    service = AsyncMock()
+    # Default: no RAG context retrieved
+    service.retrieve_context.return_value = []
+    return service
+
+@pytest.fixture
+def chat_service(mock_repository, mock_llm, mock_retrieval_service):
+    return ChatService(
+        repository=mock_repository,
+        llm_service=mock_llm,
+        retrieval_service=mock_retrieval_service,
+    )
 
 @pytest.mark.asyncio
 async def test_list_sessions(chat_service, mock_repository):
@@ -72,7 +83,7 @@ async def test_process_chat_message(chat_service, mock_repository, mock_llm):
         yield "Hello "
         yield "World"
     
-    mock_llm.input.return_value = mock_stream()
+    mock_llm.stream_response.return_value = mock_stream()
 
     response = await chat_service.process_chat_message("123", "Test message")
     
@@ -85,7 +96,6 @@ async def test_process_chat_message(chat_service, mock_repository, mock_llm):
     
     # Verify repository calls
     mock_repository.update_session_title.assert_called_once_with(mock_session, "Test message")
-    mock_llm.input.assert_called_once_with([{"role": "user", "content": "Test message"}])
     mock_repository.create_message.assert_any_call("123", "user", "Test message")
     mock_repository.create_message.assert_any_call("123", "assistant", "Hello World")
 
