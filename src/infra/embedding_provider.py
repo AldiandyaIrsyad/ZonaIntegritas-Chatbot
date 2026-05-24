@@ -82,6 +82,12 @@ class EmbeddingProvider:
                 dense_data.get("data", []), key=lambda x: x["index"]
             )
 
+            if len(dense_embeddings) != len(batch):
+                raise ValueError(
+                    f"Embedding response size mismatch: expected {len(batch)}, "
+                    f"got {len(dense_embeddings)}"
+                )
+
             for j in range(len(batch)):
                 dense_vec = dense_embeddings[j]["embedding"]
 

@@ -129,6 +129,16 @@ class QdrantStore:
 
         points = []
         for chunk in chunks:
+            if len(chunk.dense_vector) != BGE_M3_DENSE_DIM:
+                raise ValueError(
+                    f"dense_vector must have {BGE_M3_DENSE_DIM} dimensions, "
+                    f"got {len(chunk.dense_vector)} for chunk_id={chunk.chunk_id}"
+                )
+            if len(chunk.sparse_indices) != len(chunk.sparse_values):
+                raise ValueError(
+                    f"sparse_indices and sparse_values length mismatch for "
+                    f"chunk_id={chunk.chunk_id}"
+                )
             point = PointStruct(
                 id=chunk.chunk_id,
                 vector={
@@ -171,6 +181,14 @@ class QdrantStore:
         Only searches vectors where is_active == true to respect document
         enable/disable state managed via the admin dashboard.
         """
+        if top_k <= 0:
+            return []
+        if len(dense_vector) != BGE_M3_DENSE_DIM:
+            raise ValueError(
+                f"dense_vector must have {BGE_M3_DENSE_DIM} dimensions, got {len(dense_vector)}"
+            )
+        if len(sparse_indices) != len(sparse_values):
+            raise ValueError("sparse_indices and sparse_values must have the same length")
         active_filter = Filter(
             must=[
                 FieldCondition(

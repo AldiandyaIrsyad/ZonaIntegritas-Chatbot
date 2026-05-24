@@ -69,7 +69,7 @@ class DocumentParser:
 
         filename = os.path.basename(resolved_path)
 
-        with open(resolved_path, "rb") as f:
+        async with aiofiles.open(resolved_path, "rb") as f:
             response = await self._client.post(
                 "/general/v0/general",
                 files={"files": (filename, f, "application/pdf")},
@@ -93,7 +93,7 @@ class DocumentParser:
                 ParsedElement(
                     element_type=elem.get("type", "UncategorizedText"),
                     text=text,
-                    metadata=elem.get("metadata", {}),
+                    metadata=elem.get("metadata") or {},
                 )
             )
 

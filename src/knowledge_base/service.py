@@ -3,12 +3,13 @@ import os
 from typing import Optional
 
 from fastapi import UploadFile
+import asyncio
+
 
 from src.infra.vector_store import QdrantStore
 from src.knowledge_base.repository import PDFRepository
 from src.infra.storage import StorageProvider
 from src.rag.ingestion import IngestionService
-
 logger = logging.getLogger(__name__)
 
 
@@ -52,17 +53,7 @@ class KnowledgeBase:
         # TODO(security): Consider scanning uploaded PDFs for malware
         # before ingestion. The unstructured-api parser processes the PDF
         # content, which could be a vector for exploitation.
-        try:
-            await self.ingestion_service.ingest_document(pdf.id)
-        except Exception as e:
-            # Ingestion failure should not block the upload response.
-            # The document is saved; ingestion can be retried.
-            logger.error(
-                "Ingestion failed for doc '%s' (id=%s): %s",
-                title,
-                pdf.id,
-                str(e),
-            )
+        asyncio.create_task(self.ingestion_service.ingest_document(pdf.id))
 
         return pdf
         
@@ -111,6 +102,7 @@ class KnowledgeBase:
                 pdf_id,
                 str(e),
             )
+            raise
 
         # Delete file from storage
         if pdf.pdf_path:

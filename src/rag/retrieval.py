@@ -137,10 +137,7 @@ class RetrievalService:
             parent_id = parent_ids_ordered[ranked.index]
             parent_chunk = parent_map[parent_id]
 
-            # Get source document title
-            source_title = await self._get_document_title(
-                parent_chunk.doc_id
-            )
+            source_title = parent_chunk.document.title
 
             contexts.append(
                 RetrievedContext(

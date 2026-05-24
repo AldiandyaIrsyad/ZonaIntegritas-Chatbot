@@ -140,6 +140,12 @@ class IngestionService:
             child_texts = [c.text for c in all_children]
             embeddings = await self.embedding_provider.embed_texts(child_texts)
 
+            if len(embeddings) != len(all_children):
+                raise RuntimeError(
+                    f"Embedding count mismatch for doc_id='{doc_id}': "
+                    f"expected {len(all_children)}, got {len(embeddings)}"
+                )
+
             # Step 6: Upsert to Qdrant
             chunk_vectors = []
             for child, embedding in zip(all_children, embeddings):
@@ -170,6 +176,7 @@ class IngestionService:
             )
 
         except Exception as e:
+            await self.db.rollback()
             logger.error(
                 "Ingestion failed for doc_id='%s': %s",
                 doc_id,

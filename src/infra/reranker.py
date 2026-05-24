@@ -56,7 +56,7 @@ class Reranker:
         Raises:
             httpx.HTTPStatusError: If the Infinity server returns an error.
         """
-        if not documents:
+        if not documents or top_k <= 0:
             return []
 
         response = await self._client.post(
@@ -73,12 +73,24 @@ class Reranker:
 
         results = []
         for item in data.get("results", []):
-            idx = item["index"]
+            idx = item.get("index")
+            score = item.get("relevance_score")
+            if idx is None or score is None:
+                continue
+
+            if not isinstance(idx, int) or idx < 0 or idx >= len(documents):
+                logger.warning("Skipping rerank result with invalid index: %r", item)
+                continue
+            
+            if not isinstance(score, (int, float)):
+                logger.warning("Skipping rerank result with invalid score: %r", item)
+                continue
+
             results.append(
                 RankedResult(
                     index=idx,
                     text=documents[idx],
-                    score=item["relevance_score"],
+                    score=float(score),
                 )
             )
 

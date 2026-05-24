@@ -11,6 +11,7 @@ from typing import List, Optional
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy.orm import joinedload
 
 from src.rag.model import IngestionTask, ParentChunk
 
@@ -63,6 +64,7 @@ class RAGRepository:
 
         result = await self.db.execute(
             select(ParentChunk)
+            .options(joinedload(ParentChunk.document))
             .where(ParentChunk.id.in_(chunk_ids))
             .order_by(ParentChunk.chunk_index)
         )
@@ -137,6 +139,8 @@ class RAGRepository:
             task.error_message = error_message
         if status in ("completed", "failed"):
             task.completed_at = datetime.now(timezone.utc)
+        else:
+            task.completed_at = None
 
         await self.db.flush()
         logger.info(
