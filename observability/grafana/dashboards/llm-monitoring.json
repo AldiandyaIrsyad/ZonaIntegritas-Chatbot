@@ -165,7 +165,7 @@
         {
           "id": "extractFields",
           "options": {
-            "source": "labels",
+            "source": "line",
             "format": "auto"
           }
         }

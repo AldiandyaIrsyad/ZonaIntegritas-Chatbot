@@ -12,7 +12,7 @@
       "title": "PDF Uploads Over Time",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-      "datasource": { "type": "loki", "uid": "" },
+      "datasource": { "type": "loki", "uid": "loki" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -31,7 +31,7 @@
       },
       "targets": [
         {
-          "datasource": { "type": "loki", "uid": "" },
+          "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
           "expr": "count_over_time({event=~\"user_upload_pdf|admin_upload_pdf\"} [5m])",
           "legendFormat": "PDF Uploads",
@@ -43,7 +43,7 @@
       "title": "Upload Success vs Failure (Last 1h)",
       "type": "piechart",
       "gridPos": { "h": 8, "w": 6, "x": 12, "y": 0 },
-      "datasource": { "type": "loki", "uid": "" },
+      "datasource": { "type": "loki", "uid": "loki" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" }
@@ -67,14 +67,14 @@
       },
       "targets": [
         {
-          "datasource": { "type": "loki", "uid": "" },
+          "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
           "expr": "count_over_time({event=~\"user_upload_pdf|admin_upload_pdf\"} | json | status=\"success\" [1h])",
           "legendFormat": "success",
           "refId": "A"
         },
         {
-          "datasource": { "type": "loki", "uid": "" },
+          "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
           "expr": "count_over_time({event=~\"user_upload_pdf|admin_upload_pdf\"} | json | status=\"failed\" [1h])",
           "legendFormat": "failed",
@@ -86,7 +86,7 @@
       "title": "RAG Ingestion Events Over Time",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 6, "x": 18, "y": 0 },
-      "datasource": { "type": "loki", "uid": "" },
+      "datasource": { "type": "loki", "uid": "loki" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -103,7 +103,7 @@
       },
       "targets": [
         {
-          "datasource": { "type": "loki", "uid": "" },
+          "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
           "expr": "count_over_time({event=\"rag_ingestion\"} [5m])",
           "legendFormat": "Ingestion Events",
@@ -116,7 +116,7 @@
       "description": "Structured logs for all PDF upload events (user and admin).",
       "type": "logs",
       "gridPos": { "h": 10, "w": 24, "x": 0, "y": 8 },
-      "datasource": { "type": "loki", "uid": "" },
+      "datasource": { "type": "loki", "uid": "loki" },
       "options": {
         "showTime": true,
         "showLabels": true,
@@ -129,7 +129,7 @@
       },
       "targets": [
         {
-          "datasource": { "type": "loki", "uid": "" },
+          "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
           "expr": "{event=~\"user_upload_pdf|admin_upload_pdf\"} | json",
           "refId": "A"
@@ -141,7 +141,7 @@
       "description": "Detailed ingestion pipeline logs showing each stage: parsing, chunking, embedding, vector upsert.",
       "type": "logs",
       "gridPos": { "h": 10, "w": 24, "x": 0, "y": 18 },
-      "datasource": { "type": "loki", "uid": "" },
+      "datasource": { "type": "loki", "uid": "loki" },
       "options": {
         "showTime": true,
         "showLabels": true,
@@ -154,7 +154,7 @@
       },
       "targets": [
         {
-          "datasource": { "type": "loki", "uid": "" },
+          "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
           "expr": "{event=\"rag_ingestion\"} | json",
           "refId": "A"
@@ -166,7 +166,7 @@
       "description": "Only shows failed ingestion events for quick debugging.",
       "type": "table",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
-      "datasource": { "type": "loki", "uid": "" },
+      "datasource": { "type": "loki", "uid": "loki" },
       "fieldConfig": {
         "defaults": {},
         "overrides": [
@@ -186,9 +186,9 @@
       },
       "targets": [
         {
-          "datasource": { "type": "loki", "uid": "" },
+          "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "{event=\"rag_ingestion\", level=\"ERROR\"} | json",
+          "expr": "{event=\"rag_ingestion\"} | json | level=\"ERROR\"",
           "refId": "A"
         }
       ]
