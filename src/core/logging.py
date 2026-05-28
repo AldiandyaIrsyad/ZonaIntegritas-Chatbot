@@ -2,16 +2,27 @@ import logging
 import sys
 import os
 from pythonjsonlogger.json import JsonFormatter
+import time
 
+import queue
+from logging.handlers import QueueHandler, QueueListener
 import socket
+
+from src.core.config import get_vector_settings
 
 class TCPJSONHandler(logging.Handler):
     def __init__(self, host, port):
         super().__init__()
         self.address = (host, port)
         self.sock = None
+        self.last_retry = 0.0
+        self.retry_cooldown = 5.0
 
     def _connect(self):
+        now = time.time()
+        if now - self.last_retry < self.retry_cooldown:
+            return
+        self.last_retry = now
         try:
             if self.sock:
                 self.sock.close()
@@ -51,13 +62,26 @@ def setup_logging():
     )
 
     # TCP Handler — sends logs directly to the Vector container
-    tcp_handler = TCPJSONHandler('127.0.0.1', 9000)
+    vector_settings = get_vector_settings()
+    tcp_handler = TCPJSONHandler(vector_settings.host, vector_settings.port)
     tcp_handler.setFormatter(formatter)
-    root_logger.addHandler(tcp_handler)
-
+    
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setFormatter(formatter)
-    root_logger.addHandler(stream_handler)
+    
+    log_queue = queue.Queue(-1)
+    queue_handler = QueueHandler(log_queue)
+    root_logger.addHandler(queue_handler)
+
+    listener = QueueListener(
+        log_queue,
+        tcp_handler,
+        stream_handler,
+        respect_handler_level=True
+    )
+    listener.start()
+
+
 
 def get_logger(name):
     setup_logging()

@@ -22,6 +22,7 @@ from src.rag.chunking import (
 from src.rag.model import ParentChunk
 from src.rag.repository import RAGRepository
 from src.core.logging import get_logger
+from src.core.events import LogEvent
 
 logger = get_logger(__name__)
 
@@ -88,7 +89,7 @@ class IngestionService:
                 raise ValueError(f"PDFDocument not found: {doc_id}")
 
             logger.info("RAG ingestion started", extra={
-                "event": "rag_ingestion",
+                "event": LogEvent.RAG_INGESTION.value,
                 "status": "started",
                 "doc_id": doc_id,
                 "title": pdf_doc.title,
@@ -99,7 +100,7 @@ class IngestionService:
             elements = await self.document_parser.parse_pdf(pdf_doc.pdf_path)
             if not elements:
                 logger.warning("RAG ingestion: no elements extracted", extra={
-                    "event": "rag_ingestion",
+                    "event": LogEvent.RAG_INGESTION.value,
                     "status": "completed",
                     "doc_id": doc_id,
                     "title": pdf_doc.title,
@@ -114,7 +115,7 @@ class IngestionService:
                 return
 
             logger.info("RAG ingestion: parsing complete", extra={
-                "event": "rag_ingestion",
+                "event": LogEvent.RAG_INGESTION.value,
                 "status": "in_progress",
                 "doc_id": doc_id,
                 "stage": "chunking",
@@ -142,7 +143,7 @@ class IngestionService:
 
             if not all_children:
                 logger.warning("RAG ingestion: no child chunks generated", extra={
-                    "event": "rag_ingestion",
+                    "event": LogEvent.RAG_INGESTION.value,
                     "status": "completed",
                     "doc_id": doc_id,
                     "stage": "chunking",
@@ -157,7 +158,7 @@ class IngestionService:
                 return
 
             logger.info("RAG ingestion: chunking complete", extra={
-                "event": "rag_ingestion",
+                "event": LogEvent.RAG_INGESTION.value,
                 "status": "in_progress",
                 "doc_id": doc_id,
                 "stage": "embedding",
@@ -176,7 +177,7 @@ class IngestionService:
                 )
 
             logger.info("RAG ingestion: embedding complete", extra={
-                "event": "rag_ingestion",
+                "event": LogEvent.RAG_INGESTION.value,
                 "status": "in_progress",
                 "doc_id": doc_id,
                 "stage": "vector_upsert",
@@ -205,7 +206,7 @@ class IngestionService:
             await self.db.commit()
 
             logger.info("RAG ingestion completed", extra={
-                "event": "rag_ingestion",
+                "event": LogEvent.RAG_INGESTION.value,
                 "status": "completed",
                 "doc_id": doc_id,
                 "parent_chunks": len(parent_chunk_data),
@@ -215,10 +216,10 @@ class IngestionService:
         except Exception as e:
             await self.db.rollback()
             logger.error("RAG ingestion failed", extra={
-                "event": "rag_ingestion",
+                "event": LogEvent.RAG_INGESTION.value,
                 "status": "failed",
                 "doc_id": doc_id,
-                "error": str(e),
+                "error": type(e).__name__,
             }, exc_info=True)
             # Attempt to mark as failed
             try:
@@ -230,7 +231,8 @@ class IngestionService:
             except Exception as rollback_err:
                 logger.error(
                     "Failed to update task status after error: %s",
-                    str(rollback_err),
+                    type(rollback_err).__name__,
+                    exc_info=True,
                 )
             raise
 
