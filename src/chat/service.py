@@ -1,4 +1,3 @@
-import logging
 import os
 import uuid
 from typing import List, Optional
@@ -18,8 +17,9 @@ from src.rag.chunking import create_parent_chunks, split_into_children
 from src.infra.vector_store import QdrantStore, ChunkVector
 from src.infra.embedding_provider import EmbeddingProvider
 import anyio
+from src.core.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class ChatService:
@@ -143,7 +143,24 @@ class ChatService:
                 except Exception as e2:
                     logger.error(f"Failed to delete failed upload {file.filename} for session {session_id}: {e2}")
                 
+                logger.error("User PDF upload failed: Exception occurred", extra={
+                    "event": "user_upload_pdf",
+                    "session_id": session_id,
+                    "filename": file.filename,
+                    "file_extension": file_extension,
+                    "status": "failed",
+                    "reason": str(e)
+                })
                 raise HTTPException(status_code=500, detail="Failed to process PDF")
+
+        logger.info("User PDF upload successful", extra={
+            "event": "user_upload_pdf",
+            "session_id": session_id,
+            "document_id": doc.id,
+            "filename": doc.filename,
+            "file_extension": file_extension,
+            "status": "success"
+        })
 
         return {
             "id": doc.id,
@@ -220,6 +237,20 @@ class ChatService:
                     yield chunk
             finally:
                 if response_content.strip():
+                    # Log the LLM generation event.
+                    # Use last_context_payload (the post-pruning prompt) instead
+                    # of raw_history, so the log reflects what the LLM actually received.
+                    pruned_prompt = getattr(self.llm_service, 'last_context_payload', raw_history)
+                    logger.info("LLM generation completed", extra={
+                        "event": "llm_generation",
+                        "session_id": session_id,
+                        "model": getattr(self.llm_service, 'model', 'unknown'),
+                        "rag_context_included": len(contexts) > 0,
+                        "session_context_included": session.documents is not None and len(session.documents) > 0,
+                        "raw_prompt": pruned_prompt,
+                        "generated_output": response_content
+                    })
+
                     try:
                         # Use anyio.CancelScope(shield=True) instead of asyncio.shield
                         # because FastAPI/Starlette manages concurrency via AnyIO.

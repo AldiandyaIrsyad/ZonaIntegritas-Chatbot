@@ -108,6 +108,10 @@ class LLMService:
         
         context_payload = self._prune_context(raw_history)
 
+        # Expose the pruned payload for logging/debugging.
+        # This is the exact message list sent to the LLM API.
+        self.last_context_payload = context_payload
+
         async for chunk in self.connection.stream_chat(
             self.model, 
             context_payload, 

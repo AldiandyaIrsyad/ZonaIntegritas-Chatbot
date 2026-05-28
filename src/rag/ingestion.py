@@ -21,8 +21,9 @@ from src.rag.chunking import (
 )
 from src.rag.model import ParentChunk
 from src.rag.repository import RAGRepository
+from src.core.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class IngestionService:
@@ -86,24 +87,39 @@ class IngestionService:
             if not pdf_doc:
                 raise ValueError(f"PDFDocument not found: {doc_id}")
 
-            logger.info(
-                "Starting ingestion for '%s' (doc_id=%s)",
-                pdf_doc.title,
-                doc_id,
-            )
+            logger.info("RAG ingestion started", extra={
+                "event": "rag_ingestion",
+                "status": "started",
+                "doc_id": doc_id,
+                "title": pdf_doc.title,
+                "stage": "parsing",
+            })
 
             # Step 2: Parse PDF via unstructured-api
             elements = await self.document_parser.parse_pdf(pdf_doc.pdf_path)
             if not elements:
-                logger.warning(
-                    "No elements extracted from PDF '%s'", pdf_doc.title
-                )
+                logger.warning("RAG ingestion: no elements extracted", extra={
+                    "event": "rag_ingestion",
+                    "status": "completed",
+                    "doc_id": doc_id,
+                    "title": pdf_doc.title,
+                    "stage": "parsing",
+                    "element_count": 0,
+                })
                 await self.rag_repo.update_ingestion_task(
                     task.id, "completed"
                 )
                 await self._update_document_status(doc_id, "completed")
                 await self.db.commit()
                 return
+
+            logger.info("RAG ingestion: parsing complete", extra={
+                "event": "rag_ingestion",
+                "status": "in_progress",
+                "doc_id": doc_id,
+                "stage": "chunking",
+                "element_count": len(elements),
+            })
 
             # Step 3: Create parent chunks and save to PostgreSQL
             parent_chunk_data = create_parent_chunks(elements, doc_id)
@@ -125,15 +141,29 @@ class IngestionService:
                 all_children.extend(children)
 
             if not all_children:
-                logger.warning(
-                    "No child chunks generated for doc_id='%s'", doc_id
-                )
+                logger.warning("RAG ingestion: no child chunks generated", extra={
+                    "event": "rag_ingestion",
+                    "status": "completed",
+                    "doc_id": doc_id,
+                    "stage": "chunking",
+                    "parent_chunks": len(parent_chunk_data),
+                    "child_chunks": 0,
+                })
                 await self.rag_repo.update_ingestion_task(
                     task.id, "completed"
                 )
                 await self._update_document_status(doc_id, "completed")
                 await self.db.commit()
                 return
+
+            logger.info("RAG ingestion: chunking complete", extra={
+                "event": "rag_ingestion",
+                "status": "in_progress",
+                "doc_id": doc_id,
+                "stage": "embedding",
+                "parent_chunks": len(parent_chunk_data),
+                "child_chunks": len(all_children),
+            })
 
             # Step 5: Embed child chunks via Infinity
             child_texts = [c.text for c in all_children]
@@ -144,6 +174,14 @@ class IngestionService:
                     f"Embedding count mismatch for doc_id='{doc_id}': "
                     f"expected {len(all_children)}, got {len(embeddings)}"
                 )
+
+            logger.info("RAG ingestion: embedding complete", extra={
+                "event": "rag_ingestion",
+                "status": "in_progress",
+                "doc_id": doc_id,
+                "stage": "vector_upsert",
+                "vectors_count": len(embeddings),
+            })
 
             # Step 6: Upsert to Qdrant
             chunk_vectors = []
@@ -166,22 +204,22 @@ class IngestionService:
             await self._update_document_status(doc_id, "completed")
             await self.db.commit()
 
-            logger.info(
-                "Ingestion completed for doc_id='%s': "
-                "%d parent chunks, %d child chunks embedded",
-                doc_id,
-                len(parent_chunk_data),
-                len(all_children),
-            )
+            logger.info("RAG ingestion completed", extra={
+                "event": "rag_ingestion",
+                "status": "completed",
+                "doc_id": doc_id,
+                "parent_chunks": len(parent_chunk_data),
+                "child_chunks": len(all_children),
+            })
 
         except Exception as e:
             await self.db.rollback()
-            logger.error(
-                "Ingestion failed for doc_id='%s': %s",
-                doc_id,
-                str(e),
-                exc_info=True,
-            )
+            logger.error("RAG ingestion failed", extra={
+                "event": "rag_ingestion",
+                "status": "failed",
+                "doc_id": doc_id,
+                "error": str(e),
+            }, exc_info=True)
             # Attempt to mark as failed
             try:
                 await self.rag_repo.update_ingestion_task(
