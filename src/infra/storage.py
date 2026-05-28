@@ -5,6 +5,9 @@ import asyncio
 from abc import ABC, abstractmethod
 from typing import BinaryIO
 from fastapi import UploadFile
+from src.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 class StorageProvider(ABC):
     """Abstract base class for storage providers."""
@@ -64,6 +67,5 @@ class LocalStorageProvider(StorageProvider):
         except FileNotFoundError:
             return False
         except Exception as e:
-            # Pass
-
+            logger.error(f"Failed to delete file {file_path}", exc_info=True)
             return False

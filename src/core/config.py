@@ -79,6 +79,17 @@ class UnstructuredSettings(BaseSettings):
         extra="ignore"
     )
 
+# Observability timberio/vector:0.47.0-alpine
+class VectorSettings(BaseSettings):
+    host: str = "localhost"
+    port: int = 9000
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="VECTOR_",
+        extra="ignore"
+    )
+    
 @lru_cache
 def get_settings() -> LLMSettings:
     return LLMSettings()
@@ -102,3 +113,7 @@ def get_infinity_settings() -> InfinitySettings:
 @lru_cache
 def get_unstructured_settings() -> UnstructuredSettings:
     return UnstructuredSettings()
+
+@lru_cache
+def get_vector_settings() -> VectorSettings:
+    return VectorSettings()

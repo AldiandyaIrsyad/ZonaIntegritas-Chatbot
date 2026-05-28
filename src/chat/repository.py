@@ -84,3 +84,13 @@ class ChatRepository:
         # Preserve the order from the Qdrant search results
         rows = {c.id: c for c in result.scalars().all()}
         return [rows[cid] for cid in chunk_ids if cid in rows]
+
+    async def delete_session_document(self, document_id: str):
+        query = select(SessionDocument).where(SessionDocument.id == document_id)
+        result = await self.db.execute(query)
+        doc = result.scalars().first()
+        if doc:
+            await self.db.delete(doc)
+            await self.db.commit()
+            return True
+        return False

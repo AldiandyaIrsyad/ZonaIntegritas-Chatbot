@@ -27,7 +27,10 @@ from qdrant_client.models import (
     models,
 )
 
-logger = logging.getLogger(__name__)
+from src.core.logging import get_logger
+from src.core.events import LogEvent
+
+logger = get_logger(__name__)
 
 
 # BGE-M3 produces 1024-dimensional dense vectors
@@ -175,7 +178,13 @@ class QdrantStore:
                 points=batch,
             )
 
-        logger.info("Upserted %d chunk vectors to Qdrant", len(chunks))
+        logger.info("Upserted %d chunk vectors to Qdrant", len(chunks), extra={
+            "event": LogEvent.VECTOR_UPSERT.value,
+            "doc_id": chunks[0].doc_id if chunks else None,
+            "session_id": chunks[0].session_id if chunks else None,
+            "count": len(chunks),
+            "payload_sample": [p.payload for p in points[:3]] if points else []
+        })
 
     async def hybrid_search(
         self,

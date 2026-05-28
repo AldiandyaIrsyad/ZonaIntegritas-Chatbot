@@ -1,4 +1,3 @@
-import logging
 import os
 import uuid
 from typing import List, Optional
@@ -18,8 +17,10 @@ from src.rag.chunking import create_parent_chunks, split_into_children
 from src.infra.vector_store import QdrantStore, ChunkVector
 from src.infra.embedding_provider import EmbeddingProvider
 import anyio
+from src.core.logging import get_logger
+from src.core.events import LogEvent
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class ChatService:
@@ -83,7 +84,14 @@ class ChatService:
         file_path = await self.storage.save_file(file, file_extension)
 
         # Generate thumbnail
-        thumbnail = self.thumbnail_context.generate_thumbnail(file_path)
+        try:
+            thumbnail = await anyio.to_thread.run_sync(
+                self.thumbnail_context.generate_thumbnail, file_path
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate thumbnail for {file.filename}", exc_info=True)
+            await self.storage.delete_file(file_path)
+            raise
 
         # Create session document
         doc = await self.repository.create_session_document(
@@ -136,14 +144,36 @@ class ChatService:
                             )
                         await self.vector_store.upsert_chunks(chunk_vectors)
             except Exception as e:
-                logger.error(f"Failed to parse PDF {file.filename} for session {session_id}: {e}")
+                logger.error(f"Failed to parse PDF {file.filename} for session {session_id}", exc_info=True)
 
                 try:
                     await self.storage.delete_file(file_path)
                 except Exception as e2:
-                    logger.error(f"Failed to delete failed upload {file.filename} for session {session_id}: {e2}")
+                    logger.error(f"Failed to delete failed upload {file.filename} for session {session_id}", exc_info=True)
                 
+                try:
+                    await self.repository.delete_session_document(doc.id)
+                except Exception as e3:
+                    logger.error(f"Failed to delete session document DB record {doc.id} for session {session_id}", exc_info=True)
+                
+                logger.error("User PDF upload failed: Exception occurred", exc_info=True, extra={
+                    "event": LogEvent.USER_UPLOAD_PDF.value,
+                    "session_id": session_id,
+                    "filename": file.filename,
+                    "file_extension": file_extension,
+                    "status": "failed",
+                    "reason": type(e).__name__
+                })
                 raise HTTPException(status_code=500, detail="Failed to process PDF")
+
+        logger.info("User PDF upload successful", extra={
+            "event": LogEvent.USER_UPLOAD_PDF.value,
+            "session_id": session_id,
+            "document_id": doc.id,
+            "filename": doc.filename,
+            "file_extension": file_extension,
+            "status": "success"
+        })
 
         return {
             "id": doc.id,
@@ -177,38 +207,9 @@ class ChatService:
         # --- Session Document Context Injection via Qdrant ---
         # Only run if the session actually has documents attached
         if session.documents:
-            query_embeddings = await self.embedding_provider.embed_texts([message_text])
-            if query_embeddings:
-                query_emb = query_embeddings[0]
-                # 2. Hybrid Search in Qdrant filtered by session_id
-                search_results = await self.vector_store.hybrid_search(
-                    dense_vector=query_emb.dense,
-                    sparse_indices=query_emb.sparse_indices,
-                    sparse_values=query_emb.sparse_values,
-                    top_k=15,
-                    session_id=session_id
-                )
-                
-                if search_results:
-                    chunk_ids = [res.chunk_id for res in search_results]
-                    
-                    # Fetch only the matched chunks from the database
-                    session_chunks = await self.repository.get_session_chunks_by_ids(chunk_ids)
-                    
-                    retrieved_texts = [c.text for c in session_chunks if c.text]
-                    
-                    if retrieved_texts:
-                        try:
-                            # 3. Rerank the top results
-                            ranked_results = await self.reranker.rerank(message_text, retrieved_texts, top_k=5)
-                            if ranked_results:
-                                session_context_prompt = "You also have access to the following excerpts from documents uploaded in this specific session:\n"
-                                for ranked in ranked_results:
-                                    session_context_prompt += f"\n---\n{ranked.text}\n"
-                                session_context_prompt += "\n---"
-                                raw_history.insert(0, {"role": "system", "content": session_context_prompt})
-                        except Exception as e:
-                            logger.warning(f"Reranking session chunks failed: {e}")
+            session_context_prompt = await self._retrieve_session_context(session_id, message_text)
+            if session_context_prompt:
+                raw_history.insert(0, {"role": "system", "content": session_context_prompt})
 
         raw_history.append({"role": "user", "content": message_text})
 
@@ -220,6 +221,20 @@ class ChatService:
                     yield chunk
             finally:
                 if response_content.strip():
+                    # Log the LLM generation event.
+                    # Use last_context_payload (the post-pruning prompt) instead
+                    # of raw_history, so the log reflects what the LLM actually received.
+                    pruned_prompt = self.llm_service._prune_context(raw_history)
+                    logger.info("LLM generation completed", extra={
+                        "event": LogEvent.LLM_GENERATION.value,
+                        "session_id": session_id,
+                        "model": getattr(self.llm_service, 'model', 'unknown'),
+                        "rag_context_included": len(contexts) > 0,
+                        "session_context_included": session.documents is not None and len(session.documents) > 0,
+                        "raw_prompt": pruned_prompt,
+                        "generated_output": response_content
+                    })
+
                     try:
                         # Use anyio.CancelScope(shield=True) instead of asyncio.shield
                         # because FastAPI/Starlette manages concurrency via AnyIO.
@@ -227,9 +242,54 @@ class ChatService:
                         with anyio.CancelScope(shield=True):
                             await self.repository.create_message(session_id, "assistant", response_content)
                     except Exception as e:
-                        logger.error(f"Failed to save partial response: {e}")
+                        logger.error("Failed to save partial response", exc_info=True)
                 
         return StreamingResponse(generate(), media_type="text/plain")
+
+    async def _retrieve_session_context(self, session_id: str, query: str) -> Optional[str]:
+        try:
+            query_embeddings = await self.embedding_provider.embed_texts([query])
+            if not query_embeddings:
+                return None
+            
+            query_emb = query_embeddings[0]
+            # 2. Hybrid Search in Qdrant filtered by session_id
+            search_results = await self.vector_store.hybrid_search(
+                dense_vector=query_emb.dense,
+                sparse_indices=query_emb.sparse_indices,
+                sparse_values=query_emb.sparse_values,
+                top_k=15,
+                session_id=session_id
+            )
+        except Exception:
+            logger.warning(f"Failed to retrieve session context for session {session_id}", exc_info=True)
+            return None
+        
+        if not search_results:
+            return None
+
+        chunk_ids = [res.chunk_id for res in search_results]
+        
+        # Fetch only the matched chunks from the database
+        session_chunks = await self.repository.get_session_chunks_by_ids(chunk_ids)
+        
+        retrieved_texts = [c.text for c in session_chunks if c.text]
+        
+        if not retrieved_texts:
+            return None
+
+        try:
+            # 3. Rerank the top results
+            ranked_results = await self.reranker.rerank(query, retrieved_texts, top_k=5)
+            if ranked_results:
+                session_context_prompt = "You also have access to the following excerpts from documents uploaded in this specific session:\n"
+                for ranked in ranked_results:
+                    session_context_prompt += f"\n---\n{ranked.text}\n"
+                session_context_prompt += "\n---"
+                return session_context_prompt
+        except Exception as e:
+            logger.warning("Reranking session chunks failed", exc_info=True)
+        return None
 
     async def delete_session(self, session_id: str):
         session = await self.repository.get_session_by_id(session_id)
@@ -240,13 +300,13 @@ class ChatService:
                 try:
                     await self.vector_store.delete_by_doc_id(doc.id)
                 except Exception as e:
-                    logger.error(f"Failed to delete Qdrant vectors for doc {doc.id}: {e}")
+                    logger.error(f"Failed to delete Qdrant vectors for doc {doc.id}", exc_info=True)
                 
                 # 2. Delete file from storage
                 try:
                     await self.storage.delete_file(doc.file_path)
                 except Exception as e:
-                    logger.error(f"Failed to delete file {doc.file_path}: {e}")
+                    logger.error(f"Failed to delete file {doc.file_path}", exc_info=True)
 
             # 3. Delete session from PostgreSQL (will cascade delete documents and messages)
             return await self.repository.delete_session(session_id)
@@ -265,7 +325,8 @@ class ChatService:
         except Exception as e:
             logger.warning(
                 "RAG retrieval failed, proceeding without context: %s",
-                str(e),
+                type(e).__name__,
+                exc_info=True,
             )
             return []
 

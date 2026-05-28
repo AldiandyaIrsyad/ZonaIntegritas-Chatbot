@@ -83,7 +83,55 @@ services:
     # Only needed during ingestion (State A). Shut down for chat (State B).
     profiles: ["ingestion"]
 
+  # --- Observability Stack ---
+
+  loki:
+    image: grafana/loki:3.5.0
+    container_name: loki
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./observability/loki-config.yaml:/etc/loki/local-config.yaml
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    profiles: ["monitoring"]
+
+  vector:
+    image: timberio/vector:0.47.0-alpine
+    container_name: vector
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - ./observability/vector.yaml:/etc/vector/vector.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: --config /etc/vector/vector.yaml
+    depends_on:
+      - loki
+    profiles: ["monitoring"]
+
+  grafana:
+    image: grafana/grafana:12.0.0
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      - loki
+    profiles: ["monitoring"]
+
 volumes:
   postgres_data:
   ollama_data:
   qdrant_data:
+  loki_data:
+  grafana_data:
