@@ -4,22 +4,21 @@ Dependency injection for the RAG pipeline.
 Provides singleton factory functions for infrastructure adapters
 and request-scoped factories for services that need a DB session.
 """
-from fastapi import Depends
 from functools import lru_cache
+
+from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.config import (
+from src.core import (
+    get_db,
     get_infinity_settings,
     get_qdrant_settings,
     get_unstructured_settings,
 )
-from src.core.database import get_db
-from src.infra.document_parser import DocumentParser
-from src.infra.embedding_provider import EmbeddingProvider
-from src.infra.reranker import Reranker
-from src.infra.vector_store import QdrantStore
-from src.rag.ingestion import IngestionService
-from src.rag.retrieval import RetrievalService
+from src.infra import DocumentParser, EmbeddingProvider, QdrantStore, Reranker
+
+from .ingestion import IngestionService
+from .retrieval import RetrievalService
 
 
 @lru_cache

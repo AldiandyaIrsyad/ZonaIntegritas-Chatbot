@@ -1,11 +1,11 @@
-import pytest
-from unittest.mock import AsyncMock, patch
 from typing import AsyncGenerator
+from unittest.mock import AsyncMock, patch
+
+import pytest
 from pydantic import SecretStr
 
-from src.infra.llm_connection import LLMConnection
-from src.llm.service import LLMService
-
+from src.infra import LLMConnection
+from src.llm import LLMService
 
 # --- Mock Classes for OpenAI Stream Simulation ---
 

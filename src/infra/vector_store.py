@@ -17,18 +17,17 @@ from qdrant_client.models import (
     MatchValue,
     NamedSparseVector,
     NamedVector,
+    PayloadSchemaType,
     PointStruct,
     ScoredPoint,
     SetPayloadOperation,
     SparseVector,
     SparseVectorParams,
     VectorParams,
-    PayloadSchemaType,
     models,
 )
 
-from src.core.logging import get_logger
-from src.core.events import LogEvent
+from src.core import LogEvent, get_logger
 
 logger = get_logger(__name__)
 

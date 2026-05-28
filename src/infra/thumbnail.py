@@ -1,9 +1,10 @@
 import abc
-import os
 import base64
+import os
 from io import BytesIO
-from PIL import Image
+
 import fitz
+from PIL import Image
 
 
 class ThumbnailStrategy(abc.ABC):

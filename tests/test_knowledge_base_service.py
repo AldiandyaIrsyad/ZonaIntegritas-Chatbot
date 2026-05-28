@@ -1,7 +1,10 @@
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 from fastapi import UploadFile
-from src.knowledge_base.service import KnowledgeBase
+
+from src.knowledge_base import KnowledgeBase
+
 
 @pytest.fixture
 def mock_repository():

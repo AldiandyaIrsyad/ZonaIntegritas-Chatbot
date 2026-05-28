@@ -1,8 +1,10 @@
+from unittest.mock import AsyncMock
+
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import AsyncMock
+
 from main import app
-from src.chat.dependency import get_chat_service
+from src.chat import get_chat_service
 
 client = TestClient(app)
 

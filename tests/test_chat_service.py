@@ -1,6 +1,9 @@
-import pytest
 from unittest.mock import AsyncMock, MagicMock
-from src.chat.service import ChatService
+
+import pytest
+
+from src.chat import ChatService
+
 
 @pytest.fixture
 def mock_repository():

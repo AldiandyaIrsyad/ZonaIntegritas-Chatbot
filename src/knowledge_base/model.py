@@ -1,8 +1,11 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, DateTime, Text, Boolean
+
+from sqlalchemy import Boolean, Column, DateTime, String, Text
 from sqlalchemy.orm import relationship
-from src.core.database import Base
+
+from src.core import Base
+
 
 class PDFDocument(Base):
     __tablename__ = "pdf_documents"

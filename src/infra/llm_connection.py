@@ -1,6 +1,8 @@
 from typing import Optional
+
 from openai import AsyncOpenAI
 from pydantic import SecretStr
+
 
 class LLMConnection:
     """

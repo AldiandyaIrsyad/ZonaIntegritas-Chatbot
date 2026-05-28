@@ -1,6 +1,8 @@
 from functools import lru_cache
+
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 class LLMSettings(BaseSettings):
     api_key: SecretStr | None = None

@@ -1,7 +1,10 @@
 import os
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import patch, AsyncMock, MagicMock
-from src.core.config import LLMSettings, DatabaseSettings, StorageSettings
+
+from src.core import DatabaseSettings, LLMSettings, StorageSettings
+
 
 def test_llm_settings_defaults():
     settings = LLMSettings()
@@ -20,7 +23,7 @@ def test_storage_settings():
 @pytest.mark.asyncio
 async def test_get_db_yields_session():
     # Import here to avoid env loading issues during collection if env is missing
-    from src.core.database import get_db
+    from src.core import get_db
     
     dummy_session = AsyncMock()
     mock_async_session = MagicMock()

@@ -1,8 +1,10 @@
-from src.core.config import LLMSettings, get_settings
-from src.infra.llm_connection import LLMConnection
-from src.llm.service import LLMService
-
 from functools import lru_cache
+
+from src.core import LLMSettings, get_settings
+from src.infra import LLMConnection
+
+from .service import LLMService
+
 
 @lru_cache
 def get_llm_service() -> LLMService:
