@@ -9,6 +9,10 @@ from logging.handlers import QueueHandler, QueueListener
 import socket
 
 from src.core.config import get_vector_settings
+import threading
+
+_logging_initialized = False
+_logging_init_lock = threading.Lock()
 
 class TCPJSONHandler(logging.Handler):
     def __init__(self, host, port):
@@ -45,13 +49,13 @@ class TCPJSONHandler(logging.Handler):
             self.sock = None
             self.handleError(record)
 
-_logging_initialized = False
 
 def setup_logging():
     global _logging_initialized
-    if _logging_initialized:
-        return
-    _logging_initialized = True
+    with _logging_init_lock:
+        if _logging_initialized:
+            return
+        _logging_initialized = True
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
