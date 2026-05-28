@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import joinedload
 
-from src.rag.model import IngestionTask, ParentChunk
+from .model import IngestionTask, ParentChunk
 
 logger = logging.getLogger(__name__)
 

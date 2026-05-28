@@ -1,8 +1,10 @@
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import AsyncMock, MagicMock
+
 from main import app
-from src.knowledge_base.dependency import get_pdf_service
+from src.knowledge_base import get_pdf_service
 
 client = TestClient(app)
 

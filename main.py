@@ -1,16 +1,17 @@
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
-import uvicorn
 
-from src.core.database import engine, Base
-from src.chat import chat_router
-from src.knowledge_base import kb_router
-from src.rag.dependency import get_vector_store
+import uvicorn
+from fastapi import FastAPI
+
+import src.chat.model  # noqa: F401
 
 # Import all models so SQLAlchemy registers them with Base.metadata
-import src.rag.model   # noqa: F401
-import src.chat.model  # noqa: F401
+import src.rag.model  # noqa: F401
+from src.chat import chat_router
+from src.core import Base, engine
+from src.knowledge_base import kb_router
+from src.rag import get_vector_store
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
 
     # Initialize Qdrant collections (idempotent — skips if exists)
-    from src.chat.dependency import get_session_vector_store
+    from src.chat import get_session_vector_store
     vector_store = get_vector_store()
     session_vector_store = get_session_vector_store()
     try:

@@ -1,7 +1,8 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
-from src.knowledge_base.model import PDFDocument
+
+from .model import PDFDocument
 
 
 class PDFRepository:

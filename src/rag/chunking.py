@@ -6,14 +6,14 @@ into a two-level hierarchy:
 - Parent chunks: logical sections of the document (for LLM context)
 - Child chunks: sentence-level splits of each parent (for retrieval precision)
 """
-import uuid
 import logging
+import uuid
 from dataclasses import dataclass, field
 from typing import List
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from src.infra.document_parser import ParsedElement
+from src.infra import ParsedElement
 
 logger = logging.getLogger(__name__)
 

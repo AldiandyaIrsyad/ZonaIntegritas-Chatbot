@@ -1,8 +1,11 @@
 import os
-import pytest
 import uuid
-from unittest.mock import patch, AsyncMock
-from src.infra.storage import LocalStorageProvider
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from src.infra import LocalStorageProvider
+
 
 @pytest.fixture
 def temp_upload_dir(tmp_path):

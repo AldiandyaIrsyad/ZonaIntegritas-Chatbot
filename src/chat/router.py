@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Request, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from src.chat.service import ChatService
-from src.chat.dependency import get_chat_service
+
+from .dependency import get_chat_service
+from .service import ChatService
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")

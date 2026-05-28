@@ -1,8 +1,10 @@
-import tiktoken
 import copy
-from typing import AsyncGenerator, List, Dict
+from typing import AsyncGenerator, Dict, List
 
-from src.infra.llm_connection import LLMConnection
+import tiktoken
+
+from src.infra import LLMConnection
+
 
 class LLMService:
     """

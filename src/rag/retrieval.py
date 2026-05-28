@@ -10,10 +10,9 @@ from typing import List
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.infra.embedding_provider import EmbeddingProvider
-from src.infra.reranker import Reranker
-from src.infra.vector_store import QdrantStore
-from src.rag.repository import RAGRepository
+from src.infra import EmbeddingProvider, QdrantStore, Reranker
+
+from .repository import RAGRepository
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +159,8 @@ class RetrievalService:
     async def _get_document_title(self, doc_id: str) -> str:
         """Fetch the title of a PDFDocument for source attribution."""
         from sqlalchemy.future import select
-        from src.knowledge_base.model import PDFDocument
+
+        from src.knowledge_base import PDFDocument
 
         result = await self.db.execute(
             select(PDFDocument.title).where(PDFDocument.id == doc_id)

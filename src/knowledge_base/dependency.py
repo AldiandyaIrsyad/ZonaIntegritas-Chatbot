@@ -1,14 +1,15 @@
+from functools import lru_cache
+
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-from src.core.database import get_db
-from src.knowledge_base.repository import PDFRepository
-from src.knowledge_base.service import KnowledgeBase
-from src.infra.storage import StorageProvider, LocalStorageProvider
-from src.rag.dependency import get_vector_store, get_ingestion_service
-from src.infra.vector_store import QdrantStore
-from src.rag.ingestion import IngestionService
-from src.core.config import get_storage_settings
-from functools import lru_cache
+
+from src.core import get_db, get_storage_settings
+from src.infra import LocalStorageProvider, QdrantStore, StorageProvider
+from src.rag import IngestionService, get_ingestion_service, get_vector_store
+
+from .repository import PDFRepository
+from .service import KnowledgeBase
+
 
 @lru_cache
 def get_storage_provider() -> StorageProvider:

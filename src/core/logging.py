@@ -1,15 +1,15 @@
 import logging
-import sys
 import os
-from pythonjsonlogger.json import JsonFormatter
-import time
-
 import queue
-from logging.handlers import QueueHandler, QueueListener
 import socket
-
-from src.core.config import get_vector_settings
+import sys
 import threading
+import time
+from logging.handlers import QueueHandler, QueueListener
+
+from pythonjsonlogger.json import JsonFormatter
+
+from .config import get_vector_settings
 
 _logging_initialized = False
 _logging_init_lock = threading.Lock()

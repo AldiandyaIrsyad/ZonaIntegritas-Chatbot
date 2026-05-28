@@ -1,9 +1,18 @@
-from fastapi import APIRouter, Request, Depends, HTTPException, UploadFile, Form, BackgroundTasks
-from starlette.responses import JSONResponse
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from src.knowledge_base.service import KnowledgeBase
-from src.knowledge_base.dependency import get_pdf_service
+from starlette.responses import JSONResponse
+
+from .dependency import get_pdf_service
+from .service import KnowledgeBase
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")

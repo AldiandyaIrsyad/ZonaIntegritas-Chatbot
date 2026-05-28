@@ -1,8 +1,13 @@
+from typing import List
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
-from src.chat.model import Session as DBSession, Message as DBMessage, SessionDocument, SessionDocumentChunk
-from typing import List
+
+from .model import Message as DBMessage
+from .model import Session as DBSession
+from .model import SessionDocument, SessionDocumentChunk
+
 
 class ChatRepository:
     def __init__(self, db: AsyncSession):

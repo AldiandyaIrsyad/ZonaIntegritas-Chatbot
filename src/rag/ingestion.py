@@ -10,19 +10,17 @@ from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.infra.document_parser import DocumentParser
-from src.infra.embedding_provider import EmbeddingProvider
-from src.infra.vector_store import ChunkVector, QdrantStore
-from src.rag.chunking import (
+from src.core import LogEvent, get_logger
+from src.infra import ChunkVector, DocumentParser, EmbeddingProvider, QdrantStore
+
+from .chunking import (
     ChildChunkData,
     ParentChunkData,
     create_parent_chunks,
     split_into_children,
 )
-from src.rag.model import ParentChunk
-from src.rag.repository import RAGRepository
-from src.core.logging import get_logger
-from src.core.events import LogEvent
+from .model import ParentChunk
+from .repository import RAGRepository
 
 logger = get_logger(__name__)
 
@@ -239,7 +237,8 @@ class IngestionService:
     async def _get_document(self, doc_id: str):
         """Fetch a PDFDocument by ID."""
         from sqlalchemy.future import select
-        from src.knowledge_base.model import PDFDocument
+
+        from src.knowledge_base import PDFDocument
 
         result = await self.db.execute(
             select(PDFDocument).where(PDFDocument.id == doc_id)
@@ -251,7 +250,8 @@ class IngestionService:
     ) -> None:
         """Update the ingestion_status field on PDFDocument."""
         from sqlalchemy.future import select
-        from src.knowledge_base.model import PDFDocument
+
+        from src.knowledge_base import PDFDocument
 
         result = await self.db.execute(
             select(PDFDocument).where(PDFDocument.id == doc_id)
