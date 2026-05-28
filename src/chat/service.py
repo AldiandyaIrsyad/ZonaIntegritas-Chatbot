@@ -84,9 +84,14 @@ class ChatService:
         file_path = await self.storage.save_file(file, file_extension)
 
         # Generate thumbnail
-        thumbnail = await anyio.to_thread.run_sync(
-            self.thumbnail_context.generate_thumbnail, file_path
-        )
+        try:
+            thumbnail = await anyio.to_thread.run_sync(
+                self.thumbnail_context.generate_thumbnail, file_path
+            )
+        except Exception as e:
+            logger.error(f"Failed to generate thumbnail for {file.filename}", exc_info=True)
+            await self.storage.delete_file(file_path)
+            raise
 
         # Create session document
         doc = await self.repository.create_session_document(
@@ -242,19 +247,23 @@ class ChatService:
         return StreamingResponse(generate(), media_type="text/plain")
 
     async def _retrieve_session_context(self, session_id: str, query: str) -> Optional[str]:
-        query_embeddings = await self.embedding_provider.embed_texts([query])
-        if not query_embeddings:
+        try:
+            query_embeddings = await self.embedding_provider.embed_texts([query])
+            if not query_embeddings:
+                return None
+            
+            query_emb = query_embeddings[0]
+            # 2. Hybrid Search in Qdrant filtered by session_id
+            search_results = await self.vector_store.hybrid_search(
+                dense_vector=query_emb.dense,
+                sparse_indices=query_emb.sparse_indices,
+                sparse_values=query_emb.sparse_values,
+                top_k=15,
+                session_id=session_id
+            )
+        except Exception:
+            logger.warning(f"Failed to retrieve session context for session {session_id}", exc_info=True)
             return None
-        
-        query_emb = query_embeddings[0]
-        # 2. Hybrid Search in Qdrant filtered by session_id
-        search_results = await self.vector_store.hybrid_search(
-            dense_vector=query_emb.dense,
-            sparse_indices=query_emb.sparse_indices,
-            sparse_values=query_emb.sparse_values,
-            top_k=15,
-            session_id=session_id
-        )
         
         if not search_results:
             return None
