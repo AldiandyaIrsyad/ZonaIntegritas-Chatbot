@@ -18,11 +18,45 @@ def mock_retrieval_service():
     return service
 
 @pytest.fixture
-def chat_service(mock_repository, mock_llm, mock_retrieval_service):
+def mock_storage():
+    return AsyncMock()
+
+@pytest.fixture
+def mock_document_parser():
+    return AsyncMock()
+
+@pytest.fixture
+def mock_reranker():
+    return AsyncMock()
+
+@pytest.fixture
+def mock_vector_store():
+    return AsyncMock()
+
+@pytest.fixture
+def mock_embedding_provider():
+    return AsyncMock()
+
+@pytest.fixture
+def chat_service(
+    mock_repository,
+    mock_llm,
+    mock_retrieval_service,
+    mock_storage,
+    mock_document_parser,
+    mock_reranker,
+    mock_vector_store,
+    mock_embedding_provider
+):
     return ChatService(
         repository=mock_repository,
         llm_service=mock_llm,
         retrieval_service=mock_retrieval_service,
+        storage=mock_storage,
+        document_parser=mock_document_parser,
+        reranker=mock_reranker,
+        vector_store=mock_vector_store,
+        embedding_provider=mock_embedding_provider
     )
 
 @pytest.mark.asyncio
@@ -56,12 +90,14 @@ async def test_get_session_details(chat_service, mock_repository):
     mock_msg.role = "user"
     mock_msg.content = "Hello"
     mock_session.messages = [mock_msg]
+    mock_session.documents = []
     mock_repository.get_session_by_id.return_value = mock_session
 
     result = await chat_service.get_session_details("123")
     assert result == {
         "title": "Test Title",
-        "messages": [{"role": "user", "content": "Hello"}]
+        "messages": [{"role": "user", "content": "Hello"}],
+        "documents": []
     }
 
 @pytest.mark.asyncio

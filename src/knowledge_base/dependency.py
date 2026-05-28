@@ -7,11 +7,13 @@ from src.infra.storage import StorageProvider, LocalStorageProvider
 from src.rag.dependency import get_vector_store, get_ingestion_service
 from src.infra.vector_store import QdrantStore
 from src.rag.ingestion import IngestionService
+from src.core.config import get_storage_settings
 from functools import lru_cache
 
 @lru_cache
 def get_storage_provider() -> StorageProvider:
-    return LocalStorageProvider()
+    settings = get_storage_settings()
+    return LocalStorageProvider(settings.admin_upload_dir)
 
 def get_pdf_repository(db: AsyncSession = Depends(get_db)) -> PDFRepository:
     return PDFRepository(db)

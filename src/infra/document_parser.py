@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from typing import List
 
 import httpx
-import aiofiles
 
 logger = logging.getLogger(__name__)
 
@@ -70,14 +69,12 @@ class DocumentParser:
 
         filename = os.path.basename(resolved_path)
 
-        async with aiofiles.open(resolved_path, "rb") as f:
+        with open(resolved_path, "rb") as f:
             response = await self._client.post(
                 "/general/v0/general",
                 files={"files": (filename, f, "application/pdf")},
                 data={
-                    "strategy": "hi_res",
-                    "hi_res_model_name": "yolox",
-                    "pdf_infer_table_structure": "true",
+                    "strategy": "fast",
                 },
             )
 

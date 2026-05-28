@@ -5,7 +5,6 @@ import asyncio
 from abc import ABC, abstractmethod
 from typing import BinaryIO
 from fastapi import UploadFile
-from src.core.config import get_storage_settings
 
 class StorageProvider(ABC):
     """Abstract base class for storage providers."""
@@ -24,9 +23,8 @@ class StorageProvider(ABC):
 class LocalStorageProvider(StorageProvider):
     """Local file system implementation for storage."""
 
-    def __init__(self):
-        settings = get_storage_settings()
-        self.upload_dir = settings.upload_dir
+    def __init__(self, upload_dir: str):
+        self.upload_dir = upload_dir
         os.makedirs(self.upload_dir, exist_ok=True)
 
     async def save_file(self, file: UploadFile, file_extension: str) -> str:

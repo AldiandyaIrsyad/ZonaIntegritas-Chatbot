@@ -10,18 +10,13 @@ def temp_upload_dir(tmp_path):
 
 @pytest.mark.asyncio
 async def test_local_storage_init(temp_upload_dir):
-    with patch("src.infra.storage.get_storage_settings") as mock_settings:
-        mock_settings.return_value.upload_dir = temp_upload_dir
-        
-        provider = LocalStorageProvider()
-        assert provider.upload_dir == temp_upload_dir
-        assert os.path.exists(temp_upload_dir)
+    provider = LocalStorageProvider(temp_upload_dir)
+    assert provider.upload_dir == temp_upload_dir
+    assert os.path.exists(temp_upload_dir)
 
 @pytest.mark.asyncio
 async def test_save_file_success(temp_upload_dir):
-    with patch("src.infra.storage.get_storage_settings") as mock_settings:
-        mock_settings.return_value.upload_dir = temp_upload_dir
-        provider = LocalStorageProvider()
+    provider = LocalStorageProvider(temp_upload_dir)
 
     # Mock an UploadFile
     mock_file = AsyncMock()
@@ -39,9 +34,7 @@ async def test_save_file_success(temp_upload_dir):
 
 @pytest.mark.asyncio
 async def test_save_file_exception_cleanup(temp_upload_dir):
-    with patch("src.infra.storage.get_storage_settings") as mock_settings:
-        mock_settings.return_value.upload_dir = temp_upload_dir
-        provider = LocalStorageProvider()
+    provider = LocalStorageProvider(temp_upload_dir)
 
     # Mock an UploadFile that raises an exception on read
     mock_file = AsyncMock()
@@ -58,9 +51,7 @@ async def test_save_file_exception_cleanup(temp_upload_dir):
 
 @pytest.mark.asyncio
 async def test_delete_file_success(temp_upload_dir):
-    with patch("src.infra.storage.get_storage_settings") as mock_settings:
-        mock_settings.return_value.upload_dir = temp_upload_dir
-        provider = LocalStorageProvider()
+    provider = LocalStorageProvider(temp_upload_dir)
 
     file_path = os.path.join(temp_upload_dir, "test_file.txt")
     with open(file_path, "w") as f:
@@ -72,9 +63,7 @@ async def test_delete_file_success(temp_upload_dir):
 
 @pytest.mark.asyncio
 async def test_delete_file_not_found(temp_upload_dir):
-    with patch("src.infra.storage.get_storage_settings") as mock_settings:
-        mock_settings.return_value.upload_dir = temp_upload_dir
-        provider = LocalStorageProvider()
+    provider = LocalStorageProvider(temp_upload_dir)
 
     file_path = os.path.join(temp_upload_dir, "nonexistent.txt")
     result = await provider.delete_file(file_path)

@@ -38,7 +38,8 @@ class DatabaseSettings(BaseSettings):
     )
 
 class StorageSettings(BaseSettings):
-    upload_dir: str = "user_upload"
+    admin_upload_dir: str = "admin_upload"
+    user_upload_dir: str = "user_upload"
 
     model_config = SettingsConfigDict(
         env_file=".env", 
@@ -50,6 +51,7 @@ class QdrantSettings(BaseSettings):
     host: str = "localhost"
     port: int = 6333
     collection_name: str = "knowledge_base"
+    session_collection_name: str = "session_documents"
 
     model_config = SettingsConfigDict(
         env_file=".env",

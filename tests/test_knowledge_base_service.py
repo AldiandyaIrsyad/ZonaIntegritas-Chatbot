@@ -64,22 +64,25 @@ async def test_upload_pdf_success(kb_service, mock_repository, mock_storage, moc
     mock_pdf.title = "Test PDF"
     mock_repository.create_pdf.return_value = mock_pdf
 
-    result = await kb_service.upload_pdf("Test PDF", "Test Desc", mock_file)
+    mock_background_tasks = MagicMock()
+
+    result = await kb_service.upload_pdf("Test PDF", "Test Desc", mock_file, mock_background_tasks)
     
     assert result == mock_pdf
     mock_storage.save_file.assert_called_once_with(mock_file, ".pdf")
     mock_repository.create_pdf.assert_called_once_with("Test PDF", "Test Desc", "/mock/path.pdf")
-    # Verify ingestion was triggered
-    mock_ingestion_service.ingest_document.assert_called_once_with("1")
+    # Verify ingestion task was enqueued
+    mock_background_tasks.add_task.assert_called_once()
 
 @pytest.mark.asyncio
 async def test_upload_pdf_invalid_extension(kb_service, mock_repository, mock_storage):
     mock_file = MagicMock(spec=UploadFile)
     mock_file.filename = "test.txt"
     mock_file.content_type = "application/pdf"
+    mock_background_tasks = MagicMock()
     
     with pytest.raises(ValueError, match="Only PDF files are allowed"):
-        await kb_service.upload_pdf("Test", "Desc", mock_file)
+        await kb_service.upload_pdf("Test", "Desc", mock_file, mock_background_tasks)
         
     mock_storage.save_file.assert_not_called()
     mock_repository.create_pdf.assert_not_called()
@@ -89,9 +92,10 @@ async def test_upload_pdf_invalid_content_type(kb_service, mock_repository, mock
     mock_file = MagicMock(spec=UploadFile)
     mock_file.filename = "test.pdf"
     mock_file.content_type = "text/plain"
+    mock_background_tasks = MagicMock()
     
     with pytest.raises(ValueError, match="Only PDF files are allowed"):
-        await kb_service.upload_pdf("Test", "Desc", mock_file)
+        await kb_service.upload_pdf("Test", "Desc", mock_file, mock_background_tasks)
         
     mock_storage.save_file.assert_not_called()
 
