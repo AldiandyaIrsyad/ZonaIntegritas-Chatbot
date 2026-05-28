@@ -64,7 +64,7 @@ class ChatRepository:
             select(SessionDocumentChunk)
             .join(SessionDocument)
             .where(SessionDocument.session_id == session_id)
-            .order_by(SessionDocumentChunk.chunk_index)
+            .order_by(SessionDocument.created_at, SessionDocumentChunk.chunk_index)
         )
         result = await self.db.execute(query)
         return list(result.scalars().all())

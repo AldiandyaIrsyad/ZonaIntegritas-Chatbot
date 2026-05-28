@@ -105,6 +105,7 @@ class ChatService:
                     for child in children:
                         chunk_models.append(
                             SessionDocumentChunk(
+                                id=str(uuid.uuid4()),
                                 session_document_id=doc.id,
                                 text=child.text,
                                 chunk_index=chunk_idx
@@ -114,10 +115,7 @@ class ChatService:
                 
                 if chunk_models:
                     await self.repository.save_session_document_chunks(chunk_models)
-                    # Refresh to get DB-assigned IDs before passing to Qdrant
-                    for model in chunk_models:
-                        await self.repository.db.refresh(model)
-                    
+
                     # Embed and store in Qdrant for Session RAG
                     chunk_texts = [c.text for c in chunk_models]
                     embeddings = await self.embedding_provider.embed_texts(chunk_texts)
@@ -138,7 +136,14 @@ class ChatService:
                             )
                         await self.vector_store.upsert_chunks(chunk_vectors)
             except Exception as e:
-                logger.error(f"Failed to parse PDF for session {session_id}: {e}")
+                logger.error(f"Failed to parse PDF {file.filename} for session {session_id}: {e}")
+
+                try:
+                    await self.storage.delete_file(file_path)
+                except Exception as e2:
+                    logger.error(f"Failed to delete failed upload {file.filename} for session {session_id}: {e2}")
+                
+                raise HTTPException(status_code=500, detail="Failed to process PDF")
 
         return {
             "id": doc.id,
@@ -171,9 +176,7 @@ class ChatService:
 
         # --- Session Document Context Injection via Qdrant ---
         # Only run if the session actually has documents attached
-        session_docs = await self.repository.get_session_by_id(session_id, load_messages=False)
-        has_documents = session_docs and session_docs.documents
-        if has_documents:
+        if session.documents:
             query_embeddings = await self.embedding_provider.embed_texts([message_text])
             if query_embeddings:
                 query_emb = query_embeddings[0]
