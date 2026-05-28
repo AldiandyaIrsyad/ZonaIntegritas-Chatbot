@@ -3,7 +3,8 @@ from unittest.mock import AsyncMock, patch
 from typing import AsyncGenerator
 from pydantic import SecretStr
 
-from src.infra.llm_provider import LLM 
+from src.infra.llm_connection import LLMConnection
+from src.llm.service import LLMService
 
 
 # --- Mock Classes for OpenAI Stream Simulation ---
@@ -34,19 +35,19 @@ async def test_api_backend_initialization_and_stream():
     Validates OpenRouter backend routing, header injection, and stream parsing.
     Mocked to prevent external network calls and API key exposure.
     """
-    with patch("src.infra.llm_provider.AsyncOpenAI") as MockOpenAI:
+    with patch("src.infra.llm_connection.AsyncOpenAI") as MockOpenAI:
         mock_client_instance = MockOpenAI.return_value
         mock_client_instance.chat.completions.create = AsyncMock()
         mock_client_instance.chat.completions.create.return_value = mock_stream_generator()
 
-
-        # Initialize the API backend
-        llm = LLM(
-            model="openai/gpt-3.5-turbo", 
-            max_tokens=4000,
-            max_completion_tokens=1000,
+        # Initialize the API connection
+        llm = LLMConnection(
+            base_url="https://openrouter.ai/api/v1", 
             api_key=SecretStr("test_dummy_key"),
-            base_url="https://openrouter.ai/api/v1"
+            default_headers={
+                "HTTP-Referer": "http://localhost:3000",
+                "X-Title": "Local-Dev-App"
+            }
         )
 
         # Verify correct initialization parameters
@@ -59,10 +60,18 @@ async def test_api_backend_initialization_and_stream():
             }
         )
 
+        # Initialize LLMService
+        service = LLMService(
+            connection=llm,
+            model="openai/gpt-3.5-turbo",
+            max_tokens=4000,
+            max_completion_tokens=1000
+        )
+
         # Execute stream and collect chunks
         result_text = ""
         raw_history = [{"role": "user", "content": "Test prompt"}]
-        async for chunk in llm.input(raw_history):
+        async for chunk in service.stream_response(raw_history):
             result_text += chunk
 
         # Assert generation logic
@@ -83,11 +92,14 @@ async def test_local_backend_live_integration():
     target_model = "qwen2.5:0.5b" 
     
     try:
-        llm = LLM(
-            model=target_model, 
-            max_tokens=4000, 
-            max_completion_tokens=1000, 
+        llm = LLMConnection(
             base_url="http://localhost:11434/v1"
+        )
+        service = LLMService(
+            connection=llm,
+            model=target_model,
+            max_tokens=4000,
+            max_completion_tokens=1000
         )
         
         chunks_received = 0
@@ -95,7 +107,7 @@ async def test_local_backend_live_integration():
         
         # Test stream connectivity
         raw_history = [{"role": "user", "content": "Acknowledge this message with a single word."}]
-        async for chunk in llm.input(raw_history):
+        async for chunk in service.stream_response(raw_history):
             assert isinstance(chunk, str)
             final_output += chunk
             chunks_received += 1

@@ -1,12 +1,22 @@
 import logging
+import os
 import uuid
 from typing import List, Optional
 
+from fastapi import UploadFile, HTTPException
 from fastapi.responses import StreamingResponse
 
 from src.chat.repository import ChatRepository
 from src.llm.service import LLMService
 from src.rag.retrieval import RetrievalService, RetrievedContext
+from src.infra.storage import StorageProvider
+from src.infra.document_parser import DocumentParser
+from src.infra.reranker import Reranker
+from src.infra.thumbnail import ThumbnailContext
+from src.chat.model import SessionDocumentChunk
+from src.rag.chunking import create_parent_chunks, split_into_children
+from src.infra.vector_store import QdrantStore, ChunkVector
+from src.infra.embedding_provider import EmbeddingProvider
 import anyio
 
 logger = logging.getLogger(__name__)
@@ -18,10 +28,21 @@ class ChatService:
         repository: ChatRepository,
         llm_service: LLMService,
         retrieval_service: RetrievalService,
+        storage: StorageProvider,
+        document_parser: DocumentParser,
+        reranker: Reranker,
+        vector_store: QdrantStore,
+        embedding_provider: EmbeddingProvider,
     ):
         self.repository = repository
         self.llm_service = llm_service
         self.retrieval_service = retrieval_service
+        self.storage = storage
+        self.document_parser = document_parser
+        self.reranker = reranker
+        self.vector_store = vector_store
+        self.embedding_provider = embedding_provider
+        self.thumbnail_context = ThumbnailContext()
 
     async def list_sessions(self):
         sessions = await self.repository.get_all_sessions()
@@ -38,7 +59,91 @@ class ChatService:
             return None
         return {
             "title": session.title,
-            "messages": [{"role": m.role, "content": m.content} for m in session.messages]
+            "messages": [{"role": m.role, "content": m.content} for m in session.messages],
+            "documents": [{"id": d.id, "filename": d.filename, "thumbnail": d.thumbnail} for d in session.documents]
+        }
+
+    async def upload_pdf(self, session_id: str, file: UploadFile):
+        """Upload, parse, and chunk a PDF file for a specific chat session.
+
+        Requires the session to already exist. Call POST /api/sessions first
+        if you need to create one.
+        """
+        session = await self.repository.get_session_by_id(session_id, load_messages=True)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        if len(session.documents) >= 1:
+            raise HTTPException(status_code=400, detail="Only one PDF is allowed per session for now.")
+
+        # Determine extension from the original filename robustly.
+        _, file_extension = os.path.splitext(file.filename or "")
+        file_extension = file_extension.lower()
+
+        file_path = await self.storage.save_file(file, file_extension)
+
+        # Generate thumbnail
+        thumbnail = self.thumbnail_context.generate_thumbnail(file_path)
+
+        # Create session document
+        doc = await self.repository.create_session_document(
+            session_id=session_id,
+            filename=file.filename,
+            file_path=file_path,
+            thumbnail=thumbnail,
+        )
+
+        # Parse and chunk
+        if file_extension == ".pdf":
+            try:
+                elements = await self.document_parser.parse_pdf(file_path)
+                parent_chunks = create_parent_chunks(elements, doc.id)
+                chunk_models = []
+                chunk_idx = 0
+                for parent in parent_chunks:
+                    children = split_into_children(parent)
+                    for child in children:
+                        chunk_models.append(
+                            SessionDocumentChunk(
+                                session_document_id=doc.id,
+                                text=child.text,
+                                chunk_index=chunk_idx
+                            )
+                        )
+                        chunk_idx += 1
+                
+                if chunk_models:
+                    await self.repository.save_session_document_chunks(chunk_models)
+                    # Refresh to get DB-assigned IDs before passing to Qdrant
+                    for model in chunk_models:
+                        await self.repository.db.refresh(model)
+                    
+                    # Embed and store in Qdrant for Session RAG
+                    chunk_texts = [c.text for c in chunk_models]
+                    embeddings = await self.embedding_provider.embed_texts(chunk_texts)
+                    
+                    if embeddings:
+                        chunk_vectors = []
+                        for model, emb in zip(chunk_models, embeddings):
+                            chunk_vectors.append(
+                                ChunkVector(
+                                    chunk_id=model.id,
+                                    parent_chunk_id=doc.id,  # flat: use doc_id as parent
+                                    doc_id=doc.id,
+                                    dense_vector=emb.dense,
+                                    sparse_indices=emb.sparse_indices,
+                                    sparse_values=emb.sparse_values,
+                                    session_id=session_id
+                                )
+                            )
+                        await self.vector_store.upsert_chunks(chunk_vectors)
+            except Exception as e:
+                logger.error(f"Failed to parse PDF for session {session_id}: {e}")
+
+        return {
+            "id": doc.id,
+            "filename": doc.filename,
+            "thumbnail": doc.thumbnail
         }
 
     async def process_chat_message(self, session_id: str, message_text: str):
@@ -64,6 +169,44 @@ class ChatService:
             # Insert as the first system message so it's always in context
             raw_history.insert(0, {"role": "system", "content": context_prompt})
 
+        # --- Session Document Context Injection via Qdrant ---
+        # Only run if the session actually has documents attached
+        session_docs = await self.repository.get_session_by_id(session_id, load_messages=False)
+        has_documents = session_docs and session_docs.documents
+        if has_documents:
+            query_embeddings = await self.embedding_provider.embed_texts([message_text])
+            if query_embeddings:
+                query_emb = query_embeddings[0]
+                # 2. Hybrid Search in Qdrant filtered by session_id
+                search_results = await self.vector_store.hybrid_search(
+                    dense_vector=query_emb.dense,
+                    sparse_indices=query_emb.sparse_indices,
+                    sparse_values=query_emb.sparse_values,
+                    top_k=15,
+                    session_id=session_id
+                )
+                
+                if search_results:
+                    chunk_ids = [res.chunk_id for res in search_results]
+                    
+                    # Fetch only the matched chunks from the database
+                    session_chunks = await self.repository.get_session_chunks_by_ids(chunk_ids)
+                    
+                    retrieved_texts = [c.text for c in session_chunks if c.text]
+                    
+                    if retrieved_texts:
+                        try:
+                            # 3. Rerank the top results
+                            ranked_results = await self.reranker.rerank(message_text, retrieved_texts, top_k=5)
+                            if ranked_results:
+                                session_context_prompt = "You also have access to the following excerpts from documents uploaded in this specific session:\n"
+                                for ranked in ranked_results:
+                                    session_context_prompt += f"\n---\n{ranked.text}\n"
+                                session_context_prompt += "\n---"
+                                raw_history.insert(0, {"role": "system", "content": session_context_prompt})
+                        except Exception as e:
+                            logger.warning(f"Reranking session chunks failed: {e}")
+
         raw_history.append({"role": "user", "content": message_text})
 
         async def generate():
@@ -86,7 +229,25 @@ class ChatService:
         return StreamingResponse(generate(), media_type="text/plain")
 
     async def delete_session(self, session_id: str):
-        return await self.repository.delete_session(session_id)
+        session = await self.repository.get_session_by_id(session_id)
+        if session:
+            # Clean up associated session documents (files and vector stores)
+            for doc in session.documents:
+                # 1. Delete vectors from Qdrant
+                try:
+                    await self.vector_store.delete_by_doc_id(doc.id)
+                except Exception as e:
+                    logger.error(f"Failed to delete Qdrant vectors for doc {doc.id}: {e}")
+                
+                # 2. Delete file from storage
+                try:
+                    await self.storage.delete_file(doc.file_path)
+                except Exception as e:
+                    logger.error(f"Failed to delete file {doc.file_path}: {e}")
+
+            # 3. Delete session from PostgreSQL (will cascade delete documents and messages)
+            return await self.repository.delete_session(session_id)
+        return False
 
     async def _retrieve_rag_context(
         self, query: str

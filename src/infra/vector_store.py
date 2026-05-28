@@ -43,6 +43,7 @@ class ChunkVector:
     dense_vector: List[float]
     sparse_indices: List[int]
     sparse_values: List[float]
+    session_id: Optional[str] = None
 
 
 @dataclass
@@ -103,6 +104,11 @@ class QdrantStore:
             )
             await self.client.create_payload_index(
                 collection_name=self.collection_name,
+                field_name="session_id",
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+            await self.client.create_payload_index(
+                collection_name=self.collection_name,
                 field_name="doc_id",
                 field_schema=PayloadSchemaType.KEYWORD,
             )
@@ -148,8 +154,10 @@ class QdrantStore:
                     "parent_chunk_id": chunk.parent_chunk_id,
                     "doc_id": chunk.doc_id,
                     "is_active": True,
-                },
+                }
             )
+            if chunk.session_id:
+                point.payload["session_id"] = chunk.session_id
             # Attach sparse vector separately if it exists
             if chunk.sparse_indices:
                 point.vector["bm25"] = SparseVector(
@@ -175,6 +183,7 @@ class QdrantStore:
         sparse_indices: List[int],
         sparse_values: List[float],
         top_k: int = 15,
+        session_id: Optional[str] = None,
     ) -> List[SearchResult]:
         """Execute hybrid search combining dense semantic and sparse BM25 matching.
 
@@ -189,14 +198,21 @@ class QdrantStore:
             )
         if len(sparse_indices) != len(sparse_values):
             raise ValueError("sparse_indices and sparse_values must have the same length")
-        active_filter = Filter(
-            must=[
+        must_conditions = [
+            FieldCondition(
+                key="is_active",
+                match=MatchValue(value=True),
+            )
+        ]
+        if session_id:
+            must_conditions.append(
                 FieldCondition(
-                    key="is_active",
-                    match=MatchValue(value=True),
+                    key="session_id",
+                    match=MatchValue(value=session_id),
                 )
-            ]
-        )
+            )
+
+        active_filter = Filter(must=must_conditions)
 
         if not sparse_indices:
             # Fallback to standard dense search if sparse vectors are missing

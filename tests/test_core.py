@@ -14,7 +14,8 @@ def test_database_settings():
 
 def test_storage_settings():
     settings = StorageSettings()
-    assert settings.upload_dir == "user_upload"
+    assert settings.admin_upload_dir == "admin_upload"
+    assert settings.user_upload_dir == "user_upload"
 
 @pytest.mark.asyncio
 async def test_get_db_yields_session():

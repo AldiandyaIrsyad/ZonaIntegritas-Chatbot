@@ -8,8 +8,9 @@ from src.chat import chat_router
 from src.knowledge_base import kb_router
 from src.rag.dependency import get_vector_store
 
-# Import RAG models so SQLAlchemy registers them with Base.metadata
-import src.rag.model  # noqa: F401
+# Import all models so SQLAlchemy registers them with Base.metadata
+import src.rag.model   # noqa: F401
+import src.chat.model  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -20,11 +21,14 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    # Initialize Qdrant collection (idempotent — skips if exists)
+    # Initialize Qdrant collections (idempotent — skips if exists)
+    from src.chat.dependency import get_session_vector_store
     vector_store = get_vector_store()
+    session_vector_store = get_session_vector_store()
     try:
         await vector_store.ensure_collection()
-        logger.info("Qdrant collection initialized")
+        await session_vector_store.ensure_collection()
+        logger.info("Qdrant collections initialized")
     except Exception as e:
         # Qdrant may not be running; log warning but don't block startup
         logger.warning(

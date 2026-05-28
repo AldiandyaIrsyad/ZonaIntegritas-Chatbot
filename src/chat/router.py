@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, Depends, HTTPException
+from fastapi import APIRouter, Request, Depends, HTTPException, UploadFile, File
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from src.chat.service import ChatService
@@ -9,6 +9,20 @@ templates = Jinja2Templates(directory="templates")
 
 class ChatRequest(BaseModel):
     message: str
+
+@router.post("/api/sessions/{session_id}/upload")
+async def upload_session_file(session_id: str, file: UploadFile = File(...), service: ChatService = Depends(get_chat_service)):
+    """Upload a file to a specific chat session.
+    
+    Args:
+        session_id (str): UUID of the session.
+        file (UploadFile): The file to upload.
+        service (ChatService): Dependency-injected chat service instance.
+    
+    Returns:
+        dict: Uploaded document metadata.
+    """
+    return await service.upload_pdf(session_id, file)
 
 @router.get("/")
 async def home(request: Request):
