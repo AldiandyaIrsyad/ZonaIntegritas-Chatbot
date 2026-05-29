@@ -30,6 +30,11 @@ class EmbeddingProvider:
 
     Processes inputs in configurable batch sizes to respect server memory
     constraints (INFINITY_BATCH_SIZE).
+
+    Args:
+        base_url (str): Base URL of the Infinity server.
+        model (str): Name of the embedding model to use.
+        batch_size (int, optional): Number of texts to process in one request. Defaults to 8.
     """
 
     def __init__(self, base_url: str, model: str, batch_size: int = 8):
@@ -50,10 +55,10 @@ class EmbeddingProvider:
         bge-m3 returns both dense and sparse representations natively.
 
         Args:
-            texts: List of text strings to embed.
+            texts (List[str]): List of text strings to embed.
 
         Returns:
-            List of EmbeddingResult, one per input text, preserving order.
+            List[EmbeddingResult]: List of EmbeddingResult, one per input text, preserving order.
 
         Raises:
             httpx.HTTPStatusError: If the Infinity server returns an error.

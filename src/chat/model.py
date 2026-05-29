@@ -1,3 +1,8 @@
+"""
+SQLAlchemy models for the chat module.
+
+Defines schemas for chat sessions, messages, and session-specific document chunks.
+"""
 import uuid
 from datetime import datetime, timezone
 
@@ -8,6 +13,7 @@ from src.core import Base
 
 
 class Session(Base):
+    """Stores information about a chat session."""
     __tablename__ = "sessions"
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     title = Column(String, default="New Chat")
@@ -28,6 +34,7 @@ class Session(Base):
     )
 
 class Message(Base):
+    """Stores a single message within a chat session."""
     __tablename__ = "messages"
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     session_id = Column(String, ForeignKey("sessions.id"))
@@ -38,6 +45,7 @@ class Message(Base):
     session = relationship("Session", back_populates="messages")
 
 class SessionDocument(Base):
+    """Stores metadata for a document uploaded to a specific chat session."""
     __tablename__ = "session_documents"
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     session_id = Column(String, ForeignKey("sessions.id"))
@@ -55,6 +63,7 @@ class SessionDocument(Base):
     )
 
 class SessionDocumentChunk(Base):
+    """Stores full-text chunks of session-specific documents for LLM context."""
     __tablename__ = "session_document_chunks"
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     session_document_id = Column(String, ForeignKey("session_documents.id"))

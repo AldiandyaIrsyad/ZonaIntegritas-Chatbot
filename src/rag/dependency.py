@@ -23,7 +23,11 @@ from .retrieval import RetrievalService
 
 @lru_cache
 def get_vector_store() -> QdrantStore:
-    """Singleton QdrantStore instance."""
+    """Singleton QdrantStore instance.
+
+    Returns:
+        QdrantStore: The singleton vector store instance.
+    """
     settings = get_qdrant_settings()
     return QdrantStore(
         host=settings.host,
@@ -34,7 +38,11 @@ def get_vector_store() -> QdrantStore:
 
 @lru_cache
 def get_embedding_provider() -> EmbeddingProvider:
-    """Singleton EmbeddingProvider instance."""
+    """Singleton EmbeddingProvider instance.
+
+    Returns:
+        EmbeddingProvider: The singleton embedding provider instance.
+    """
     settings = get_infinity_settings()
     return EmbeddingProvider(
         base_url=settings.base_url,
@@ -44,7 +52,11 @@ def get_embedding_provider() -> EmbeddingProvider:
 
 @lru_cache
 def get_reranker() -> Reranker:
-    """Singleton Reranker instance."""
+    """Singleton Reranker instance.
+
+    Returns:
+        Reranker: The singleton reranker instance.
+    """
     settings = get_infinity_settings()
     return Reranker(
         base_url=settings.base_url,
@@ -54,7 +66,11 @@ def get_reranker() -> Reranker:
 
 @lru_cache
 def get_document_parser() -> DocumentParser:
-    """Singleton DocumentParser instance."""
+    """Singleton DocumentParser instance.
+
+    Returns:
+        DocumentParser: The singleton document parser instance.
+    """
     settings = get_unstructured_settings()
     return DocumentParser(base_url=settings.base_url)
 
@@ -65,7 +81,17 @@ def get_retrieval_service(
     vector_store: QdrantStore = Depends(get_vector_store),
     reranker: Reranker = Depends(get_reranker),
 ) -> RetrievalService:
-    """Request-scoped RetrievalService with DB session."""
+    """Request-scoped RetrievalService with DB session.
+
+    Args:
+        db (AsyncSession): The database session.
+        embedding_provider (EmbeddingProvider): The embedding provider instance.
+        vector_store (QdrantStore): The vector store instance.
+        reranker (Reranker): The reranker instance.
+
+    Returns:
+        RetrievalService: The request-scoped retrieval service.
+    """
     return RetrievalService(
         db=db,
         embedding_provider=embedding_provider,
@@ -80,7 +106,17 @@ def get_ingestion_service(
     embedding_provider: EmbeddingProvider = Depends(get_embedding_provider),
     vector_store: QdrantStore = Depends(get_vector_store),
 ) -> IngestionService:
-    """Request-scoped IngestionService with DB session."""
+    """Request-scoped IngestionService with DB session.
+
+    Args:
+        db (AsyncSession): The database session.
+        document_parser (DocumentParser): The document parser instance.
+        embedding_provider (EmbeddingProvider): The embedding provider instance.
+        vector_store (QdrantStore): The vector store instance.
+
+    Returns:
+        IngestionService: The request-scoped ingestion service.
+    """
     return IngestionService(
         db=db,
         document_parser=document_parser,

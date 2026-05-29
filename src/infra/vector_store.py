@@ -67,6 +67,11 @@ class QdrantStore:
     - Hybrid search with mandatory is_active filtering
     - Payload updates for toggling document active state
     - Cascade deletion by doc_id
+
+    Args:
+        host (str): Qdrant host address.
+        port (int): Qdrant port.
+        collection_name (str): Name of the Qdrant collection to manage.
     """
 
     def __init__(self, host: str, port: int, collection_name: str):
@@ -131,6 +136,9 @@ class QdrantStore:
         - parent_chunk_id: reference to the parent chunk in PostgreSQL
         - doc_id: reference to the source PDFDocument
         - is_active: whether this document is currently active for retrieval
+
+        Args:
+            chunks (List[ChunkVector]): List of child chunks to upsert.
         """
         if not chunks:
             return
@@ -197,6 +205,16 @@ class QdrantStore:
 
         Only searches vectors where is_active == true to respect document
         enable/disable state managed via the admin dashboard.
+
+        Args:
+            dense_vector (List[float]): The dense vector from embedding model.
+            sparse_indices (List[int]): The sparse indices from BM25.
+            sparse_values (List[float]): The sparse values from BM25.
+            top_k (int, optional): Number of top results to return. Defaults to 15.
+            session_id (Optional[str], optional): The active session ID to filter by. Defaults to None.
+
+        Returns:
+            List[SearchResult]: List of search results from Qdrant.
         """
         if top_k <= 0:
             return []
@@ -278,6 +296,10 @@ class QdrantStore:
         """Update payload fields for all vectors belonging to a document.
 
         Used to toggle is_active state without re-embedding.
+
+        Args:
+            doc_id (str): UUID of the document.
+            payload (dict): The fields and values to update in the payload.
         """
         await self.client.set_payload(
             collection_name=self.collection_name,
@@ -299,6 +321,9 @@ class QdrantStore:
         """Delete all vectors associated with a document.
 
         Called when a PDF is permanently deleted from the knowledge base.
+
+        Args:
+            doc_id (str): UUID of the document whose vectors should be deleted.
         """
         await self.client.delete(
             collection_name=self.collection_name,

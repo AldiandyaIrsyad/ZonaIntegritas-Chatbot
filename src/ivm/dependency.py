@@ -1,3 +1,8 @@
+"""
+Dependency injection for the Input Validation Module (IVM).
+
+Provides request-scoped and cached singletons for input security checks.
+"""
 from functools import lru_cache
 
 from src.core.config import get_infinity_settings, get_ivm_settings
@@ -9,9 +14,12 @@ from .service import IVMService
 
 @lru_cache
 def get_ivm_service() -> IVMService:
-    """
-    Factory function for Dependency Injection.
+    """Factory function for Dependency Injection.
+    
     Isolates the instantiation logic from the consuming vertical slices.
+
+    Returns:
+        IVMService: The configured IVM service singleton.
     """
     settings = get_ivm_settings()
     inf = get_infinity_settings()

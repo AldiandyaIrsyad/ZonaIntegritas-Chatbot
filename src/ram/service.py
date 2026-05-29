@@ -34,6 +34,10 @@ class RAMService:
 
     When NLI is disabled (nli_enabled=False), assess_sentence returns a
     neutral result immediately — zero overhead, zero model calls.
+
+    Args:
+        nli (NLIProvider): The NLI inference client.
+        enabled (bool, optional): Whether NLI assessment is enabled. Defaults to True.
     """
 
     def __init__(self, nli: NLIProvider, enabled: bool = True):
@@ -47,12 +51,12 @@ class RAMService:
         is then passed to every assess_sentence() call for that request.
 
         Args:
-            contexts: Retrieved knowledge-base contexts (from RetrievalService).
+            contexts (List[RetrievedContext]): Retrieved knowledge-base contexts (from RetrievalService).
                       Only KB contexts should be passed — session PDFs are excluded.
 
         Returns:
-            A single string combining the top-N context texts, separated by
-            double newlines. Returns "" if contexts is empty.
+            str: A single string combining the top-N context texts, separated by
+                 double newlines. Returns "" if contexts is empty.
         """
         if not contexts:
             return ""
@@ -76,15 +80,15 @@ class RAMService:
         """Run NLI on a single sentence against the pre-built KB premise.
 
         Args:
-            sentence: A complete sentence from the LLM's response (hypothesis).
-            premise: The concatenated KB context string (built via build_premise).
+            sentence (str): A complete sentence from the LLM's response (hypothesis).
+            premise (str): The concatenated KB context string (built via build_premise).
 
         Returns:
-            NLIResult with canonical label and confidence scores.
-            Returns neutral default if:
-            - NLI is disabled via config kill-switch
-            - premise is empty (no KB context was retrieved)
-            - sentence is blank
+            NLIResult: NLIResult with canonical label and confidence scores.
+                Returns neutral default if:
+                - NLI is disabled via config kill-switch
+                - premise is empty (no KB context was retrieved)
+                - sentence is blank
         """
         if not self.enabled:
             return NLIResult(

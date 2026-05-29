@@ -1,3 +1,8 @@
+"""
+Thumbnail generation strategies.
+
+Provides logic to generate base64 thumbnails from PDFs and images.
+"""
 import abc
 import base64
 import os
@@ -10,7 +15,14 @@ from PIL import Image
 class ThumbnailStrategy(abc.ABC):
     @abc.abstractmethod
     def generate_thumbnail(self, file_path: str) -> str | None:
-        """Generates a thumbnail and returns it as a base64 encoded data URI, or None if failed."""
+        """Generates a thumbnail for a file.
+
+        Args:
+            file_path (str): The path to the source file.
+
+        Returns:
+            str | None: The thumbnail as a base64 encoded data URI, or None if failed.
+        """
         pass
 
 class PDFThumbnailStrategy(ThumbnailStrategy):
@@ -45,6 +57,8 @@ class DefaultThumbnailStrategy(ThumbnailStrategy):
         return None
 
 class ThumbnailContext:
+    """Context for generating thumbnails using different strategies based on file extension."""
+    
     def __init__(self):
         self._strategies = {
             ".pdf": PDFThumbnailStrategy(),
@@ -55,6 +69,14 @@ class ThumbnailContext:
         self._default_strategy = DefaultThumbnailStrategy()
 
     def generate_thumbnail(self, file_path: str) -> str | None:
+        """Generates a thumbnail by selecting the appropriate strategy.
+
+        Args:
+            file_path (str): The path to the source file.
+
+        Returns:
+            str | None: The thumbnail as a base64 encoded data URI, or None if failed.
+        """
         _, ext = os.path.splitext(file_path)
         strategy = self._strategies.get(ext.lower(), self._default_strategy)
         return strategy.generate_thumbnail(file_path)

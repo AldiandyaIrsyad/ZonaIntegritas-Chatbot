@@ -1,3 +1,8 @@
+"""
+Dependency injection for the knowledge base module.
+
+Provides request-scoped and cached singletons for KB document operations.
+"""
 from functools import lru_cache
 
 from fastapi import Depends
@@ -13,10 +18,23 @@ from .service import KnowledgeBase
 
 @lru_cache
 def get_storage_provider() -> StorageProvider:
+    """Singleton StorageProvider for admin-uploaded global documents.
+
+    Returns:
+        StorageProvider: The storage provider instance.
+    """
     settings = get_storage_settings()
     return LocalStorageProvider(settings.admin_upload_dir)
 
 def get_pdf_repository(db: AsyncSession = Depends(get_db)) -> PDFRepository:
+    """Request-scoped PDFRepository.
+
+    Args:
+        db (AsyncSession): The database session.
+
+    Returns:
+        PDFRepository: The configured PDF repository.
+    """
     return PDFRepository(db)
 
 def get_pdf_service(
@@ -25,6 +43,17 @@ def get_pdf_service(
     vector_store: QdrantStore = Depends(get_vector_store),
     ingestion_service: IngestionService = Depends(get_ingestion_service),
 ) -> KnowledgeBase:
+    """Request-scoped KnowledgeBase service.
+
+    Args:
+        repository (PDFRepository): The PDF repository.
+        storage (StorageProvider): The storage provider.
+        vector_store (QdrantStore): The global RAG vector store.
+        ingestion_service (IngestionService): The ingestion service.
+
+    Returns:
+        KnowledgeBase: The configured KB service.
+    """
     return KnowledgeBase(
         repository=repository,
         storage=storage,

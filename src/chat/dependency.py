@@ -1,3 +1,8 @@
+"""
+Dependency injection for the chat module.
+
+Provides request-scoped and cached singletons for chat operations.
+"""
 from functools import lru_cache
 
 from fastapi import Depends
@@ -32,6 +37,11 @@ from .service import ChatService
 
 @lru_cache
 def get_session_vector_store() -> QdrantStore:
+    """Singleton QdrantStore instance for session-specific documents.
+
+    Returns:
+        QdrantStore: The vector store instance.
+    """
     settings = get_qdrant_settings()
     return QdrantStore(
         host=settings.host,
@@ -41,10 +51,23 @@ def get_session_vector_store() -> QdrantStore:
 
 @lru_cache
 def get_user_storage_provider() -> StorageProvider:
+    """Singleton StorageProvider for user-uploaded documents.
+
+    Returns:
+        StorageProvider: The storage provider instance.
+    """
     settings = get_storage_settings()
     return LocalStorageProvider(settings.user_upload_dir)
 
 def get_chat_repository(db: AsyncSession = Depends(get_db)) -> ChatRepository:
+    """Request-scoped ChatRepository.
+
+    Args:
+        db (AsyncSession): The database session.
+
+    Returns:
+        ChatRepository: The configured chat repository.
+    """
     return ChatRepository(db)
 
 def get_chat_service(
@@ -59,6 +82,23 @@ def get_chat_service(
     ivm_service: IVMService = Depends(get_ivm_service),
     ram_service: RAMService = Depends(get_ram_service),
 ) -> ChatService:
+    """Request-scoped ChatService.
+
+    Args:
+        repository (ChatRepository): The chat repository.
+        llm_service (LLMService): The LLM connection service.
+        retrieval_service (RetrievalService): The global RAG retrieval service.
+        storage (StorageProvider): The storage provider.
+        document_parser (DocumentParser): The document parser.
+        reranker (Reranker): The reranking service.
+        vector_store (QdrantStore): The session vector store.
+        embedding_provider (EmbeddingProvider): The embedding service.
+        ivm_service (IVMService): The Input Validation Module service.
+        ram_service (RAMService): The Response Assessment Module service.
+
+    Returns:
+        ChatService: The configured chat service.
+    """
     return ChatService(
         repository=repository,
         llm_service=llm_service,

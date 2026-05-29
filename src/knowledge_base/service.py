@@ -1,3 +1,8 @@
+"""
+Service layer for the knowledge base module.
+
+Orchestrates PDF document uploads, ingestion background tasks, and active status.
+"""
 import os
 from typing import Optional
 
@@ -16,8 +21,12 @@ from .repository import PDFRepository
 
 logger = get_logger(__name__)
 
-async def run_ingestion_background(pdf_id: str):
-    """Run ingestion in the background with an independent DB session."""
+async def run_ingestion_background(pdf_id: str) -> None:
+    """Run ingestion in the background with an independent DB session.
+
+    Args:
+        pdf_id (str): UUID of the document to ingest.
+    """
     async with async_session() as db:
         parser = get_document_parser()
         embedder = get_embedding_provider()
@@ -33,6 +42,8 @@ async def run_ingestion_background(pdf_id: str):
 
 
 class KnowledgeBase:
+    """Core business logic for global knowledge base documents."""
+    
     def __init__(
         self,
         repository: PDFRepository,
@@ -45,7 +56,12 @@ class KnowledgeBase:
         self.vector_store = vector_store
         self.ingestion_service = ingestion_service
         
-    async def list_pdfs(self):
+    async def list_pdfs(self) -> list[dict]:
+        """List all available PDF documents.
+
+        Returns:
+            list[dict]: List of document summaries.
+        """
         pdfs = await self.repository.get_all_pdfs()
         return [
             {
@@ -60,6 +76,20 @@ class KnowledgeBase:
         ]
         
     async def upload_pdf(self, title: str, description: str, file: UploadFile, background_tasks: BackgroundTasks):
+        """Upload a PDF document and queue it for ingestion.
+
+        Args:
+            title (str): Document title.
+            description (str): Document description.
+            file (UploadFile): The uploaded file.
+            background_tasks (BackgroundTasks): FastAPI background task manager.
+
+        Returns:
+            PDFDocument: The created document record.
+
+        Raises:
+            ValueError: If the file is not a PDF.
+        """
         file_extension = os.path.splitext(file.filename or "")[1].lower()
         if file.content_type != "application/pdf" or file_extension != ".pdf":
             logger.error("Admin PDF upload failed: Invalid file type", exc_info=True, extra={
@@ -104,6 +134,13 @@ class KnowledgeBase:
         1. Update PostgreSQL first (within transaction)
         2. Update Qdrant payload (is_active)
         3. On Qdrant failure, revert PostgreSQL change
+
+        Args:
+            pdf_id (str): UUID of the document.
+            active (bool): True to activate, False to deactivate.
+
+        Returns:
+            PDFDocument | None: The updated document, or None if not found.
         """
         pdf = await self.repository.update_pdf_active_status(pdf_id, active)
         if not pdf:
@@ -128,8 +165,15 @@ class KnowledgeBase:
 
         return pdf
         
-    async def delete_pdf(self, pdf_id: str):
-        """Delete a PDF and its associated vectors from both Postgres and Qdrant."""
+    async def delete_pdf(self, pdf_id: str) -> bool:
+        """Delete a PDF and its associated vectors from both Postgres and Qdrant.
+
+        Args:
+            pdf_id (str): UUID of the document to delete.
+
+        Returns:
+            bool: True if deleted successfully, False if not found.
+        """
         pdf = await self.repository.get_pdf_by_id(pdf_id)
         if not pdf:
             return False
@@ -154,7 +198,14 @@ class KnowledgeBase:
         return await self.repository.delete_pdf(pdf_id)
 
     async def get_ingestion_status(self, pdf_id: str) -> Optional[dict]:
-        """Get the current ingestion status of a document."""
+        """Get the current ingestion status of a document.
+
+        Args:
+            pdf_id (str): UUID of the document.
+
+        Returns:
+            Optional[dict]: The document's ID, title, and ingestion status.
+        """
         pdf = await self.repository.get_pdf_by_id(pdf_id)
         if not pdf:
             return None

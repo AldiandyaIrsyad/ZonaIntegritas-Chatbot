@@ -62,12 +62,12 @@ class RetrievalService:
         """Execute the full retrieval pipeline for a user query.
 
         Args:
-            query: The user's question or message.
-            top_k_search: Number of child chunks to retrieve from Qdrant.
-            top_k_rerank: Number of parent contexts to return after reranking.
+            query (str): The user's question or message.
+            top_k_search (int): Number of child chunks to retrieve from Qdrant.
+            top_k_rerank (int): Number of parent contexts to return after reranking.
 
         Returns:
-            List of RetrievedContext sorted by relevance, ready for LLM prompt.
+            List[RetrievedContext]: List of RetrievedContext sorted by relevance, ready for LLM prompt.
             Returns empty list if no relevant documents are found.
         """
         if not query.strip():
@@ -159,7 +159,14 @@ class RetrievalService:
         return contexts
 
     async def _get_document_title(self, doc_id: str) -> str:
-        """Fetch the title of a PDFDocument for source attribution."""
+        """Fetch the title of a PDFDocument for source attribution.
+
+        Args:
+            doc_id (str): UUID of the document.
+
+        Returns:
+            str: Title of the document, or "Unknown Document" if not found.
+        """
         from sqlalchemy.future import select
 
         from src.knowledge_base import PDFDocument

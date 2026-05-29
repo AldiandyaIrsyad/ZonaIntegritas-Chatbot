@@ -1,3 +1,9 @@
+"""
+Storage infrastructure adapter.
+
+Provides abstractions and implementations for saving and deleting files
+from storage (currently local filesystem).
+"""
 import asyncio
 import os
 import uuid
@@ -16,26 +22,52 @@ class StorageProvider(ABC):
 
     @abstractmethod
     async def save_file(self, file: UploadFile, file_extension: str) -> str:
-        """Saves a file and returns its path/URI."""
+        """Saves a file and returns its path/URI.
+
+        Args:
+            file (UploadFile): The file to save.
+            file_extension (str): The extension of the file (e.g. '.pdf').
+
+        Returns:
+            str: The final path or URI of the saved file.
+        """
         pass
 
     @abstractmethod
     async def delete_file(self, file_path: str) -> bool:
-        """Deletes a file given its path/URI. Returns True if deleted."""
+        """Deletes a file given its path/URI.
+
+        Args:
+            file_path (str): The path or URI of the file to delete.
+
+        Returns:
+            bool: True if deleted successfully, False otherwise.
+        """
         pass
 
 
 class LocalStorageProvider(StorageProvider):
-    """Local file system implementation for storage."""
+    """Local file system implementation for storage.
+
+    Args:
+        upload_dir (str): The directory where files will be saved.
+    """
 
     def __init__(self, upload_dir: str):
         self.upload_dir = upload_dir
         os.makedirs(self.upload_dir, exist_ok=True)
 
     async def save_file(self, file: UploadFile, file_extension: str) -> str:
-        """
-        Saves the file to local storage.
+        """Saves the file to local storage.
+
         Uses a temporary file and an atomic rename to prevent race conditions or partial writes.
+
+        Args:
+            file (UploadFile): The file to save.
+            file_extension (str): The extension of the file (e.g. '.pdf').
+
+        Returns:
+            str: The final path of the saved file.
         """
         unique_filename = f"{uuid.uuid4()}{file_extension}"
         final_path = os.path.join(self.upload_dir, unique_filename)
@@ -59,7 +91,14 @@ class LocalStorageProvider(StorageProvider):
             raise e
 
     async def delete_file(self, file_path: str) -> bool:
-        """Deletes the file from local storage."""
+        """Deletes the file from local storage.
+
+        Args:
+            file_path (str): The absolute path of the file to delete.
+
+        Returns:
+            bool: True if deleted successfully or not found, False on error.
+        """
         if not file_path:
             return False
             

@@ -1,3 +1,8 @@
+"""
+Service layer for the chat module.
+
+Orchestrates LLM communication, RAG retrieval, NLI validation, and session state.
+"""
 import asyncio
 import os
 import re
@@ -37,6 +42,8 @@ logger = get_logger(__name__)
 
 
 class ChatService:
+    """Core business logic for chat interactions."""
+    
     def __init__(
         self,
         repository: ChatRepository,
@@ -64,16 +71,34 @@ class ChatService:
         self.thumbnail_context = ThumbnailContext()
 
 
-    async def list_sessions(self):
+    async def list_sessions(self) -> List[dict]:
+        """List all available chat sessions.
+
+        Returns:
+            List[dict]: A list of session summaries.
+        """
         sessions = await self.repository.get_all_sessions()
         return [{"id": s.id, "title": s.title} for s in sessions]
 
-    async def create_new_session(self):
+    async def create_new_session(self) -> dict:
+        """Create a new, empty chat session.
+
+        Returns:
+            dict: The newly created session details (id, title).
+        """
         session_id = str(uuid.uuid4())
         new_session = await self.repository.create_session(session_id, "New Chat")
         return {"id": new_session.id, "title": new_session.title}
 
-    async def get_session_details(self, session_id: str):
+    async def get_session_details(self, session_id: str) -> Optional[dict]:
+        """Retrieve full details of a specific chat session.
+
+        Args:
+            session_id (str): UUID of the session.
+
+        Returns:
+            Optional[dict]: Dictionary with session messages and documents, or None if not found.
+        """
         session = await self.repository.get_session_by_id(session_id, load_messages=True)
         if not session:
             return None
@@ -83,11 +108,21 @@ class ChatService:
             "documents": [{"id": d.id, "filename": d.filename, "thumbnail": d.thumbnail} for d in session.documents]
         }
 
-    async def upload_pdf(self, session_id: str, file: UploadFile):
+    async def upload_pdf(self, session_id: str, file: UploadFile) -> dict:
         """Upload, parse, and chunk a PDF file for a specific chat session.
 
         Requires the session to already exist. Call POST /api/sessions first
         if you need to create one.
+
+        Args:
+            session_id (str): UUID of the session.
+            file (UploadFile): The file to upload.
+
+        Returns:
+            dict: Metadata about the uploaded document (id, filename, thumbnail).
+
+        Raises:
+            HTTPException: If the session doesn't exist, file upload fails, or if max docs reached.
         """
         session = await self.repository.get_session_by_id(session_id, load_messages=True)
         if not session:
@@ -214,7 +249,16 @@ class ChatService:
             "thumbnail": doc.thumbnail
         }
 
-    async def process_chat_message(self, session_id: str, message_text: str):
+    async def process_chat_message(self, session_id: str, message_text: str) -> StreamingResponse:
+        """Process an incoming user message and yield a streaming LLM response.
+
+        Args:
+            session_id (str): UUID of the chat session.
+            message_text (str): The raw text of the user's message.
+
+        Returns:
+            StreamingResponse: Text stream of the LLM response.
+        """
         # Validate input via IVM (Malicious prompt / Relevance check)
         await self.ivm_service.validate_prompt(message_text)
 
@@ -382,9 +426,12 @@ class ChatService:
         lives here so it can be reviewed (and tested) in one place.
 
         Args:
-            rag_contexts: Retrieved knowledge-base chunks (may be empty).
-            session_texts: Reranked text excerpts from the user's uploaded
+            rag_contexts (List[RetrievedContext]): Retrieved knowledge-base chunks (may be empty).
+            session_texts (List[str]): Reranked text excerpts from the user's uploaded
                 session documents (may be empty).
+
+        Returns:
+            str: The final salted system prompt text.
         """
         # Generate a random salt to authenticate the system prompt
         salt = secrets.token_hex(8)
@@ -459,6 +506,13 @@ class ChatService:
 
         Returns an empty list on any failure so that the caller (and the
         prompt builder) never has to worry about None handling.
+
+        Args:
+            session_id (str): UUID of the chat session.
+            query (str): The user's prompt query.
+
+        Returns:
+            List[str]: A list of retrieved session context strings.
         """
         try:
             query_embeddings = await self.embedding_provider.embed_texts([query])
@@ -498,7 +552,15 @@ class ChatService:
             logger.warning("Reranking session chunks failed", exc_info=True)
             return []
 
-    async def delete_session(self, session_id: str):
+    async def delete_session(self, session_id: str) -> bool:
+        """Delete a chat session and all its associated data.
+
+        Args:
+            session_id (str): UUID of the session to delete.
+
+        Returns:
+            bool: True if the session was successfully deleted, False otherwise.
+        """
         session = await self.repository.get_session_by_id(session_id)
         if session:
             # Clean up associated session documents (files and vector stores)
@@ -526,6 +588,12 @@ class ChatService:
 
         RAG failures should not break the chat — the LLM can still
         respond without knowledge base context.
+
+        Args:
+            query (str): The user's query string for retrieval.
+
+        Returns:
+            List[RetrievedContext]: The successfully retrieved chunks, or empty list.
         """
         try:
             return await self.retrieval_service.retrieve_context(query)

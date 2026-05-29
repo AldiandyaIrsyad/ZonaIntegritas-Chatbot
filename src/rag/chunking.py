@@ -57,12 +57,12 @@ def create_parent_chunks(
     or until the max character limit is reached.
 
     Args:
-        elements: Structured elements from DocumentParser.parse_pdf().
-        doc_id: UUID of the source PDFDocument.
-        max_chars: Maximum character length per parent chunk.
+        elements (List[ParsedElement]): Structured elements from DocumentParser.parse_pdf().
+        doc_id (str): UUID of the source PDFDocument.
+        max_chars (int): Maximum character length per parent chunk.
 
     Returns:
-        Ordered list of ParentChunkData for storage in PostgreSQL.
+        List[ParentChunkData]: Ordered list of ParentChunkData for storage in PostgreSQL.
     """
     if not elements:
         return []
@@ -129,12 +129,12 @@ def split_into_children(
     splitting that respects sentence and word boundaries.
 
     Args:
-        parent: The parent chunk to split.
-        max_chars: Maximum characters per child chunk.
-        overlap_chars: Overlap between consecutive child chunks.
+        parent (ParentChunkData): The parent chunk to split.
+        max_chars (int): Maximum characters per child chunk.
+        overlap_chars (int): Overlap between consecutive child chunks.
 
     Returns:
-        List of ChildChunkData, each referencing its parent.
+        List[ChildChunkData]: List of ChildChunkData, each referencing its parent.
     """
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=max_chars,
