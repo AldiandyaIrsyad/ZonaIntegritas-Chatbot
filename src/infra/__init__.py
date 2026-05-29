@@ -1,6 +1,7 @@
 from .document_parser import DocumentParser, ParsedElement
 from .embedding_provider import EmbeddingProvider
 from .llm_connection import LLMConnection
+from .nli import NLIProvider, NLIResult
 from .prompt_guard import PromptGuardProvider
 from .reranker import Reranker
 from .storage import LocalStorageProvider, StorageProvider
@@ -20,4 +21,6 @@ __all__ = [
     "ParsedElement",
     "ThumbnailContext",
     "PromptGuardProvider",
+    "NLIProvider",
+    "NLIResult",
 ]

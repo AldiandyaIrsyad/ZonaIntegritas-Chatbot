@@ -1,10 +1,11 @@
 from functools import lru_cache
 
-from src.core.config import get_ivm_settings
+from src.core.config import get_infinity_settings, get_ivm_settings
 from src.infra import PromptGuardProvider
 from src.rag.dependency import get_embedding_provider, get_vector_store
 
 from .service import IVMService
+
 
 @lru_cache
 def get_ivm_service() -> IVMService:
@@ -13,9 +14,14 @@ def get_ivm_service() -> IVMService:
     Isolates the instantiation logic from the consuming vertical slices.
     """
     settings = get_ivm_settings()
+    inf = get_infinity_settings()
     embedding_provider = get_embedding_provider()
     vector_store = get_vector_store()
-    prompt_guard = PromptGuardProvider(security_threshold=settings.security_threshold)
+    prompt_guard = PromptGuardProvider(
+        base_url=inf.base_url,
+        model=inf.prompt_guard_model,
+        security_threshold=settings.security_threshold,
+    )
 
     return IVMService(
         prompt_guard=prompt_guard,
@@ -24,4 +30,3 @@ def get_ivm_service() -> IVMService:
         embedding_provider=embedding_provider,
         vector_store=vector_store,
     )
-

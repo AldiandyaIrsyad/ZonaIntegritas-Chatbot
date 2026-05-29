@@ -22,6 +22,8 @@ from src.rag import (
 )
 from src.ivm.service import IVMService
 from src.ivm.dependency import get_ivm_service
+from src.ram.service import RAMService
+from src.ram.dependency import get_ram_service
 
 from .repository import ChatRepository
 from .service import ChatService
@@ -55,6 +57,7 @@ def get_chat_service(
     vector_store: QdrantStore = Depends(get_session_vector_store),
     embedding_provider: EmbeddingProvider = Depends(get_embedding_provider),
     ivm_service: IVMService = Depends(get_ivm_service),
+    ram_service: RAMService = Depends(get_ram_service),
 ) -> ChatService:
     return ChatService(
         repository=repository,
@@ -66,4 +69,5 @@ def get_chat_service(
         vector_store=vector_store,
         embedding_provider=embedding_provider,
         ivm_service=ivm_service,
+        ram_service=ram_service,
     )

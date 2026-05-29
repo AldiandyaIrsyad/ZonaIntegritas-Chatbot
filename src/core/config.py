@@ -65,6 +65,9 @@ class InfinitySettings(BaseSettings):
     base_url: str = "http://localhost:7997"
     embedding_model: str = "BAAI/bge-m3"
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    # Classify models — both are loaded by the same Infinity container.
+    nli_model: str = "StevenLimcorn/indo-roberta-indonli"
+    prompt_guard_model: str = "ProtectAI/deberta-v3-base-prompt-injection-v2"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -101,6 +104,27 @@ class IVMSettings(BaseSettings):
         env_prefix="IVM_",
         extra="ignore"
     )
+
+class RAMSettings(BaseSettings):
+    """Response Assessment Module (RAM) configuration.
+
+    nli_model: Hugging Face model ID for the NLI pipeline.
+        Currently: StevenLimcorn/indo-roberta-indonli
+        Future:    LazarusNLP/indobert-lite-base-p1-indonli-distil-mdeberta
+    nli_device: -1 = CPU, 0 = first GPU.
+    nli_max_length: Token truncation limit for premise + hypothesis.
+    nli_enabled: Kill-switch — set RAM_NLI_ENABLED=false to disable without code changes.
+    """
+    nli_model: str = "StevenLimcorn/indo-roberta-indonli"
+    nli_device: int = -1
+    nli_max_length: int = 512
+    nli_enabled: bool = True
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="RAM_",
+        extra="ignore"
+    )
     
 @lru_cache
 def get_settings() -> LLMSettings:
@@ -133,3 +157,7 @@ def get_vector_settings() -> VectorSettings:
 @lru_cache
 def get_ivm_settings() -> IVMSettings:
     return IVMSettings()
+
+@lru_cache
+def get_ram_settings() -> RAMSettings:
+    return RAMSettings()

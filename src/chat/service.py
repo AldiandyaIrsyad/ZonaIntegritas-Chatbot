@@ -1,4 +1,6 @@
+import asyncio
 import os
+import re
 import secrets
 import uuid
 from typing import List, Optional
@@ -25,6 +27,7 @@ from src.rag import (
     split_into_children,
 )
 from src.ivm.service import IVMService
+from src.ram.service import RAMService
 
 
 from .model import SessionDocumentChunk
@@ -45,6 +48,7 @@ class ChatService:
         vector_store: QdrantStore,
         embedding_provider: EmbeddingProvider,
         ivm_service: IVMService,
+        ram_service: RAMService,
     ):
 
         self.repository = repository
@@ -56,6 +60,7 @@ class ChatService:
         self.vector_store = vector_store
         self.embedding_provider = embedding_provider
         self.ivm_service = ivm_service
+        self.ram_service = ram_service
         self.thumbnail_context = ThumbnailContext()
 
 
@@ -260,16 +265,91 @@ class ChatService:
         raw_history.append({"role": "user", "content": message_text})
 
         async def generate():
+            """
+            Sentence-buffered double streaming pipeline.
+
+            Flow:
+              LLM tokens → sentence buffer
+                        → [boundary hit] asyncio.Task(NLI) queued
+                        → emit sentence only after its NLI task is done (FIFO)
+                        → annotate contradicted sentences inline
+
+            The LLM stream is never paused waiting for NLI — tasks run
+            concurrently and sentences are released as soon as their task
+            completes, preserving strict emission order.
+            """
+            # Regex for sentence boundaries: period/!/?/newlines followed by
+            # whitespace. We include the trailing whitespace in the match
+            # so that we don't accidentally delete spaces between sentences.
+            _BOUNDARY = re.compile(r'[.!?\n\u3002]+\s+')
+
+            # Build the NLI premise once for the entire request (not per sentence).
+            # Only KB contexts are used — session PDFs are treated as user intent.
+            premise = self.ram_service.build_premise(contexts)
+
+            sentence_buffer = ""
+            # pending: list of (raw_sentence_text, asyncio.Task[NLIResult])
+            pending: list[tuple[str, asyncio.Task]] = []
             response_content = ""
+
+            def _start_nli(sentence: str) -> asyncio.Task:
+                """Kick off NLI for a sentence without blocking."""
+                return asyncio.create_task(
+                    self.ram_service.assess_sentence(sentence, premise)
+                )
+
+            def _annotate(raw_sentence: str, task: asyncio.Task) -> str:
+                """Apply NLI annotation with label and score."""
+                result = task.result()
+                
+                if result.label == "entailment":
+                    return raw_sentence + f" *(Supported: {result.entailment_score:.2f})*"
+                elif result.label == "contradiction":
+                    return raw_sentence + f" *(Contradiction: {result.contradiction_score:.2f})*"
+                else:
+                    return raw_sentence + f" *(Neutral: {result.neutral_score:.2f})*"
+
             try:
-                async for chunk in self.llm_service.stream_response(raw_history):
+                async for token in self.llm_service.stream_response(raw_history):
+                    sentence_buffer += token
+
+                    # Detect sentence boundary inside the buffer
+                    match = _BOUNDARY.search(sentence_buffer)
+                    if match:
+                        # Everything up to (and including) the boundary is a sentence
+                        end_idx = match.end()
+                        sentence = sentence_buffer[:end_idx]
+                        sentence_buffer = sentence_buffer[end_idx:]
+                        if sentence.strip():
+                            pending.append((sentence, _start_nli(sentence)))
+
+                    # Drain the front of the queue: emit any sentences whose
+                    # NLI task has already finished (strict FIFO order).
+                    while pending and pending[0][1].done():
+                        raw_sent, task = pending.pop(0)
+                        chunk = _annotate(raw_sent, task)
+                        response_content += chunk
+                        yield chunk
+
+            finally:
+                # LLM stream done — flush any remaining text in the buffer
+                if sentence_buffer.strip():
+                    pending.append((sentence_buffer, _start_nli(sentence_buffer)))
+
+                # Await remaining tasks in FIFO order and emit
+                for raw_sent, task in pending:
+                    result = await task
+                    if result.label == "entailment":
+                        chunk = raw_sent + f" *(Supported: {result.entailment_score:.2f})*"
+                    elif result.label == "contradiction":
+                        chunk = raw_sent + f" *(Contradiction: {result.contradiction_score:.2f})*"
+                    else:
+                        chunk = raw_sent + f" *(Neutral: {result.neutral_score:.2f})*"
+                    
                     response_content += chunk
                     yield chunk
-            finally:
+
                 if response_content.strip():
-                    # Log the LLM generation event.
-                    # Use last_context_payload (the post-pruning prompt) instead
-                    # of raw_history, so the log reflects what the LLM actually received.
                     pruned_prompt = self.llm_service._prune_context(raw_history)
                     logger.info("LLM generation completed", extra={
                         "event": LogEvent.LLM_GENERATION.value,
@@ -282,15 +362,13 @@ class ChatService:
                     })
 
                     try:
-                        # Use anyio.CancelScope(shield=True) instead of asyncio.shield
-                        # because FastAPI/Starlette manages concurrency via AnyIO.
-                        # This guarantees the block executes even if the parent request is cancelled.
                         with anyio.CancelScope(shield=True):
                             await self.repository.create_message(session_id, "assistant", response_content)
                     except Exception as e:
                         logger.error("Failed to save partial response", exc_info=True)
-                
+
         return StreamingResponse(generate(), media_type="text/plain")
+
 
     @staticmethod
     def _build_secure_system_prompt(
