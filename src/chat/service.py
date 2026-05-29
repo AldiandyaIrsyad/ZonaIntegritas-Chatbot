@@ -299,11 +299,15 @@ class ChatService:
                 )
 
             def _annotate(raw_sentence: str, task: asyncio.Task) -> str:
-                """Apply contradiction annotation if NLI says so."""
+                """Apply NLI annotation with label and score."""
                 result = task.result()
-                if result.label == "contradiction":
-                    return raw_sentence + " *(contradictive)*"
-                return raw_sentence
+                
+                if result.label == "entailment":
+                    return raw_sentence + f" *(Supported: {result.entailment_score:.2f})*"
+                elif result.label == "contradiction":
+                    return raw_sentence + f" *(Contradiction: {result.contradiction_score:.2f})*"
+                else:
+                    return raw_sentence + f" *(Neutral: {result.neutral_score:.2f})*"
 
             try:
                 async for token in self.llm_service.stream_response(raw_history):
@@ -335,10 +339,13 @@ class ChatService:
                 # Await remaining tasks in FIFO order and emit
                 for raw_sent, task in pending:
                     result = await task
-                    if result.label == "contradiction":
-                        chunk = raw_sent + " *(contradictive)*"
+                    if result.label == "entailment":
+                        chunk = raw_sent + f" *(Supported: {result.entailment_score:.2f})*"
+                    elif result.label == "contradiction":
+                        chunk = raw_sent + f" *(Contradiction: {result.contradiction_score:.2f})*"
                     else:
-                        chunk = raw_sent
+                        chunk = raw_sent + f" *(Neutral: {result.neutral_score:.2f})*"
+                    
                     response_content += chunk
                     yield chunk
 

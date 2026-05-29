@@ -1,12 +1,13 @@
 """
 Dependency injection for the RAM (Response Assessment Module) pipeline.
 
-NLIProvider and RAMService are singletons — the model loads once at startup
-and is shared across all requests.
+NLIProvider and RAMService are singletons — the HTTP client is created once
+at startup and shared across all requests. The underlying model runs inside
+the Infinity server; this factory only wires up the HTTP adapter.
 """
 from functools import lru_cache
 
-from src.core.config import get_ram_settings
+from src.core.config import get_infinity_settings, get_ram_settings
 from src.infra.nli import NLIProvider
 
 from .service import RAMService
@@ -14,12 +15,11 @@ from .service import RAMService
 
 @lru_cache
 def get_nli_provider() -> NLIProvider:
-    """Singleton NLIProvider — model loads once at startup."""
-    settings = get_ram_settings()
+    """Singleton NLIProvider — HTTP client initialised once at startup."""
+    inf = get_infinity_settings()
     return NLIProvider(
-        model=settings.nli_model,
-        device=settings.nli_device,
-        max_length=settings.nli_max_length,
+        base_url=inf.base_url,
+        model=inf.nli_model,
     )
 
 

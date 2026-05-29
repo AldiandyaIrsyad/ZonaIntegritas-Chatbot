@@ -65,6 +65,9 @@ class InfinitySettings(BaseSettings):
     base_url: str = "http://localhost:7997"
     embedding_model: str = "BAAI/bge-m3"
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    # Classify models — both are loaded by the same Infinity container.
+    nli_model: str = "StevenLimcorn/indo-roberta-indonli"
+    prompt_guard_model: str = "ProtectAI/deberta-v3-base-prompt-injection-v2"
 
     model_config = SettingsConfigDict(
         env_file=".env",
