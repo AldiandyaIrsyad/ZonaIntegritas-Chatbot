@@ -41,7 +41,6 @@ class IVMService:
         self.vector_store = vector_store
 
     async def validate_prompt(self, query: str) -> None:
-    async def validate_prompt(self, query: str) -> None:
         """Validates the user's prompt for injection and relevance.
 
         Args:
@@ -56,7 +55,6 @@ class IVMService:
         await self._check_malicious(query)
         await self._check_relevance(query)
 
-    async def _check_malicious(self, query: str) -> None:
     async def _check_malicious(self, query: str) -> None:
         """Validates the query against Prompt Guard.
 
@@ -74,7 +72,6 @@ class IVMService:
                 detail="Malicious prompt detected."
             )
 
-    async def _check_relevance(self, query: str) -> None:
     async def _check_relevance(self, query: str) -> None:
         """Validates that the query is relevant to the knowledge base.
 
@@ -123,7 +120,6 @@ class IVMService:
         except Exception as e:
             logger.warning(f"Failed to check relevance: {e}", exc_info=True)
 
-    async def validate_document_relevance(self, embeddings: list) -> None:
     async def validate_document_relevance(self, embeddings: list) -> None:
         """Validates that an uploaded document is relevant to the knowledge base.
 

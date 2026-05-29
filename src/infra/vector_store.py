@@ -66,7 +66,6 @@ class QdrantStore:
     - Batch upserts with doc/parent metadata payloads
     - Hybrid search with mandatory is_active filtering
     - Payload updates for toggling document active state
-    - Payload updates for toggling document active state
     - Cascade deletion by doc_id
 
     Args:
@@ -133,7 +132,6 @@ class QdrantStore:
     async def upsert_chunks(self, chunks: List[ChunkVector]) -> None:
         """Batch upsert child chunk vectors with parent/doc metadata.
 
-        Each point carries a payload with:
         Each point carries a payload with:
         - parent_chunk_id: reference to the parent chunk in PostgreSQL
         - doc_id: reference to the source PDFDocument
