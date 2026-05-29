@@ -1,4 +1,5 @@
 import copy
+import re
 from typing import AsyncGenerator, Dict, List
 
 import tiktoken
@@ -65,15 +66,29 @@ class LLMService:
                 
             content = str(system_msgs[largest_idx].get("content", ""))
             tokens = self.encoder.encode(content)
-            
+
+            # Detect the closing salt tag so we can preserve it after truncation.
+            # Without this, truncating from the end would strip </system_auth_...>
+            # and break the security boundary.
+            closing_tag_match = re.search(r'</system_auth_[0-9a-f]+>\s*$', content)
+            closing_tag = closing_tag_match.group(0).strip() if closing_tag_match else None
+            closing_tag_tokens = len(self.encoder.encode(closing_tag)) if closing_tag else 0
+
             excess = system_tokens - max_system_tokens
             truncate_by = excess + 5  # +5 to handle unicode token boundaries
-            
-            if len(tokens) > truncate_by:
-                system_msgs[largest_idx]["content"] = self.encoder.decode(tokens[:-truncate_by])
+
+            # When a closing salt tag exists, cut extra tokens to make
+            # room for re-appending it after truncation.
+            effective_cut = truncate_by + closing_tag_tokens if closing_tag else truncate_by
+
+            if len(tokens) > effective_cut:
+                truncated = self.encoder.decode(tokens[:-effective_cut])
+                if closing_tag:
+                    truncated = truncated.rstrip() + "\n" + closing_tag
+                system_msgs[largest_idx]["content"] = truncated
             else:
                 system_msgs[largest_idx]["content"] = ""
-                
+
             system_tokens = self._count_tokens(system_msgs)
 
         available_tokens = (
