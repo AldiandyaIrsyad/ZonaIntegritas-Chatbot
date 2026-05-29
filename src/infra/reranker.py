@@ -27,6 +27,10 @@ class Reranker:
 
     Sends query + document pairs to the `/rerank` endpoint and returns
     documents sorted by descending relevance score.
+
+    Args:
+        base_url (str): The base URL of the Infinity server.
+        model (str): The reranker model ID to use.
     """
 
     def __init__(self, base_url: str, model: str):
@@ -46,12 +50,12 @@ class Reranker:
         """Rerank documents against a query using the cross-encoder model.
 
         Args:
-            query: The user's search query.
-            documents: List of document texts to score.
-            top_k: Number of top results to return.
+            query (str): The user's search query.
+            documents (List[str]): List of document texts to score.
+            top_k (int, optional): Number of top results to return. Defaults to 3.
 
         Returns:
-            List of RankedResult sorted by descending score, truncated to top_k.
+            List[RankedResult]: List of RankedResult sorted by descending score, truncated to top_k.
 
         Raises:
             httpx.HTTPStatusError: If the Infinity server returns an error.

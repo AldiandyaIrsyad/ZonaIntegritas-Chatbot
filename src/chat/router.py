@@ -1,3 +1,8 @@
+"""
+API routing for the chat module.
+
+Defines endpoints for session management, PDF uploads, and real-time streaming chat.
+"""
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -9,6 +14,11 @@ router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
 class ChatRequest(BaseModel):
+    """Payload for incoming chat messages.
+
+    Attributes:
+        message (str): The text content of the message.
+    """
     message: str
 
 @router.post("/api/sessions/{session_id}/upload")

@@ -1,3 +1,9 @@
+"""
+Knowledge Base module.
+
+Handles administration, ingestion, and management of global PDF documents
+used for Retrieval-Augmented Generation (RAG).
+"""
 from .dependency import get_pdf_service
 from .model import PDFDocument
 from .repository import PDFRepository

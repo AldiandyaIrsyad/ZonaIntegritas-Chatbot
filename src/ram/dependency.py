@@ -15,7 +15,11 @@ from .service import RAMService
 
 @lru_cache
 def get_nli_provider() -> NLIProvider:
-    """Singleton NLIProvider — HTTP client initialised once at startup."""
+    """Singleton NLIProvider — HTTP client initialised lazily on the first request.
+
+    Returns:
+        NLIProvider: The configured NLI provider singleton.
+    """
     inf = get_infinity_settings()
     return NLIProvider(
         base_url=inf.base_url,
@@ -25,7 +29,11 @@ def get_nli_provider() -> NLIProvider:
 
 @lru_cache
 def get_ram_service() -> RAMService:
-    """Singleton RAMService — reuses the singleton NLIProvider."""
+    """Singleton RAMService — reuses the singleton NLIProvider.
+
+    Returns:
+        RAMService: The configured RAM service singleton.
+    """
     settings = get_ram_settings()
     return RAMService(
         nli=get_nli_provider(),

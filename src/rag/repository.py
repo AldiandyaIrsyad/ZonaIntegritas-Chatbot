@@ -32,10 +32,10 @@ class RAGRepository:
         """Batch insert parent chunks into PostgreSQL.
 
         Args:
-            chunks: List of ParentChunk ORM instances to persist.
+            chunks (List[ParentChunk]): List of ParentChunk ORM instances to persist.
 
         Returns:
-            The persisted chunks (same objects, now attached to session).
+            List[ParentChunk]: The persisted chunks (same objects, now attached to session).
         """
         if not chunks:
             return []
@@ -54,10 +54,10 @@ class RAGRepository:
         we extract unique parent_chunk_ids and fetch the full parent texts.
 
         Args:
-            chunk_ids: List of parent chunk UUIDs.
+            chunk_ids (List[str]): List of parent chunk UUIDs.
 
         Returns:
-            List of ParentChunk objects with full text.
+            List[ParentChunk]: List of ParentChunk objects with full text.
         """
         if not chunk_ids:
             return []
@@ -75,8 +75,11 @@ class RAGRepository:
 
         Called when re-ingesting or deleting a document.
 
+        Args:
+            doc_id (str): UUID of the document.
+
         Returns:
-            Number of deleted chunks.
+            int: Number of deleted chunks.
         """
         result = await self.db.execute(
             select(ParentChunk).where(ParentChunk.doc_id == doc_id)
@@ -97,10 +100,10 @@ class RAGRepository:
         """Create a new ingestion task for tracking PDF processing.
 
         Args:
-            doc_id: UUID of the PDFDocument being ingested.
+            doc_id (str): UUID of the PDFDocument being ingested.
 
         Returns:
-            The newly created IngestionTask.
+            IngestionTask: The newly created IngestionTask.
         """
         task = IngestionTask(doc_id=doc_id, status="pending")
         self.db.add(task)
@@ -120,12 +123,12 @@ class RAGRepository:
         """Update the status of an ingestion task.
 
         Args:
-            task_id: UUID of the ingestion task.
-            status: New status (processing, completed, failed).
-            error_message: Error details if status is 'failed'.
+            task_id (str): UUID of the ingestion task.
+            status (str): New status (processing, completed, failed).
+            error_message (Optional[str], optional): Error details if status is 'failed'.
 
         Returns:
-            The updated IngestionTask, or None if not found.
+            Optional[IngestionTask]: The updated IngestionTask, or None if not found.
         """
         result = await self.db.execute(
             select(IngestionTask).where(IngestionTask.id == task_id)
@@ -154,10 +157,10 @@ class RAGRepository:
         """Get the most recent ingestion task for a document.
 
         Args:
-            doc_id: UUID of the PDFDocument.
+            doc_id (str): UUID of the PDFDocument.
 
         Returns:
-            The most recent IngestionTask, or None.
+            Optional[IngestionTask]: The most recent IngestionTask, or None.
         """
         result = await self.db.execute(
             select(IngestionTask)

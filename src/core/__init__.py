@@ -1,3 +1,9 @@
+"""
+Core module.
+
+Contains foundational components such as configuration, database connections,
+logging, and event definitions used across the application.
+"""
 from .config import (
     DatabaseSettings,
     InfinitySettings,

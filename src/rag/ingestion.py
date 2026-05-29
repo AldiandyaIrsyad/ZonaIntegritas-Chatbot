@@ -3,7 +3,7 @@ Asynchronous document ingestion pipeline.
 
 Orchestrates the full write path: PDF parsing → hierarchical chunking →
 embedding → vector storage. Designed to run as an async background task
-via Procrastinate or direct invocation.
+or direct invocation.
 """
 import logging
 from typing import Optional
@@ -63,13 +63,13 @@ class IngestionService:
         """Run the full ingestion pipeline for a document.
 
         This is the main entry point, designed to be called from a
-        background task (Procrastinate) or directly for synchronous testing.
+        background task or directly for synchronous testing.
 
         Args:
-            doc_id: UUID of the PDFDocument to ingest.
+            doc_id (str): UUID of the PDFDocument to ingest.
 
         Raises:
-            FileNotFoundError: If the PDF file doesn't exist on disk.
+            ValueError: If the PDFDocument is not found.
             Exception: Any error during parsing, embedding, or storage.
         """
         task = await self.rag_repo.create_ingestion_task(doc_id)
@@ -235,7 +235,14 @@ class IngestionService:
             raise
 
     async def _get_document(self, doc_id: str):
-        """Fetch a PDFDocument by ID."""
+        """Fetch a PDFDocument by ID.
+
+        Args:
+            doc_id (str): UUID of the document.
+
+        Returns:
+            Optional[PDFDocument]: The fetched document or None.
+        """
         from sqlalchemy.future import select
 
         from src.knowledge_base import PDFDocument
@@ -248,7 +255,12 @@ class IngestionService:
     async def _update_document_status(
         self, doc_id: str, status: str
     ) -> None:
-        """Update the ingestion_status field on PDFDocument."""
+        """Update the ingestion_status field on PDFDocument.
+
+        Args:
+            doc_id (str): UUID of the document.
+            status (str): The new ingestion status.
+        """
         from sqlalchemy.future import select
 
         from src.knowledge_base import PDFDocument

@@ -1,3 +1,8 @@
+"""
+SQLAlchemy models for the knowledge base module.
+
+Defines schemas for globally available PDF documents used in RAG.
+"""
 import uuid
 from datetime import datetime, timezone
 
@@ -8,6 +13,7 @@ from src.core import Base
 
 
 class PDFDocument(Base):
+    """Stores metadata and ingestion status for a global knowledge base document."""
     __tablename__ = "pdf_documents"
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     title = Column(String)

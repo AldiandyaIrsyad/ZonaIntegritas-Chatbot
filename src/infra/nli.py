@@ -64,15 +64,19 @@ class NLIProvider:
     """
     Infrastructure adapter for NLI inference via the Infinity HTTP server.
 
-    Designed as a singleton: instantiate once at startup (via lru_cache in
-    dependency.py), reuse across all requests. Each `check()` call is a
+    Designed as a singleton: instantiated lazily on the first request (via lru_cache in
+    dependency.py), and reused across all subsequent requests. Each `check()` call is a
     true async HTTP request — no threads, no GIL contention — allowing
     multiple NLI tasks to be in-flight simultaneously during LLM streaming.
 
     Infinity classify endpoint behaviour:
-    - With `raw_scores=True`: response contains a score dict with all labels.
+    - With `raw_scores=True`: response contains a list of dicts with all labels and scores.
     - Without (or unsupported): response contains single top-1 {label, score}.
     Both shapes are handled gracefully.
+
+    Args:
+        base_url (str): The base URL of the Infinity server.
+        model (str): The NLI model ID to use.
     """
 
     def __init__(self, base_url: str, model: str):
@@ -87,11 +91,11 @@ class NLIProvider:
         """Run NLI asynchronously via the Infinity classify endpoint.
 
         Args:
-            premise: The reference context (KB parent chunk texts).
-            hypothesis: The text to verify against the premise (LLM sentence).
+            premise (str): The reference context (KB parent chunk texts).
+            hypothesis (str): The text to verify against the premise (LLM sentence).
 
         Returns:
-            NLIResult with normalized label and per-class scores.
+            NLIResult: NLIResult with normalized label and per-class scores.
         """
         # NLI models expect (premise, hypothesis) as a text-pair.
         # Infinity classify takes a single string; we join with [SEP].
@@ -125,6 +129,12 @@ class NLIProvider:
         Handles two shapes:
         1. raw_scores=True  → data["data"][0]["score"] is a dict of {label: score}
         2. Fallback         → data["data"][0]["score"] is a float, "label" is a str
+
+        Args:
+            data (dict): The JSON response payload from Infinity.
+
+        Returns:
+            NLIResult: The parsed NLI result.
         """
         items = data.get("data", [])
         if not items or not items[0]:
@@ -161,7 +171,14 @@ class NLIProvider:
         )
 
     def _parse_raw_scores(self, score_dict: dict) -> NLIResult:
-        """Parse a full label→score mapping into NLIResult."""
+        """Parse a full label→score mapping into NLIResult.
+
+        Args:
+            score_dict (dict): A dictionary mapping raw labels to scores.
+
+        Returns:
+            NLIResult: The parsed NLI result.
+        """
         scores: dict[str, float] = {}
         for raw_label, score in score_dict.items():
             canonical = _LABEL_MAP.get(raw_label.lower(), LABEL_NEUTRAL)
@@ -192,7 +209,15 @@ class NLIProvider:
         )
 
     def _parse_top1(self, label: str, score: float) -> NLIResult:
-        """Parse a single top-1 label+score into NLIResult (fallback path)."""
+        """Parse a single top-1 label+score into NLIResult (fallback path).
+
+        Args:
+            label (str): The predicted label.
+            score (float): The confidence score.
+
+        Returns:
+            NLIResult: The parsed NLI result.
+        """
         canonical = _LABEL_MAP.get(label.lower(), LABEL_NEUTRAL)
 
         entailment_score = score if canonical == LABEL_ENTAILMENT else 0.0

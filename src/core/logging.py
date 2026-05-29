@@ -1,3 +1,8 @@
+"""
+Logging setup and configuration.
+
+Provides structured JSON logging via TCP to Vector, and standard output logging.
+"""
 import logging
 import os
 import queue
@@ -15,6 +20,12 @@ _logging_initialized = False
 _logging_init_lock = threading.Lock()
 
 class TCPJSONHandler(logging.Handler):
+    """A custom logging handler that sends JSON-formatted logs over TCP.
+    
+    Args:
+        host (str): The host address of the TCP receiver.
+        port (int): The port of the TCP receiver.
+    """
     def __init__(self, host, port):
         super().__init__()
         self.address = (host, port)
@@ -51,6 +62,11 @@ class TCPJSONHandler(logging.Handler):
 
 
 def setup_logging():
+    """Initializes the logging configuration for the application.
+    
+    Sets up JSON formatting, a TCP handler for remote logging (e.g., Vector),
+    and a stream handler for stdout, all processed asynchronously via a QueueHandler.
+    """
     global _logging_initialized
     with _logging_init_lock:
         if _logging_initialized:
@@ -88,6 +104,14 @@ def setup_logging():
 
 
 def get_logger(name):
+    """Gets a logger instance configured with the application's logging setup.
+    
+    Args:
+        name (str): The name of the logger (usually __name__).
+        
+    Returns:
+        logging.Logger: The configured logger instance.
+    """
     setup_logging()
     return logging.getLogger(name)
 

@@ -1,3 +1,8 @@
+"""
+Dependency injection for the LLM module.
+
+Provides a request-scoped singleton for the LLM application service.
+"""
 from functools import lru_cache
 
 from src.core import LLMSettings, get_settings
@@ -8,9 +13,12 @@ from .service import LLMService
 
 @lru_cache
 def get_llm_service() -> LLMService:
-    """
-    Factory function for Dependency Injection.
+    """Factory function for Dependency Injection.
+    
     Isolates the instantiation logic from the consuming vertical slices.
+
+    Returns:
+        LLMService: The configured LLM service singleton.
     """
     settings = get_settings()
     connection = LLMConnection(

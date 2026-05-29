@@ -1,3 +1,9 @@
+"""
+Service layer for the Input Validation Module (IVM).
+
+Responsible for checking prompts and uploaded documents for malicious
+content and relevance before processing.
+"""
 import logging
 from typing import Optional
 
@@ -8,9 +14,16 @@ from src.infra import EmbeddingProvider, PromptGuardProvider, QdrantStore
 logger = logging.getLogger(__name__)
 
 class IVMService:
-    """
-    Input Validation Module (IVM)
-    Responsible for validating prompts before they enter the RAG/LLM pipeline.
+    """Input Validation Module (IVM)
+    
+    Responsible for validating prompts and documents before they enter the RAG/LLM pipeline.
+    
+    Args:
+        prompt_guard (PromptGuardProvider): Client for prompt injection checks.
+        security_threshold (float): Score threshold for injection detection.
+        similarity_threshold (float): Score threshold for semantic relevance.
+        embedding_provider (EmbeddingProvider): Client for dense/sparse embeddings.
+        vector_store (QdrantStore): Vector DB client to check relevance against.
     """
 
     def __init__(
@@ -28,8 +41,14 @@ class IVMService:
         self.vector_store = vector_store
 
     async def validate_prompt(self, query: str) -> None:
-        """
-        Validates the user's prompt. Raises HTTPException if validation fails.
+    async def validate_prompt(self, query: str) -> None:
+        """Validates the user's prompt for injection and relevance.
+
+        Args:
+            query (str): The raw text of the user's prompt.
+
+        Raises:
+            HTTPException: If the prompt is malicious or irrelevant.
         """
         if not query.strip():
             return
@@ -38,8 +57,14 @@ class IVMService:
         await self._check_relevance(query)
 
     async def _check_malicious(self, query: str) -> None:
-        """
-        Validates the query against Prompt Guard.
+    async def _check_malicious(self, query: str) -> None:
+        """Validates the query against Prompt Guard.
+
+        Args:
+            query (str): The prompt to check.
+
+        Raises:
+            HTTPException: If the prompt fails the security threshold.
         """
         is_safe, message = await self.prompt_guard.check_prompt(query)
         if not is_safe:
@@ -50,8 +75,16 @@ class IVMService:
             )
 
     async def _check_relevance(self, query: str) -> None:
-        """
-        Validates that the query is relevant to the knowledge base using BGE-M3 pre-RAG check.
+    async def _check_relevance(self, query: str) -> None:
+        """Validates that the query is relevant to the knowledge base.
+
+        Uses BGE-M3 pre-RAG check against the vector store.
+
+        Args:
+            query (str): The prompt to check.
+
+        Raises:
+            HTTPException: If the best search score falls below similarity_threshold.
         """
         try:
             query_embeddings = await self.embedding_provider.embed_texts([query])
@@ -91,9 +124,16 @@ class IVMService:
             logger.warning(f"Failed to check relevance: {e}", exc_info=True)
 
     async def validate_document_relevance(self, embeddings: list) -> None:
-        """
-        Validates that an uploaded document is relevant to the knowledge base
-        by checking a random sample of its chunk embeddings.
+    async def validate_document_relevance(self, embeddings: list) -> None:
+        """Validates that an uploaded document is relevant to the knowledge base.
+
+        Checks a random sample of its chunk embeddings against the vector store.
+
+        Args:
+            embeddings (list): A list of EmbeddingResult objects for the document.
+
+        Raises:
+            HTTPException: If all sampled chunks fall below similarity_threshold.
         """
         if not embeddings:
             return

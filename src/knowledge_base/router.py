@@ -1,3 +1,8 @@
+"""
+API routing for the knowledge base module.
+
+Defines endpoints for admin document management and ingestion status polling.
+"""
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -18,6 +23,11 @@ router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
 class PDFUpdateRequest(BaseModel):
+    """Payload for updating a PDF document's status.
+
+    Attributes:
+        active (bool): Whether the document is active in the KB.
+    """
     active: bool
 
 @router.get("/admin/")

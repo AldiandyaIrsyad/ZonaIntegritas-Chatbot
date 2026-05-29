@@ -21,9 +21,14 @@ class PromptGuardProvider:
     """
     Infrastructure adapter for Prompt Injection detection via Infinity HTTP.
 
-    Designed as a singleton: instantiate once at startup (via lru_cache in
-    ivm/dependency.py), reuse across all requests. `check_prompt()` is a
+    Designed as a singleton: instantiated lazily on the first request (via lru_cache in
+    ivm/dependency.py), and reused across all subsequent requests. `check_prompt()` is a
     direct async method — no thread offload required.
+
+    Args:
+        base_url (str): The base URL of the Infinity server.
+        model (str): The prompt guard model to use.
+        security_threshold (float, optional): Score threshold to trigger a violation. Defaults to 0.75.
     """
 
     def __init__(self, base_url: str, model: str, security_threshold: float = 0.75):
@@ -42,10 +47,14 @@ class PromptGuardProvider:
         """
         Check text for prompt injection via Infinity classify.
 
+        Args:
+            text (str): The user's input prompt to check.
+
         Returns:
-            (True, "Safe")                          — benign input
-            (False, "Policy violation: <detail>")   — injection / jailbreak detected
-            (False, "Service unavailable")          — Infinity unreachable / error
+            Tuple[bool, str]: A tuple containing:
+                - `True`, "Safe"                          — benign input
+                - `False`, "Policy violation: <detail>"   — injection / jailbreak detected
+                - `False`, "Service unavailable"          — Infinity unreachable / error
         """
         try:
             response = await self._client.post(

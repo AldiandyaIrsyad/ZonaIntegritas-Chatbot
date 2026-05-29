@@ -1,3 +1,8 @@
+"""
+RAG (Retrieval-Augmented Generation) Module.
+
+Exposes core components for document ingestion and context retrieval.
+"""
 from .chunking import create_parent_chunks, split_into_children
 from .dependency import (
     get_document_parser,

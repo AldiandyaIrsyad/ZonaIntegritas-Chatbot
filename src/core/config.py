@@ -1,3 +1,8 @@
+"""
+Configuration management for the application.
+
+Defines Pydantic settings models for all components and provides cached getters.
+"""
 from functools import lru_cache
 
 from pydantic import SecretStr
@@ -5,6 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class LLMSettings(BaseSettings):
+    """Settings for the LLM integration via OpenRouter."""
     api_key: SecretStr | None = None
     use_local: bool = False
     base_url: str = "https://openrouter.ai/api/v1"
@@ -23,6 +29,7 @@ class LLMSettings(BaseSettings):
     )
 
 class DatabaseSettings(BaseSettings):
+    """Settings for the PostgreSQL database."""
     user: str = "postgres"
     password: str
     db: str = "postgres"
@@ -40,6 +47,7 @@ class DatabaseSettings(BaseSettings):
     )
 
 class StorageSettings(BaseSettings):
+    """Settings for local file storage."""
     admin_upload_dir: str = "admin_upload"
     user_upload_dir: str = "user_upload"
 
@@ -50,6 +58,7 @@ class StorageSettings(BaseSettings):
     )
 
 class QdrantSettings(BaseSettings):
+    """Settings for Qdrant vector database."""
     host: str = "localhost"
     port: int = 6333
     collection_name: str = "knowledge_base"
@@ -62,6 +71,7 @@ class QdrantSettings(BaseSettings):
     )
 
 class InfinitySettings(BaseSettings):
+    """Settings for the Infinity embedding and reranking service."""
     base_url: str = "http://localhost:7997"
     embedding_model: str = "BAAI/bge-m3"
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
@@ -76,6 +86,7 @@ class InfinitySettings(BaseSettings):
     )
 
 class UnstructuredSettings(BaseSettings):
+    """Settings for the Unstructured document parsing service."""
     base_url: str = "http://localhost:8001"
 
     model_config = SettingsConfigDict(
@@ -86,6 +97,7 @@ class UnstructuredSettings(BaseSettings):
 
 # Observability timberio/vector:0.47.0-alpine
 class VectorSettings(BaseSettings):
+    """Settings for the Vector log forwarder."""
     host: str = "localhost"
     port: int = 9000
 
@@ -96,6 +108,7 @@ class VectorSettings(BaseSettings):
     )
 
 class IVMSettings(BaseSettings):
+    """Settings for the Input Validation Module (IVM)."""
     security_threshold: float = 0.75
     similarity_threshold: float = 0.3
 
@@ -128,36 +141,81 @@ class RAMSettings(BaseSettings):
     
 @lru_cache
 def get_settings() -> LLMSettings:
+    """Get cached LLMSettings.
+    
+    Returns:
+        LLMSettings: The cached LLM settings instance.
+    """
     return LLMSettings()
 
 @lru_cache
 def get_db_settings() -> DatabaseSettings:
+    """Get cached DatabaseSettings.
+    
+    Returns:
+        DatabaseSettings: The cached database settings instance.
+    """
     return DatabaseSettings()
 
 @lru_cache
 def get_storage_settings() -> StorageSettings:
+    """Get cached StorageSettings.
+    
+    Returns:
+        StorageSettings: The cached storage settings instance.
+    """
     return StorageSettings()
 
 @lru_cache
 def get_qdrant_settings() -> QdrantSettings:
+    """Get cached QdrantSettings.
+    
+    Returns:
+        QdrantSettings: The cached Qdrant settings instance.
+    """
     return QdrantSettings()
 
 @lru_cache
 def get_infinity_settings() -> InfinitySettings:
+    """Get cached InfinitySettings.
+    
+    Returns:
+        InfinitySettings: The cached Infinity settings instance.
+    """
     return InfinitySettings()
 
 @lru_cache
 def get_unstructured_settings() -> UnstructuredSettings:
+    """Get cached UnstructuredSettings.
+    
+    Returns:
+        UnstructuredSettings: The cached unstructured settings instance.
+    """
     return UnstructuredSettings()
 
 @lru_cache
 def get_vector_settings() -> VectorSettings:
+    """Get cached VectorSettings.
+    
+    Returns:
+        VectorSettings: The cached vector settings instance.
+    """
     return VectorSettings()
 
 @lru_cache
 def get_ivm_settings() -> IVMSettings:
+    """Get cached IVMSettings.
+    
+    Returns:
+        IVMSettings: The cached IVM settings instance.
+    """
     return IVMSettings()
 
 @lru_cache
 def get_ram_settings() -> RAMSettings:
+    """Get cached RAMSettings.
+    
+    Returns:
+        RAMSettings: The cached RAM settings instance.
+    """
     return RAMSettings()

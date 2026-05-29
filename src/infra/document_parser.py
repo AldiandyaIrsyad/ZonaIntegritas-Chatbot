@@ -35,6 +35,9 @@ class DocumentParser:
 
     Sends PDFs to the `/general/v0/general` endpoint for layout-aware
     parsing that preserves document structure (titles, sections, tables).
+
+    Args:
+        base_url (str): The base URL of the unstructured-api container.
     """
 
     def __init__(self, base_url: str):
@@ -53,10 +56,10 @@ class DocumentParser:
         elements preserving the document's semantic structure.
 
         Args:
-            file_path: Absolute path to the PDF file on disk.
+            file_path (str): Absolute path to the PDF file on disk.
 
         Returns:
-            List of ParsedElement with types and text content.
+            List[ParsedElement]: List of ParsedElement with types and text content.
 
         Raises:
             FileNotFoundError: If the PDF file doesn't exist.
