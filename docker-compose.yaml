@@ -83,6 +83,18 @@ services:
     # Only needed during ingestion (State A). Shut down for chat (State B).
     profiles: ["ingestion"]
 
+  # --- Security Infrastructure ---
+
+  # MOVED implementation into `src/infra/prompt_guard.py`
+  # prompt-guard:
+  #   image: opea/prompt-injection:latest
+  #   container_name: prompt-guard-service
+  #   ports:
+  #     - "8080:8080"
+  #   environment:
+  #     - MODEL_ID=Niansuh/Prompt-Guard-86M # meta-llama/Prompt-Guard-86M
+  #   restart: unless-stopped
+
   # --- Observability Stack ---
 
   loki:

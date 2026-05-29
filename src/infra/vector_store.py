@@ -219,6 +219,12 @@ class QdrantStore:
                     match=MatchValue(value=session_id),
                 )
             )
+        else:
+            must_conditions.append(
+                models.IsEmptyCondition(
+                    is_empty=models.PayloadField(key="session_id")
+                )
+            )
 
         active_filter = Filter(must=must_conditions)
 
