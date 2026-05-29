@@ -47,6 +47,23 @@ def mock_ivm_service():
     return service
 
 @pytest.fixture
+def mock_ram_service():
+    """Mock RAMService that always returns neutral (no contradiction annotations)."""
+    from unittest.mock import MagicMock
+    from src.infra.nli import NLIResult, LABEL_NEUTRAL
+    service = MagicMock()
+    service.build_premise.return_value = "mock premise"
+    # assess_sentence is async — must be an AsyncMock
+    service.assess_sentence = AsyncMock(
+        return_value=NLIResult(
+            label=LABEL_NEUTRAL,
+            entailment_score=0.9,
+            contradiction_score=0.0,
+        )
+    )
+    return service
+
+@pytest.fixture
 def chat_service(
     mock_repository,
     mock_llm,
@@ -57,6 +74,7 @@ def chat_service(
     mock_vector_store,
     mock_embedding_provider,
     mock_ivm_service,
+    mock_ram_service,
 ):
     return ChatService(
         repository=mock_repository,
@@ -68,6 +86,7 @@ def chat_service(
         vector_store=mock_vector_store,
         embedding_provider=mock_embedding_provider,
         ivm_service=mock_ivm_service,
+        ram_service=mock_ram_service,
     )
 
 @pytest.mark.asyncio
@@ -123,12 +142,12 @@ async def test_process_chat_message(chat_service, mock_repository, mock_llm, moc
     mock_session = MagicMock()
     mock_session.title = "New Chat"
     mock_session.messages = []
+    mock_session.documents = []
     mock_repository.get_session_by_id.return_value = mock_session
     
-    # Mock LLM stream
+    # Mock LLM stream — yields a complete sentence so the pipeline flushes it
     async def mock_stream(*args, **kwargs):
-        yield "Hello "
-        yield "World"
+        yield "Hello World."
     
     mock_llm.stream_response.return_value = mock_stream()
 
@@ -139,12 +158,20 @@ async def test_process_chat_message(chat_service, mock_repository, mock_llm, moc
     async for chunk in response.body_iterator:
         chunks.append(chunk)
 
-    assert "".join(chunks) == "Hello World"
+    full_response = "".join(chunks)
+    # The pipeline may add sentence-level NLI annotations; confirm base content is present.
+    assert "Hello World" in full_response
     
     # Verify repository calls
     mock_repository.update_session_title.assert_called_once_with(mock_session, "Test message")
     mock_repository.create_message.assert_any_call("123", "user", "Test message")
-    mock_repository.create_message.assert_any_call("123", "assistant", "Hello World")
+    # Assistant message should contain the response text
+    assistant_calls = [
+        call for call in mock_repository.create_message.call_args_list
+        if call.args[1] == "assistant"
+    ]
+    assert len(assistant_calls) == 1
+    assert "Hello World" in assistant_calls[0].args[2]
 
 @pytest.mark.asyncio
 async def test_delete_session(chat_service, mock_repository):
@@ -212,7 +239,13 @@ class TestBuildSecureSystemPrompt:
     def test_rag_contexts_outside_inner_tags(self):
         """Knowledge-base RAG contexts must NOT be inside the user_document tags."""
         from src.rag import RetrievedContext
-        ctx = RetrievedContext(text="kb_marker_text", doc_id="doc1", score=0.9, source_title="KB Doc")
+        ctx = RetrievedContext(
+            text="kb_marker_text",
+            doc_id="doc1",
+            score=0.9,
+            source_title="KB Doc",
+            parent_chunk_id="parent-chunk-001",
+        )
         result = ChatService._build_secure_system_prompt([ctx], ["pdf_marker"])
         import re
         inner_open = re.search(r"<user_document_[0-9a-f]{16}>", result)

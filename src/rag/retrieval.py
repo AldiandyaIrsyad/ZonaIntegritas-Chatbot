@@ -24,6 +24,7 @@ class RetrievedContext:
     doc_id: str
     score: float
     source_title: str
+    parent_chunk_id: str  # Used by RAMService to identify NLI evidence source
 
 
 class RetrievalService:
@@ -144,6 +145,7 @@ class RetrievalService:
                     doc_id=parent_chunk.doc_id,
                     score=ranked.score,
                     source_title=source_title,
+                    parent_chunk_id=parent_chunk.id,
                 )
             )
 
