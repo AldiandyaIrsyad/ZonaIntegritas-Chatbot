@@ -39,7 +39,7 @@ class IVMService:
 
     async def _check_malicious(self, query: str) -> None:
         """
-        Validates the query against Prompt-Guard-86M via OPEA prompt-injection.
+        Validates the query against Prompt Guard.
         """
         is_safe, message = await self.prompt_guard.check_prompt(query)
         if not is_safe:
@@ -90,4 +90,49 @@ class IVMService:
         except Exception as e:
             logger.warning(f"Failed to check relevance: {e}", exc_info=True)
 
+    async def validate_document_relevance(self, embeddings: list) -> None:
+        """
+        Validates that an uploaded document is relevant to the knowledge base
+        by checking a random sample of its chunk embeddings.
+        """
+        if not embeddings:
+            return
 
+        import random
+        # Sample up to 5 chunks to keep the check fast
+        sample_size = min(5, len(embeddings))
+        sampled_embeddings = random.sample(embeddings, sample_size)
+
+        best_overall_score = 0.0
+
+        try:
+            for emb in sampled_embeddings:
+                search_results = await self.vector_store.hybrid_search(
+                    dense_vector=emb.dense,
+                    sparse_indices=emb.sparse_indices,
+                    sparse_values=emb.sparse_values,
+                    top_k=1,
+                )
+
+                if not search_results:
+                    # If KB is empty, we allow the upload
+                    return
+
+                best_score = search_results[0].score
+                best_overall_score = max(best_overall_score, best_score)
+
+                if best_overall_score >= self.similarity_threshold:
+                    # Found at least one relevant chunk, document is allowed
+                    logger.info(f"Document relevant. Best chunk score: {best_score} >= {self.similarity_threshold}")
+                    return
+
+            # If we get here, none of the sampled chunks were relevant
+            logger.warning(f"Irrelevant document detected. Max score across samples: {best_overall_score} < {self.similarity_threshold}")
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded document is not relevant to the knowledge base."
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning(f"Failed to check document relevance: {e}", exc_info=True)

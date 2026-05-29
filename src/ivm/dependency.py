@@ -15,7 +15,7 @@ def get_ivm_service() -> IVMService:
     settings = get_ivm_settings()
     embedding_provider = get_embedding_provider()
     vector_store = get_vector_store()
-    prompt_guard = PromptGuardProvider()
+    prompt_guard = PromptGuardProvider(security_threshold=settings.security_threshold)
 
     return IVMService(
         prompt_guard=prompt_guard,
