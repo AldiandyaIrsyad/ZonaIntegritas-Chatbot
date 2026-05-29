@@ -83,7 +83,7 @@ services:
       --dtype float16
     profiles: ["ingestion", "chat"]
     volumes:
-      - ./infinity_cache:/app/.cache
+      - infinity_cache:/app/.cache
 
   unstructured-api:
     image: quay.io/unstructured-io/unstructured-api:latest

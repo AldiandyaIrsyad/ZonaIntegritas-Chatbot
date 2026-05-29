@@ -54,10 +54,10 @@ _NLI_SEP = " </s></s> " # RoBERTa
 @dataclass
 class NLIResult:
     """Result from a single NLI inference call."""
-    label: str               # "entailment" | "neutral" | "contradiction"
-    entailment_score: float  # confidence that hypothesis is entailed by premise (0.0–1.0)
-    contradiction_score: float  # confidence that hypothesis contradicts premise (0.0–1.0)
-    neutral_score: float     # confidence that hypothesis is neutral to premise (0.0–1.0)
+    label: str                          # "entailment" | "neutral" | "contradiction"
+    entailment_score: float     = 0.0   # confidence that hypothesis is entailed by premise (0.0–1.0)
+    contradiction_score: float  = 0.0   # confidence that hypothesis contradicts premise (0.0–1.0)
+    neutral_score: float        = 0.0   # confidence that hypothesis is neutral to premise (0.0–1.0)
 
 
 class NLIProvider:
@@ -79,7 +79,7 @@ class NLIProvider:
         self.model = model
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
-            timeout=httpx.Timeout(60.0, connect=10.0),
+            timeout=httpx.Timeout(10.0, connect=5.0),
         )
         logger.info("NLIProvider initialised — model=%s, base_url=%s", model, base_url)
 

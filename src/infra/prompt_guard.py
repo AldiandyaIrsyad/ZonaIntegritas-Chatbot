@@ -31,7 +31,7 @@ class PromptGuardProvider:
         self.security_threshold = security_threshold
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
-            timeout=httpx.Timeout(30.0, connect=10.0),
+            timeout=httpx.Timeout(10.0, connect=5.0),
         )
         logger.info(
             "PromptGuardProvider initialised — model=%s, base_url=%s, threshold=%.2f",
