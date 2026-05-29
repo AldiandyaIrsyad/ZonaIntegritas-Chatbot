@@ -41,6 +41,12 @@ def mock_embedding_provider():
     return AsyncMock()
 
 @pytest.fixture
+def mock_ivm_service():
+    service = AsyncMock()
+    service.validate_prompt.return_value = None  # passes all prompts by default
+    return service
+
+@pytest.fixture
 def chat_service(
     mock_repository,
     mock_llm,
@@ -49,7 +55,8 @@ def chat_service(
     mock_document_parser,
     mock_reranker,
     mock_vector_store,
-    mock_embedding_provider
+    mock_embedding_provider,
+    mock_ivm_service,
 ):
     return ChatService(
         repository=mock_repository,
@@ -59,7 +66,8 @@ def chat_service(
         document_parser=mock_document_parser,
         reranker=mock_reranker,
         vector_store=mock_vector_store,
-        embedding_provider=mock_embedding_provider
+        embedding_provider=mock_embedding_provider,
+        ivm_service=mock_ivm_service,
     )
 
 @pytest.mark.asyncio
@@ -110,7 +118,7 @@ async def test_get_session_details_not_found(chat_service, mock_repository):
     assert result is None
 
 @pytest.mark.asyncio
-async def test_process_chat_message(chat_service, mock_repository, mock_llm):
+async def test_process_chat_message(chat_service, mock_repository, mock_llm, mock_ivm_service):
     # Setup mock session
     mock_session = MagicMock()
     mock_session.title = "New Chat"

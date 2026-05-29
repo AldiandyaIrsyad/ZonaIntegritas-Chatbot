@@ -91,6 +91,16 @@ class VectorSettings(BaseSettings):
         env_prefix="VECTOR_",
         extra="ignore"
     )
+
+class IVMSettings(BaseSettings):
+    security_threshold: float = 0.75
+    similarity_threshold: float = 0.3
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="IVM_",
+        extra="ignore"
+    )
     
 @lru_cache
 def get_settings() -> LLMSettings:
@@ -119,3 +129,7 @@ def get_unstructured_settings() -> UnstructuredSettings:
 @lru_cache
 def get_vector_settings() -> VectorSettings:
     return VectorSettings()
+
+@lru_cache
+def get_ivm_settings() -> IVMSettings:
+    return IVMSettings()

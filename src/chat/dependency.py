@@ -20,9 +20,12 @@ from src.rag import (
     get_reranker,
     get_retrieval_service,
 )
+from src.ivm.service import IVMService
+from src.ivm.dependency import get_ivm_service
 
 from .repository import ChatRepository
 from .service import ChatService
+
 
 
 @lru_cache
@@ -51,6 +54,7 @@ def get_chat_service(
     reranker: Reranker = Depends(get_reranker),
     vector_store: QdrantStore = Depends(get_session_vector_store),
     embedding_provider: EmbeddingProvider = Depends(get_embedding_provider),
+    ivm_service: IVMService = Depends(get_ivm_service),
 ) -> ChatService:
     return ChatService(
         repository=repository,
@@ -61,4 +65,5 @@ def get_chat_service(
         reranker=reranker,
         vector_store=vector_store,
         embedding_provider=embedding_provider,
+        ivm_service=ivm_service,
     )
