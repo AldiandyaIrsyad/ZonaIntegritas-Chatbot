@@ -6,8 +6,8 @@ in-process HuggingFace transformers pipeline. Concurrency is now handled
 entirely by the Infinity server — multiple in-flight classify requests are
 processed in parallel without any GIL or thread-pool contention.
 
-Model: ProtectAI/deberta-v3-base-prompt-injection-v2
-Labels: SAFE (0) | INJECTION (1) | JAILBREAK (2)
+Model: meta-llama/Llama-Prompt-Guard-2-86M
+Labels: BENIGN (safe input) | MALICIOUS (prompt injection or jailbreak attempt)
 """
 import logging
 from typing import Tuple
@@ -15,7 +15,6 @@ from typing import Tuple
 import httpx
 
 logger = logging.getLogger(__name__)
-
 
 class PromptGuardProvider:
     """
@@ -68,26 +67,36 @@ class PromptGuardProvider:
             data = response.json()
 
             items = data.get("data", [])
-            if not items or not items[0]:
+            if not items:
                 logger.warning("Empty classify response from Infinity (PromptGuard)")
                 return False, "Service unavailable"
 
             predictions = items[0]
-            if isinstance(predictions, dict):
+            
+            if isinstance(predictions, dict) and "results" in predictions:
+                predictions = predictions["results"]
+            elif isinstance(predictions, dict):
                 predictions = [predictions]
+
+            if not predictions:
+                logger.warning("No valid predictions found in Infinity response.")
+                return False, "Service unavailable"
 
             for pred in predictions:
                 label = str(pred.get("label", "")).upper()
                 score = float(pred.get("score", 0.0))
 
-                # Labels from ProtectAI/deberta-v3-base-prompt-injection-v2:
-                # SAFE (benign), INJECTION, JAILBREAK — or generic LABEL_1/LABEL_2
-                if (
-                    "INJECTION" in label
-                    or "JAILBREAK" in label
-                    or "LABEL_1" in label
-                    or "LABEL_2" in label
-                ):
+                if label == "LABEL_0":
+                    label = "BENIGN"
+                elif label == "LABEL_1":
+                    label = "MALICIOUS"
+
+                logger.debug(
+                    "PromptGuard prediction — label=%s, score=%.4f, threshold=%.2f",
+                    label, score, self.security_threshold,
+                )
+                
+                if "BENIGN" not in label:
                     if score >= self.security_threshold:
                         return (
                             False,

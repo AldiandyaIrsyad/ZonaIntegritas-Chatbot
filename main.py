@@ -10,6 +10,7 @@ import src.chat.model  # noqa: F401
 import src.rag.model  # noqa: F401
 from src.chat import chat_router
 from src.core import Base, engine
+from src.core.config import get_app_settings
 from src.knowledge_base import kb_router
 from src.rag import get_vector_store
 
@@ -40,10 +41,12 @@ async def lifespan(app: FastAPI):
 
     yield
 
+app_settings = get_app_settings()
+
 app = FastAPI(
-    title="Chat Application with PDF Knowledge Base",
-    description="An intelligent chat system that leverages Large Language Models (LLMs) and PDF document management to provide context-aware responses. Users can upload PDF documents which are processed and indexed for semantic search, enabling the LLM to reference relevant content in its responses.",
-    version="1.0.0",
+    title=app_settings.title,
+    description=app_settings.description,
+    version=app_settings.version,
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
@@ -62,4 +65,9 @@ app.include_router(kb_router)
 
 if __name__ == "__main__":
     # Passing the app as an import string ("main:app") enables hot-reloading
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        "main:app",
+        host=app_settings.host,
+        port=app_settings.port,
+        reload=app_settings.reload
+    )
