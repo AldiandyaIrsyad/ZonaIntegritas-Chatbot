@@ -9,7 +9,7 @@ into a two-level hierarchy:
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -18,7 +18,10 @@ from src.infra import ParsedElement
 logger = logging.getLogger(__name__)
 
 # Element types that indicate section boundaries
-SECTION_BOUNDARY_TYPES = {"Title", "Header"}
+SECTION_BOUNDARY_TYPES = {"Title"}
+
+# Element types to ignore (noise, page numbers, repeating headers/footers)
+IGNORE_ELEMENT_TYPES = {"Header", "Footer", "PageNumber"}
 
 # Default chunking parameters
 DEFAULT_PARENT_MAX_CHARS = 2000
@@ -33,6 +36,7 @@ class ParentChunkData:
     doc_id: str
     text: str
     chunk_index: int
+    page: Optional[int] = None
 
 
 @dataclass
@@ -42,6 +46,7 @@ class ChildChunkData:
     parent_chunk_id: str
     doc_id: str
     text: str
+    page: Optional[int] = None
 
 
 def create_parent_chunks(
@@ -51,10 +56,12 @@ def create_parent_chunks(
 ) -> List[ParentChunkData]:
     """Group parsed elements into logical parent chunks.
 
-    Uses section boundary elements (Title, Header) from the unstructured
+    Uses section boundary elements (Title) from the unstructured
     parser to create semantically meaningful parent chunks. Each parent
     chunk aggregates content under a section heading until the next heading
     or until the max character limit is reached.
+
+    Consecutive headers are grouped together, and page artifacts are ignored.
 
     Args:
         elements (List[ParsedElement]): Structured elements from DocumentParser.parse_pdf().
@@ -71,9 +78,11 @@ def create_parent_chunks(
     current_texts: List[str] = []
     current_length = 0
     chunk_index = 0
+    current_page: Optional[int] = None
+    has_body_text = False
 
     def _flush_current():
-        nonlocal current_texts, current_length, chunk_index
+        nonlocal current_texts, current_length, chunk_index, current_page, has_body_text
         if not current_texts:
             return
         combined_text = "\n\n".join(current_texts).strip()
@@ -84,19 +93,32 @@ def create_parent_chunks(
                     doc_id=doc_id,
                     text=combined_text,
                     chunk_index=chunk_index,
+                    page=current_page,
                 )
             )
             chunk_index += 1
         current_texts = []
         current_length = 0
+        current_page = None
+        has_body_text = False
 
     for element in elements:
         text = element.text.strip()
         if not text:
             continue
 
-        # Start a new parent chunk at section boundaries
-        if element.element_type in SECTION_BOUNDARY_TYPES and current_texts:
+        # Ignore noisy elements like page headers/footers
+        if element.element_type in IGNORE_ELEMENT_TYPES:
+            continue
+
+        # Treat as boundary only if it's a Title and has substantial text
+        # (filters out 1-letter artifacts like bullets misclassified as Titles)
+        is_boundary = element.element_type in SECTION_BOUNDARY_TYPES and len(text) > 3
+
+        # Start a new parent chunk at section boundaries, but only if we already
+        # have body text in the current chunk. This prevents consecutive headers
+        # from being split into separate tiny chunks.
+        if is_boundary and has_body_text:
             _flush_current()
 
         # If adding this element would exceed the limit, flush first
@@ -105,6 +127,12 @@ def create_parent_chunks(
 
         current_texts.append(text)
         current_length += len(text)
+        
+        if current_page is None:
+            current_page = element.metadata.get("page_number")
+            
+        if not is_boundary:
+            has_body_text = True
 
     # Don't forget the last accumulated chunk
     _flush_current()
@@ -156,6 +184,7 @@ def split_into_children(
                 parent_chunk_id=parent.id,
                 doc_id=parent.doc_id,
                 text=text,
+                page=parent.page,
             )
         )
 

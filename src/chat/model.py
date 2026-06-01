@@ -39,6 +39,7 @@ class Message(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     session_id = Column(String, ForeignKey("sessions.id"))
     role = Column(String) 
+    raw_content = Column(Text, nullable=True)
     content = Column(Text)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     
@@ -69,5 +70,6 @@ class SessionDocumentChunk(Base):
     session_document_id = Column(String, ForeignKey("session_documents.id"))
     text = Column(Text)
     chunk_index = Column(Integer)
+    page = Column(Integer, nullable=True)
 
     document = relationship("SessionDocument", back_populates="chunks")

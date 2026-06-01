@@ -39,6 +39,7 @@ async def lifespan(app: FastAPI):
             str(e),
         )
 
+    logger.info("Service started successfully.")
     yield
 
 app_settings = get_app_settings()

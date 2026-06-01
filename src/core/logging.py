@@ -74,7 +74,11 @@ def setup_logging():
         _logging_initialized = True
 
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
+    root_logger.setLevel(logging.WARNING)
+    
+    # Explicitly enable INFO logging for our application code
+    logging.getLogger("src").setLevel(logging.INFO)
+    logging.getLogger("__main__").setLevel(logging.INFO)
 
     formatter = JsonFormatter(
         '%(asctime)s %(levelname)s %(name)s %(message)s',

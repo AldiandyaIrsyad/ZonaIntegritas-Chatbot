@@ -27,7 +27,7 @@ from typing import AsyncIterator, List
 from src.infra.nli import NLIResult
 
 from src.llm import LLMService
-from src.ram.service import RAMService
+from src.ram.service import RAMService, MAX_PREMISE_CONTEXTS
 from src.rag import RetrievedContext
 
 
@@ -67,6 +67,13 @@ async def nli_streaming_generate(
     # Build the NLI premise once for the entire request (not per sentence).
     premise = ram_service.build_premise(contexts)
 
+    # Pre-compute context embeddings once to avoid redundant network calls per sentence.
+    context_embs = None
+    if contexts and ram_service.enabled:
+        top_contexts = contexts[:MAX_PREMISE_CONTEXTS]
+        context_texts = [ctx.text for ctx in top_contexts]
+        context_embs = await ram_service.embedding_provider.embed_texts(context_texts)
+
     def _start_nli(sentence: str) -> "asyncio.Task[NLIResult]":
         """Kick off NLI assessment for *sentence* without blocking.
 
@@ -76,7 +83,7 @@ async def nli_streaming_generate(
         Returns:
             asyncio.Task[NLIResult]: A running task whose result is an NLIResult.
         """
-        return asyncio.create_task(ram_service.assess_sentence(sentence, premise))
+        return asyncio.create_task(ram_service.assess_sentence(sentence, premise, contexts, context_embs))
 
     def _annotate(raw_sentence: str, task: "asyncio.Task[NLIResult]") -> str:
         """Apply NLI annotation to *raw_sentence* using the completed *task*.
@@ -89,12 +96,29 @@ async def nli_streaming_generate(
             str: Sentence with inline NLI annotation appended.
         """
         result: NLIResult = task.result()
+        
+        citation = ""
+        if result.source_title:
+            citation += f"; {result.source_title}"
+            if result.page is not None:
+                citation += f"; Page {result.page}"
+                
+        tag = ""
         if result.label == "entailment":
-            return raw_sentence + f" *(Supported: {result.entailment_score:.2f})*"
+            tag = f" *(Supported: {result.entailment_score:.2f}{citation})*"
         elif result.label == "contradiction":
-            return raw_sentence + f" *(Contradiction: {result.contradiction_score:.2f})*"
+            tag = f" *(Contradiction: {result.contradiction_score:.2f}{citation})*"
         else:
-            return raw_sentence + f" *(Neutral: {result.neutral_score:.2f})*"
+            tag = f" *(Neutral: {result.neutral_score:.2f})*"
+
+        # Insert the citation tag BEFORE any trailing whitespace (so it stays with its sentence)
+        match = re.search(r"(\s+)$", raw_sentence)
+        if match:
+            trailing_ws = match.group(1)
+            content = raw_sentence[:-len(trailing_ws)]
+            return content + tag + trailing_ws
+        else:
+            return raw_sentence + tag
 
     sentence_buffer = ""
     # pending: list of (raw_sentence_text, asyncio.Task[NLIResult])

@@ -6,7 +6,7 @@ Query → Embed → Hybrid Search (Qdrant) → Parent Lookup (Postgres) → Rera
 """
 import logging
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +25,7 @@ class RetrievedContext:
     score: float
     source_title: str
     parent_chunk_id: str  # Used by RAMService to identify NLI evidence source
+    page: Optional[int] = None
 
 
 class RetrievalService:
@@ -146,6 +147,7 @@ class RetrievalService:
                     score=ranked.score,
                     source_title=source_title,
                     parent_chunk_id=parent_chunk.id,
+                    page=parent_chunk.page,
                 )
             )
 

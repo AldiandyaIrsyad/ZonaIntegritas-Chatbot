@@ -109,7 +109,7 @@ block layout %} {% include "components/sidebar.html" %}
           <template x-if="msg.role === 'assistant'">
             <div
               class="prose prose-slate dark:prose-invert prose-p:leading-relaxed prose-pre:bg-slate-800 dark:prose-pre:bg-slate-900 max-w-none text-slate-900 dark:text-gray-200 py-1.5 marker:text-slate-400"
-              x-html="DOMPurify.sanitize(marked.parse(msg.content, { breaks: true }))"
+              x-html="renderMessage(msg.content)"
             ></div>
           </template>
         </div>
@@ -150,6 +150,27 @@ block layout %} {% include "components/sidebar.html" %}
           this.documents = [];
           this.pendingDocument = null;
         });
+      },
+
+      renderMessage(content) {
+        if (!content) return "";
+        
+        // Transform citations BEFORE DOMPurify and BEFORE marked.parse 
+        // (to prevent marked from turning *...* into <em>...</em>)
+        let markdown = content.replace(/\s*\*\((Supported|Contradiction|Neutral):\s*([0-9.]+)(?:;\s*(.+?)(?:;\s*Page\s*(\d+))?)?\)\*/g, (match, status, score, source, page) => {
+          let bgColor = 'bg-gray-500';
+          if (status === 'Supported') bgColor = 'bg-green-500';
+          else if (status === 'Contradiction') bgColor = 'bg-orange-500';
+
+          let tooltip = `<strong>${status}</strong>: ${score}`;
+          if (source) tooltip += `<br><span class="text-slate-300">Source:</span> ${source}`;
+          if (page) tooltip += `<br><span class="text-slate-300">Page:</span> ${page}`;
+
+          return `<span class="group relative inline-block ml-1 cursor-pointer align-text-bottom" data-citation="true"><span class="inline-flex items-center justify-center w-[16px] h-[16px] rounded-full text-[10px] font-bold text-white shadow-sm ${bgColor} hover:ring-2 hover:ring-offset-1 hover:ring-slate-400 transition-all dark:hover:ring-offset-[#2f2f2f]">i</span><span class="absolute bottom-full left-1/2 mb-2 hidden w-max -translate-x-1/2 rounded-lg bg-slate-800 dark:bg-black px-3 py-2 text-xs text-white opacity-0 transition-opacity group-hover:block group-hover:opacity-100 z-50 shadow-xl border border-slate-700/50 leading-relaxed font-sans font-normal text-left">${tooltip}</span></span>`;
+        });
+        
+        let html = marked.parse(markdown, { breaks: true });
+        return DOMPurify.sanitize(html, { ADD_ATTR: ['data-citation', 'target'] });
       },
 
       async loadSession(id) {

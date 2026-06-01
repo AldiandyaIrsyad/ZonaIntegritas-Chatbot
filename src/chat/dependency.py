@@ -1,8 +1,4 @@
-"""
-Dependency injection for the chat module.
-
-Provides request-scoped and cached singletons for chat operations.
-"""
+ 
 from functools import lru_cache
 
 from fastapi import Depends

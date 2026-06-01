@@ -178,6 +178,7 @@ class ChatService:
                                 session_document_id=doc.id,
                                 text=child.text,
                                 chunk_index=chunk_idx,
+                                page=child.page,
                             )
                         )
                         chunk_idx += 1
@@ -290,8 +291,8 @@ class ChatService:
             new_title = message_text[:30] + ("..." if len(message_text) > 30 else "")
             await self.repository.update_session_title(session, new_title)
 
-        await self.repository.create_message(session_id, "user", message_text)
-        raw_history = [{"role": m.role, "content": m.content} for m in session.messages]
+        await self.repository.create_message(session_id, "user", message_text, raw_content=message_text)
+        raw_history = [{"role": m.role, "content": m.raw_content if m.raw_content is not None else m.content} for m in session.messages]
 
         # ── 3. Session-document context (user-uploaded PDF) ──────────
         session_texts: List[str] = []

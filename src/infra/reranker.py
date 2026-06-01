@@ -101,7 +101,7 @@ class Reranker:
         # Sort by score descending (server usually does this, but be safe)
         results.sort(key=lambda r: r.score, reverse=True)
 
-        logger.info(
+        logger.debug(
             "Reranked %d documents, returning top %d",
             len(documents),
             min(top_k, len(results)),

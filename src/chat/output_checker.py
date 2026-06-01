@@ -11,6 +11,7 @@ rule-based filters, or any other output-verification strategy without
 touching ``ChatService``.
 """
 from typing import Optional
+import re
 
 import anyio
 
@@ -61,9 +62,12 @@ async def check_and_persist(
     # For now, the output is accepted as-is.
     verified_output = final_output
 
+    # Strip NLI citation tags to produce the raw content for future LLM context
+    raw_output = re.sub(r" \*\((?:Supported|Contradiction|Neutral):.*?\)\*", "", verified_output)
+
     try:
         with anyio.CancelScope(shield=True):
-            await repository.create_message(session_id, "assistant", verified_output)
+            await repository.create_message(session_id, "assistant", verified_output, raw_content=raw_output)
     except Exception:
         logger.error("Failed to persist assistant message", exc_info=True)
 

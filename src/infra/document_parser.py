@@ -77,7 +77,7 @@ class DocumentParser:
                 "/general/v0/general",
                 files={"files": (filename, f, "application/pdf")},
                 data={
-                    "strategy": "fast",
+                    "strategy": "hi_res",
                 },
             )
 
@@ -98,7 +98,7 @@ class DocumentParser:
                 )
             )
 
-        logger.info(
+        logger.debug(
             "Parsed PDF '%s': extracted %d elements", filename, len(elements)
         )
         return elements

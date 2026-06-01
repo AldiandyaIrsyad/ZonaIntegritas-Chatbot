@@ -113,7 +113,7 @@ class EmbeddingProvider:
                     )
                 )
 
-        logger.info("Embedded %d texts via Infinity (%s)", len(texts), self.model)
+        logger.debug("Embedded %d texts via Infinity (%s)", len(texts), self.model)
         return all_results
 
     async def close(self) -> None:

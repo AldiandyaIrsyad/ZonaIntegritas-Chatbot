@@ -128,6 +128,7 @@ class IngestionService:
                     doc_id=pc.doc_id,
                     text=pc.text,
                     chunk_index=pc.chunk_index,
+                    page=pc.page,
                 )
                 for pc in parent_chunk_data
             ]

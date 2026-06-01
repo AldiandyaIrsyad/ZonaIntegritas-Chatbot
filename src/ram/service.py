@@ -13,9 +13,12 @@ Usage:
         sentence += " *(contradictive)*"
 """
 import logging
-from typing import List
+import math
+from typing import List, Optional
 
-from src.infra.nli import NLIProvider, NLIResult, LABEL_NEUTRAL
+from src.infra import EmbeddingProvider
+from src.infra.embedding_provider import EmbeddingResult
+from src.infra.nli import NLIProvider, NLIResult, LABEL_NEUTRAL, LABEL_ENTAILMENT, LABEL_CONTRADICTION
 from src.rag.retrieval import RetrievedContext
 
 logger = logging.getLogger(__name__)
@@ -40,8 +43,9 @@ class RAMService:
         enabled (bool, optional): Whether NLI assessment is enabled. Defaults to True.
     """
 
-    def __init__(self, nli: NLIProvider, enabled: bool = True):
+    def __init__(self, nli: NLIProvider, embedding_provider: EmbeddingProvider, enabled: bool = True):
         self.nli = nli
+        self.embedding_provider = embedding_provider
         self.enabled = enabled
 
     def build_premise(self, contexts: List[RetrievedContext]) -> str:
@@ -76,12 +80,17 @@ class RAMService:
         self,
         sentence: str,
         premise: str,
+        contexts: List[RetrievedContext],
+        context_embs: Optional[List[EmbeddingResult]] = None,
     ) -> NLIResult:
         """Run NLI on a single sentence against the pre-built KB premise.
+        If supported or contradicted, reverse map to the specific context chunk using embeddings.
 
         Args:
             sentence (str): A complete sentence from the LLM's response (hypothesis).
             premise (str): The concatenated KB context string (built via build_premise).
+            contexts (List[RetrievedContext]): The retrieved contexts to reverse map against.
+            context_embs (Optional[List[EmbeddingResult]]): Precomputed embeddings for contexts.
 
         Returns:
             NLIResult: NLIResult with canonical label and confidence scores.
@@ -110,4 +119,51 @@ class RAMService:
             len(premise),
         )
 
-        return await self.nli.check(premise=premise, hypothesis=sentence)
+        result = await self.nli.check(premise=premise, hypothesis=sentence)
+
+        if result.label in [LABEL_ENTAILMENT, LABEL_CONTRADICTION] and contexts:
+            try:
+                # Reverse mapping using embeddings
+                sentence_embs = await self.embedding_provider.embed_texts([sentence])
+                if not sentence_embs:
+                    return result
+                    
+                sentence_dense = sentence_embs[0].dense
+                
+                top_contexts = contexts[:MAX_PREMISE_CONTEXTS]
+                
+                if context_embs is None:
+                    context_texts = [ctx.text for ctx in top_contexts]
+                    context_embs = await self.embedding_provider.embed_texts(context_texts)
+                
+                if not context_embs or len(context_embs) != len(top_contexts):
+                    return result
+
+                best_idx = 0
+                best_score = -1.0
+                
+                for i, ctx_emb in enumerate(context_embs):
+                    c_dense = ctx_emb.dense
+                    
+                    # Cosine similarity
+                    dot_product = sum(a * b for a, b in zip(sentence_dense, c_dense))
+                    norm_a = math.sqrt(sum(a * a for a in sentence_dense))
+                    norm_b = math.sqrt(sum(b * b for b in c_dense))
+                    
+                    if norm_a == 0 or norm_b == 0:
+                        score = 0.0
+                    else:
+                        score = dot_product / (norm_a * norm_b)
+                        
+                    if score > best_score:
+                        best_score = score
+                        best_idx = i
+                        
+                best_ctx = top_contexts[best_idx]
+                result.source_title = best_ctx.source_title
+                result.page = best_ctx.page
+                
+            except Exception as e:
+                logger.warning("Failed to reverse map citation: %s", str(e), exc_info=True)
+
+        return result

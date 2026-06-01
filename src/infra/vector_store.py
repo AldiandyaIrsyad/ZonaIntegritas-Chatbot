@@ -119,12 +119,12 @@ class QdrantStore:
                 field_name="doc_id",
                 field_schema=PayloadSchemaType.KEYWORD,
             )
-            logger.info(
+            logger.debug(
                 "Created Qdrant collection '%s' with dense + sparse vectors",
                 self.collection_name,
             )
         else:
-            logger.info(
+            logger.debug(
                 "Qdrant collection '%s' already exists, skipping creation",
                 self.collection_name,
             )
@@ -185,7 +185,7 @@ class QdrantStore:
                 points=batch,
             )
 
-        logger.info("Upserted %d chunk vectors to Qdrant", len(chunks), extra={
+        logger.debug("Upserted %d chunk vectors to Qdrant", len(chunks), extra={
             "event": LogEvent.VECTOR_UPSERT.value,
             "doc_id": chunks[0].doc_id if chunks else None,
             "session_id": chunks[0].session_id if chunks else None,
@@ -313,7 +313,7 @@ class QdrantStore:
                 ]
             ),
         )
-        logger.info(
+        logger.debug(
             "Updated payload for doc_id='%s': %s", doc_id, payload
         )
 
@@ -336,7 +336,7 @@ class QdrantStore:
                 ]
             ),
         )
-        logger.info("Deleted all vectors for doc_id='%s'", doc_id)
+        logger.debug("Deleted all vectors for doc_id='%s'", doc_id)
 
     async def close(self) -> None:
         """Close the Qdrant client connection."""

@@ -9,6 +9,7 @@ from functools import lru_cache
 
 from src.core.config import get_infinity_settings, get_ram_settings
 from src.infra.nli import NLIProvider
+from src.rag.dependency import get_embedding_provider
 
 from .service import RAMService
 
@@ -37,5 +38,6 @@ def get_ram_service() -> RAMService:
     settings = get_ram_settings()
     return RAMService(
         nli=get_nli_provider(),
+        embedding_provider=get_embedding_provider(),
         enabled=settings.nli_enabled,
     )

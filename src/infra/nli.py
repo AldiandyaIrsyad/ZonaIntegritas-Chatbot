@@ -20,7 +20,7 @@ Infinity classify endpoint reference:
 """
 import logging
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import httpx
 
@@ -58,6 +58,8 @@ class NLIResult:
     entailment_score: float     = 0.0   # confidence that hypothesis is entailed by premise (0.0–1.0)
     contradiction_score: float  = 0.0   # confidence that hypothesis contradicts premise (0.0–1.0)
     neutral_score: float        = 0.0   # confidence that hypothesis is neutral to premise (0.0–1.0)
+    source_title: str           = ""    # PDF name from the highest matching context
+    page: Optional[int]         = None  # Page number from the highest matching context
 
 
 class NLIProvider:

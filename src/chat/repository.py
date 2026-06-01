@@ -78,18 +78,19 @@ class ChatRepository:
         await self.db.commit()
         return session
 
-    async def create_message(self, session_id: str, role: str, content: str) -> DBMessage:
+    async def create_message(self, session_id: str, role: str, content: str, raw_content: str | None = None) -> DBMessage:
         """Create a new message in a session.
 
         Args:
             session_id (str): UUID of the session.
             role (str): Role of the message sender (user, assistant, system).
             content (str): Text content of the message.
+            raw_content (str | None): Original text content without citations.
 
         Returns:
             DBMessage: The created message object.
         """
-        new_msg = DBMessage(session_id=session_id, role=role, content=content)
+        new_msg = DBMessage(session_id=session_id, role=role, content=content, raw_content=raw_content)
         self.db.add(new_msg)
         await self.db.commit()
         return new_msg

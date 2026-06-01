@@ -31,6 +31,7 @@ class ParentChunk(Base):
     )
     text = Column(Text, nullable=False)
     chunk_index = Column(Integer, nullable=False)
+    page = Column(Integer, nullable=True)
     created_at = Column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
