@@ -104,9 +104,8 @@ async def nli_streaming_generate(
         async for token in llm_service.stream_response(raw_history):
             sentence_buffer += token
 
-            # Detect sentence boundary inside the accumulated buffer.
-            match = _BOUNDARY.search(sentence_buffer)
-            if match:
+            # Drain ALL complete sentences already in the buffer.
+            while match := _BOUNDARY.search(sentence_buffer):
                 end_idx = match.end()
                 sentence = sentence_buffer[:end_idx]
                 sentence_buffer = sentence_buffer[end_idx:]
@@ -119,18 +118,23 @@ async def nli_streaming_generate(
                 raw_sent, task = pending.pop(0)
                 yield _annotate(raw_sent, task)
 
-    finally:
-        # LLM stream done — flush any remaining text in the buffer.
+        # LLM stream done — split remaining buffer on every boundary,
+        # dispatching a separate NLI task per complete sentence, then
+        # append the tail (no trailing boundary) as the final item.
+        while match := _BOUNDARY.search(sentence_buffer):
+            end_idx = match.end()
+            sentence = sentence_buffer[:end_idx]
+            sentence_buffer = sentence_buffer[end_idx:]
+            if sentence.strip():
+                pending.append((sentence, _start_nli(sentence)))
         if sentence_buffer.strip():
             pending.append((sentence_buffer, _start_nli(sentence_buffer)))
 
         # Await remaining tasks in FIFO order and emit.
         for raw_sent, task in pending:
-            result = await task
-            if result.label == "entailment":
-                chunk = raw_sent + f" *(Supported: {result.entailment_score:.2f})*"
-            elif result.label == "contradiction":
-                chunk = raw_sent + f" *(Contradiction: {result.contradiction_score:.2f})*"
-            else:
-                chunk = raw_sent + f" *(Neutral: {result.neutral_score:.2f})*"
-            yield chunk
+            await task
+            yield _annotate(raw_sent, task)
+    except (GeneratorExit, Exception):
+        for _, task in pending:
+            task.cancel()
+        raise

@@ -281,7 +281,10 @@ class ChatService:
         # ── 2. Session housekeeping ──────────────────────────────────
         session = await self.repository.get_session_by_id(session_id, load_messages=True)
         if not session:
-            session = await self.repository.create_session(session_id, message_text[:20] + "...")
+            await self.repository.create_session(session_id, message_text[:20] + "...")
+            session = await self.repository.get_session_by_id(session_id, load_messages=True)
+            if not session:
+                raise HTTPException(status_code=500, detail="Failed to initialize session")
 
         if session.title == "New Chat":
             new_title = message_text[:30] + ("..." if len(message_text) > 30 else "")
