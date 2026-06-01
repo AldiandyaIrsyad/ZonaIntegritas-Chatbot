@@ -18,7 +18,7 @@ from .config import (
     get_ivm_settings,
     get_qdrant_settings,
     get_ram_settings,
-    get_settings,
+    get_llm_settings,
     get_storage_settings,
     get_unstructured_settings,
 )
@@ -31,7 +31,7 @@ __all__ = [
     "Base",
     "get_db",
     "async_session",
-    "get_settings",
+    "get_llm_settings",
     "get_db_settings",
     "get_qdrant_settings",
     "get_infinity_settings",

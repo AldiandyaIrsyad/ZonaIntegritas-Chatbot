@@ -5,28 +5,93 @@ Defines Pydantic settings models for all components and provides cached getters.
 """
 from functools import lru_cache
 
-from pydantic import SecretStr
+from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from dotenv import load_dotenv
+
+# This allow .env to have variables
+load_dotenv(override=True) 
+
+class AppSettings(BaseSettings):
+    """General application configuration."""
+    title: str = "Chat Application with PDF Knowledge Base"
+    description: str = "An intelligent chat system that leverages Large Language Models (LLMs) and PDF document management to provide context-aware responses. Users can upload PDF documents which are processed and indexed for semantic search, enabling the LLM to reference relevant content in its responses."
+    version: str = "1.0.0"
+    host: str = "0.0.0.0"
+    port: int = 8000
+    reload: bool = True
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="APP_",
+        extra="ignore"
+    )
+    
+@lru_cache
+def get_app_settings() -> AppSettings:
+    """Get cached AppSettings.
+    
+    Returns:
+        AppSettings: The cached app settings instance.
+    """
+    return AppSettings()
 
 class LLMSettings(BaseSettings):
     """Settings for the LLM integration via OpenRouter."""
-    api_key: SecretStr | None = None
     use_local: bool = False
-    base_url: str = "https://openrouter.ai/api/v1"
-    model: str = "google/gemini-2.5-flash"
-    max_tokens: int = 24000
-    max_completion_tokens: int = 12000
+    api_key: SecretStr | None = None
+
+    # Generated after
+    base_url: str | None = None
+    model: str | None = None 
+    
+    # LLM_OPENROUTER
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_model: str = "google/gemini-2.5-flash"
+
+    # LLM_OLLAMA
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "llama3.1:latest"
+
+
+    # common
+    max_tokens: int = 240_000
+    max_completion_tokens: int = 120_000
     default_headers: dict = {
         "HTTP-Referer": "http://localhost:3000",
         "X-Title": "Local-Dev-App"
     }
+
+
+    # validating schema
+    @model_validator(mode="after")
+    def validate_settings(self) -> "LLMSettings":
+        """Validate the LLM settings."""
+        
+        # fallback to defaults based on use_local if not explicitly set
+        if self.base_url is None:
+            self.base_url = self.ollama_base_url if self.use_local else self.openrouter_base_url  
+            
+        if self.model is None:
+            self.model = self.ollama_model if self.use_local else self.openrouter_model  
+
+        return self
 
     model_config = SettingsConfigDict(
         env_file=".env", 
         env_prefix="LLM_", 
         extra="ignore"
     )
+
+@lru_cache
+def get_llm_settings() -> LLMSettings:
+    """Get cached LLMSettings.
+    
+    Returns:
+        LLMSettings: The cached LLM settings instance.
+    """
+    return LLMSettings()
 
 class DatabaseSettings(BaseSettings):
     """Settings for the PostgreSQL database."""
@@ -46,6 +111,15 @@ class DatabaseSettings(BaseSettings):
         extra="ignore"
     )
 
+@lru_cache
+def get_db_settings() -> DatabaseSettings:
+    """Get cached DatabaseSettings.
+    
+    Returns:
+        DatabaseSettings: The cached database settings instance.
+    """
+    return DatabaseSettings()
+
 class StorageSettings(BaseSettings):
     """Settings for local file storage."""
     admin_upload_dir: str = "admin_upload"
@@ -56,6 +130,15 @@ class StorageSettings(BaseSettings):
         env_prefix="STORAGE_", 
         extra="ignore"
     )
+
+@lru_cache
+def get_storage_settings() -> StorageSettings:
+    """Get cached StorageSettings.
+    
+    Returns:
+        StorageSettings: The cached storage settings instance.
+    """
+    return StorageSettings()
 
 class QdrantSettings(BaseSettings):
     """Settings for Qdrant vector database."""
@@ -70,6 +153,15 @@ class QdrantSettings(BaseSettings):
         extra="ignore"
     )
 
+@lru_cache
+def get_qdrant_settings() -> QdrantSettings:
+    """Get cached QdrantSettings.
+    
+    Returns:
+        QdrantSettings: The cached Qdrant settings instance.
+    """
+    return QdrantSettings()
+
 class InfinitySettings(BaseSettings):
     """Settings for the Infinity embedding and reranking service."""
     base_url: str = "http://localhost:7997"
@@ -77,13 +169,22 @@ class InfinitySettings(BaseSettings):
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
     # Classify models — both are loaded by the same Infinity container.
     nli_model: str = "StevenLimcorn/indo-roberta-indonli"
-    prompt_guard_model: str = "ProtectAI/deberta-v3-base-prompt-injection-v2"
+    prompt_guard_model: str = "meta-llama/Llama-Prompt-Guard-2-86M"
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="INFINITY_",
         extra="ignore"
     )
+
+@lru_cache
+def get_infinity_settings() -> InfinitySettings:
+    """Get cached InfinitySettings.
+    
+    Returns:
+        InfinitySettings: The cached Infinity settings instance.
+    """
+    return InfinitySettings()
 
 class UnstructuredSettings(BaseSettings):
     """Settings for the Unstructured document parsing service."""
@@ -94,6 +195,15 @@ class UnstructuredSettings(BaseSettings):
         env_prefix="UNSTRUCTURED_",
         extra="ignore"
     )
+
+@lru_cache
+def get_unstructured_settings() -> UnstructuredSettings:
+    """Get cached UnstructuredSettings.
+    
+    Returns:
+        UnstructuredSettings: The cached unstructured settings instance.
+    """
+    return UnstructuredSettings()
 
 # Observability timberio/vector:0.47.0-alpine
 class VectorSettings(BaseSettings):
@@ -107,6 +217,15 @@ class VectorSettings(BaseSettings):
         extra="ignore"
     )
 
+@lru_cache
+def get_vector_settings() -> VectorSettings:
+    """Get cached VectorSettings.
+    
+    Returns:
+        VectorSettings: The cached vector settings instance.
+    """
+    return VectorSettings()
+
 class IVMSettings(BaseSettings):
     """Settings for the Input Validation Module (IVM)."""
     security_threshold: float = 0.75
@@ -117,6 +236,16 @@ class IVMSettings(BaseSettings):
         env_prefix="IVM_",
         extra="ignore"
     )
+
+
+@lru_cache
+def get_ivm_settings() -> IVMSettings:
+    """Get cached IVMSettings.
+    
+    Returns:
+        IVMSettings: The cached IVM settings instance.
+    """
+    return IVMSettings()
 
 class RAMSettings(BaseSettings):
     """Response Assessment Module (RAM) configuration.
@@ -138,78 +267,6 @@ class RAMSettings(BaseSettings):
         env_prefix="RAM_",
         extra="ignore"
     )
-    
-@lru_cache
-def get_settings() -> LLMSettings:
-    """Get cached LLMSettings.
-    
-    Returns:
-        LLMSettings: The cached LLM settings instance.
-    """
-    return LLMSettings()
-
-@lru_cache
-def get_db_settings() -> DatabaseSettings:
-    """Get cached DatabaseSettings.
-    
-    Returns:
-        DatabaseSettings: The cached database settings instance.
-    """
-    return DatabaseSettings()
-
-@lru_cache
-def get_storage_settings() -> StorageSettings:
-    """Get cached StorageSettings.
-    
-    Returns:
-        StorageSettings: The cached storage settings instance.
-    """
-    return StorageSettings()
-
-@lru_cache
-def get_qdrant_settings() -> QdrantSettings:
-    """Get cached QdrantSettings.
-    
-    Returns:
-        QdrantSettings: The cached Qdrant settings instance.
-    """
-    return QdrantSettings()
-
-@lru_cache
-def get_infinity_settings() -> InfinitySettings:
-    """Get cached InfinitySettings.
-    
-    Returns:
-        InfinitySettings: The cached Infinity settings instance.
-    """
-    return InfinitySettings()
-
-@lru_cache
-def get_unstructured_settings() -> UnstructuredSettings:
-    """Get cached UnstructuredSettings.
-    
-    Returns:
-        UnstructuredSettings: The cached unstructured settings instance.
-    """
-    return UnstructuredSettings()
-
-@lru_cache
-def get_vector_settings() -> VectorSettings:
-    """Get cached VectorSettings.
-    
-    Returns:
-        VectorSettings: The cached vector settings instance.
-    """
-    return VectorSettings()
-
-@lru_cache
-def get_ivm_settings() -> IVMSettings:
-    """Get cached IVMSettings.
-    
-    Returns:
-        IVMSettings: The cached IVM settings instance.
-    """
-    return IVMSettings()
 
 @lru_cache
 def get_ram_settings() -> RAMSettings:

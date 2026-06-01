@@ -5,7 +5,7 @@ Provides a request-scoped singleton for the LLM application service.
 """
 from functools import lru_cache
 
-from src.core import LLMSettings, get_settings
+from src.core import LLMSettings, get_llm_settings
 from src.infra import LLMConnection
 
 from .service import LLMService
@@ -20,7 +20,7 @@ def get_llm_service() -> LLMService:
     Returns:
         LLMService: The configured LLM service singleton.
     """
-    settings = get_settings()
+    settings = get_llm_settings()
     connection = LLMConnection(
         base_url=settings.base_url,
         api_key=settings.api_key,

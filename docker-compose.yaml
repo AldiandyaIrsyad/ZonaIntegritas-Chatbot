@@ -4,9 +4,9 @@ services:
     container_name: postgres_db
     restart: always
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-myuser}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mypassword}
-      POSTGRES_DB: ${POSTGRES_DB:-mydb}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
@@ -63,27 +63,25 @@ services:
               count: 1
               capabilities: [gpu]
     environment:
-      INFINITY_BATCH_SIZE: "8"
-      # Disable warmup for classify models — they crash Infinity's startup
-      # warmup because indo-roberta has a max positional embedding of 514
-      # tokens, while Infinity's warmup feeds n_tokens=512 pairs (1025 total).
-      # bge-m3 and bge-reranker warmup is kept enabled.
-      # Order must match --model-id declaration order below.
-      INFINITY_MODEL_WARMUP: "true;true;false;false"
-    # Loads bge-m3 (dense+sparse embeddings) and the cross-encoder reranker.
-    # In State A (ingestion), only bge-m3 is required for embedding.
-    # In State B (chat), both models serve retrieval + reranking.
+      INFINITY_BATCH_SIZE: "2"
+      INFINITY_MODEL_WARMUP: "true;true;true;false"
+      HF_TOKEN: ${INFINITY_HF_API_KEY}
+    # Add models/prompt_guard/config.json to the third model, Because it's wrongly interpreted
+
     command: >
       v2
-      --model-id BAAI/bge-m3
-      --model-id BAAI/bge-reranker-v2-m3
-      --model-id ProtectAI/deberta-v3-base-prompt-injection-v2
-      --model-id StevenLimcorn/indo-roberta-indonli
+      --model-id ${INFINITY_EMBEDDING_MODEL}
+      --model-id ${INFINITY_RERANKER_MODEL}
+      --model-id ${INFINITY_PROMPT_GUARD_MODEL}
+      --model-id ${INFINITY_NLI_MODEL}
       --device cuda
       --dtype float16
+      
+    
     profiles: ["ingestion", "chat"]
     volumes:
       - infinity_cache:/app/.cache
+      - ./models/prompt_guard/config.json:/app/.cache/huggingface/hub/models--meta-llama--Llama-Prompt-Guard-2-86M/snapshots/a8ded8e697ce7c355e395a0df51f94adb4a2fd27/config.json:ro
 
   unstructured-api:
     image: quay.io/unstructured-io/unstructured-api:latest
@@ -91,24 +89,8 @@ services:
     restart: unless-stopped
     ports:
       - "8001:8000"
-    # Layout-aware PDF parsing via YOLOX/Tesseract.
-    # Only needed during ingestion (State A). Shut down for chat (State B).
-    profiles: ["ingestion"]
-
-  # --- Security Infrastructure ---
-
-  # MOVED implementation into `src/infra/prompt_guard.py`
-  # prompt-guard:
-  #   image: opea/prompt-injection:latest
-  #   container_name: prompt-guard-service
-  #   ports:
-  #     - "8080:8080"
-  #   environment:
-  #     - MODEL_ID=Niansuh/Prompt-Guard-86M # meta-llama/Prompt-Guard-86M
-  #   restart: unless-stopped
 
   # --- Observability Stack ---
-
   loki:
     image: grafana/loki:3.5.0
     container_name: loki
