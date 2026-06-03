@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 from .model import Message as DBMessage
 from .model import Session as DBSession
 from .model import SessionDocument, SessionDocumentChunk
+from app.core.interfaces.chat import ChunkData
 
 
 class ChatRepository:
@@ -136,6 +137,26 @@ class ChatRepository:
             chunks (List[SessionDocumentChunk]): List of chunk ORM instances to save.
         """
         self.db.add_all(chunks)
+        await self.db.commit()
+
+    async def save_document_chunks(self, doc_id: str, chunks: List[ChunkData]) -> None:
+        """Save text chunks mapped from ChunkData DTO.
+
+        Args:
+            doc_id (str): UUID of the parent document.
+            chunks (List[ChunkData]): List of chunk DTOs.
+        """
+        db_chunks = [
+            SessionDocumentChunk(
+                id=c.id,
+                session_document_id=doc_id,
+                text=c.text,
+                chunk_index=c.chunk_index,
+                page=c.page
+            )
+            for c in chunks
+        ]
+        self.db.add_all(db_chunks)
         await self.db.commit()
 
     async def get_session_document_chunks(self, session_id: str) -> List[SessionDocumentChunk]:

@@ -39,7 +39,7 @@ class DocumentParser:
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             # PDF parsing with layout detection + OCR can take several minutes
-            timeout=httpx.Timeout(300.0, connect=30.0),
+            timeout=httpx.Timeout(900.0, connect=30.0),
         )
         logger.info("DocumentParser initialised", base_url=base_url)
 
@@ -75,11 +75,10 @@ class DocumentParser:
                 response = await self._client.post(
                     "/general/v0/general",
                     files={"files": (filename, fh, "application/pdf")},
-                    data={"strategy": "hi_res"},
+                    data={"strategy": "auto"}, # hi_res, auto, fast
                 )
             response.raise_for_status()
         except FileNotFoundError:
-            # Re-raise unchanged — already formatted above
             raise
         except httpx.HTTPStatusError as exc:
             log.error(

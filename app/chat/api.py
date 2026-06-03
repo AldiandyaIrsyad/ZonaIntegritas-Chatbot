@@ -7,9 +7,10 @@ from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
 from typing import Any
 
-from app.chat.dependency import get_chat_service, get_chat_pipeline
+from app.chat.dependency import get_chat_service
 from app.chat.service import ChatService
-from app.chat.pipeline import ChatPipeline
+from app.orchestrator.service import ChatOrchestrator
+from app.orchestrator.dependency import get_chat_orchestrator
 
 router = APIRouter()
 
@@ -19,8 +20,13 @@ class ChatRequest(BaseModel):
 
 
 @router.post("/sessions/{session_id}/upload")
-async def upload_session_file(session_id: str, file: UploadFile = File(...), service: ChatService = Depends(get_chat_service)) -> dict[str, Any]:
-    return await service.upload_pdf(session_id, file)
+async def upload_session_file(
+    session_id: str, 
+    file: UploadFile = File(...), 
+    service: ChatService = Depends(get_chat_service),
+    orchestrator: ChatOrchestrator = Depends(get_chat_orchestrator)
+) -> dict[str, Any]:
+    return await service.upload_pdf(session_id, file, orchestrator)
 
 
 @router.get("/sessions")
@@ -42,13 +48,23 @@ async def get_session(session_id: str, service: ChatService = Depends(get_chat_s
 
 
 @router.post("/sessions/{session_id}/stream")
-async def chat_stream(session_id: str, req: ChatRequest, pipeline: ChatPipeline = Depends(get_chat_pipeline)) -> StreamingResponse:
-    return await pipeline.process(session_id, req.message)
+async def chat_stream(
+    session_id: str, 
+    req: ChatRequest, 
+    service: ChatService = Depends(get_chat_service),
+    orchestrator: ChatOrchestrator = Depends(get_chat_orchestrator)
+) -> StreamingResponse:
+    generator = service.process_chat_message(session_id, req.message, orchestrator)
+    return StreamingResponse(generator, media_type="text/plain")
 
 
 @router.delete("/sessions/{session_id}")
-async def delete_session(session_id: str, service: ChatService = Depends(get_chat_service)) -> dict[str, Any]:
-    success = await service.delete_session(session_id)
+async def delete_session(
+    session_id: str, 
+    service: ChatService = Depends(get_chat_service),
+    orchestrator: ChatOrchestrator = Depends(get_chat_orchestrator)
+) -> dict[str, Any]:
+    success = await service.delete_session(session_id, orchestrator)
     if not success:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"status": "success", "message": "Session deleted"}
