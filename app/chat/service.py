@@ -5,20 +5,20 @@ Handles session state and user-uploaded PDF processing.
 """
 import os
 import uuid
-from typing import List, Optional, Any
+from typing import List, Optional, Any, AsyncGenerator
 
 import anyio
 import structlog
 from fastapi import HTTPException, UploadFile
 
-from app.core.interfaces.ai import IEmbeddingProvider
-from app.core.interfaces.infra import IDocumentParser, IStorageProvider, IVectorStore, ChunkVector
-from app.core.interfaces.ivm import IIVMService
+from app.core.interfaces.infra import IStorageProvider
 from app.infra.thumbnail import ThumbnailContext
-from app.rag import create_parent_chunks, split_into_children
 
 from app.chat.model import SessionDocumentChunk
 from app.chat.repository import ChatRepository
+from app.chat.output_checker import check_and_persist
+
+from app.orchestrator.service import ChatOrchestrator
 
 logger = structlog.get_logger(__name__)
 
@@ -30,17 +30,9 @@ class ChatService:
         self,
         repository: ChatRepository,
         storage: IStorageProvider,
-        document_parser: IDocumentParser,
-        vector_store: IVectorStore,
-        embedding_provider: IEmbeddingProvider,
-        ivm_service: IIVMService,
     ) -> None:
         self.repository = repository
         self.storage = storage
-        self.document_parser = document_parser
-        self.vector_store = vector_store
-        self.embedding_provider = embedding_provider
-        self.ivm_service = ivm_service
         self.thumbnail_context = ThumbnailContext()
 
     async def list_sessions(self) -> List[dict[str, Any]]:
@@ -65,7 +57,7 @@ class ChatService:
             "documents": [{"id": d.id, "filename": d.filename, "thumbnail": d.thumbnail} for d in session.documents],
         }
 
-    async def upload_pdf(self, session_id: str, file: UploadFile) -> dict[str, Any]:
+    async def upload_pdf(self, session_id: str, file: UploadFile, orchestrator: "ChatOrchestrator") -> dict[str, Any]:
         """Upload, parse, and chunk a PDF file for a specific chat session."""
         session = await self.repository.get_session_by_id(session_id, load_messages=True)
         if not session:
@@ -97,47 +89,7 @@ class ChatService:
 
         if file_extension == ".pdf":
             try:
-                elements = await self.document_parser.parse_pdf(file_path)
-                parent_chunks = create_parent_chunks(elements, str(doc.id))
-                chunk_models = []
-                chunk_idx = 0
-                for parent in parent_chunks:
-                    children = split_into_children(parent)
-                    for child in children:
-                        chunk_models.append(
-                            SessionDocumentChunk(
-                                id=str(uuid.uuid4()),
-                                session_document_id=doc.id,
-                                text=child.text,
-                                chunk_index=chunk_idx,
-                                page=child.page,
-                            )
-                        )
-                        chunk_idx += 1
-
-                if chunk_models:
-                    await self.repository.save_session_document_chunks(chunk_models)
-
-                    chunk_texts = [str(c.text) for c in chunk_models]
-                    embeddings = await self.embedding_provider.embed_texts(chunk_texts)
-
-                    if embeddings:
-                        await self.ivm_service.validate_document_relevance(embeddings)
-
-                        chunk_vectors = []
-                        for model, emb in zip(chunk_models, embeddings):
-                            chunk_vectors.append(
-                                ChunkVector(
-                                    chunk_id=str(model.id),
-                                    parent_chunk_id=str(doc.id),
-                                    doc_id=str(doc.id),
-                                    dense_vector=emb.dense,
-                                    sparse_indices=emb.sparse_indices,
-                                    sparse_values=emb.sparse_values,
-                                    session_id=session_id,
-                                )
-                            )
-                        await self.vector_store.upsert_chunks(chunk_vectors)
+                await orchestrator.process_session_document(session_id, str(doc.id), file_path, self.repository)
             except HTTPException:
                 try:
                     await self.storage.delete_file(file_path)
@@ -149,7 +101,7 @@ class ChatService:
                     pass
                 raise
             except Exception as e:
-                logger.error(f"Failed to parse PDF {file.filename} for session {session_id}", exc_info=True)
+                logger.error(f"Failed to process PDF {file.filename} for session {session_id}", exc_info=True)
                 try:
                     await self.storage.delete_file(file_path)
                 except Exception:
@@ -183,18 +135,52 @@ class ChatService:
             "thumbnail": doc.thumbnail,
         }
 
-    async def delete_session(self, session_id: str) -> bool:
+    async def delete_session(self, session_id: str, orchestrator: "ChatOrchestrator") -> bool:
         """Delete a chat session and all its associated data."""
         session = await self.repository.get_session_by_id(session_id)
         if session:
+            if session.documents:
+                await orchestrator.delete_document_vectors([str(doc.id) for doc in session.documents])
             for doc in session.documents:
-                try:
-                    await self.vector_store.delete_by_doc_id(doc.id)
-                except Exception:
-                    logger.error(f"Failed to delete Qdrant vectors for doc {doc.id}", exc_info=True)
                 try:
                     await self.storage.delete_file(doc.file_path)
                 except Exception:
                     logger.error(f"Failed to delete file {doc.file_path}", exc_info=True)
             return await self.repository.delete_session(session_id)
         return False
+
+    async def process_chat_message(self, session_id: str, message_text: str, orchestrator: "ChatOrchestrator") -> AsyncGenerator[str, None]:
+        session = await self.repository.get_session_by_id(session_id, load_messages=True)
+        if not session:
+            await self.repository.create_session(session_id, message_text[:20] + "...")
+            session = await self.repository.get_session_by_id(session_id, load_messages=True)
+            if not session:
+                raise HTTPException(status_code=500, detail="Failed to initialize session")
+
+        if session.title == "New Chat":
+            new_title = message_text[:30] + ("..." if len(message_text) > 30 else "")
+            await self.repository.update_session_title(session, new_title)
+
+        await self.repository.create_message(session_id, "user", message_text, raw_content=message_text)
+        raw_history = [{"role": m.role, "content": m.raw_content if m.raw_content is not None else m.content} for m in session.messages]
+        
+        has_session_documents = bool(session.documents)
+
+        async def on_finish(final_output: str) -> None:
+            await check_and_persist(
+                session_id=session_id,
+                initial_prompt=message_text,
+                final_output=final_output,
+                repository=self.repository,
+            )
+
+        stream = orchestrator.process(
+            session_id=session_id,
+            message_text=message_text,
+            raw_history=raw_history,
+            has_session_documents=has_session_documents,
+            chunk_provider=self.repository,
+            on_finish=on_finish
+        )
+        async for chunk in stream:
+            yield chunk
