@@ -1,0 +1,14 @@
+sources:
+  docker_logs:
+    type: "docker_logs"
+
+sinks:
+  loki:
+    type: "loki"
+    inputs: ["docker_logs"]
+    endpoint: "http://loki:3100"
+    encoding:
+      codec: "json"
+    labels:
+      container_name: "{{ container_name }}"
+      image: "{{ image }}"
