@@ -135,7 +135,7 @@ class ChatService:
             "thumbnail": doc.thumbnail,
         }
 
-    async def delete_session(self, session_id: str, orchestrator: "ChatOrchestrator") -> bool:
+    async def delete_session(self, session_id: str, orchestrator: ChatOrchestrator) -> bool:
         """Delete a chat session and all its associated data."""
         session = await self.repository.get_session_by_id(session_id)
         if session:
@@ -149,7 +149,7 @@ class ChatService:
             return await self.repository.delete_session(session_id)
         return False
 
-    async def process_chat_message(self, session_id: str, message_text: str, orchestrator: "ChatOrchestrator") -> AsyncGenerator[str, None]:
+    async def process_chat_message(self, session_id: str, message_text: str, orchestrator: ChatOrchestrator) -> AsyncGenerator[str, None]:
         session = await self.repository.get_session_by_id(session_id, load_messages=True)
         if not session:
             await self.repository.create_session(session_id, message_text[:20] + "...")

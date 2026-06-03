@@ -24,7 +24,7 @@ logger = structlog.get_logger(__name__)
 class DocumentParser:
     """HTTP adapter for the ``unstructured-api`` container.
 
-    Sends PDF files to ``/general/v0/general`` using the ``"hi_res"``
+    Sends PDF files to ``/general/v0/general`` using the ``"auto"``
     strategy, which enables YOLOX layout detection and Tesseract OCR.
     Returns typed :class:`~app.core.interfaces.infra.ParsedElement` objects
     with empty elements filtered out.  Satisfies the

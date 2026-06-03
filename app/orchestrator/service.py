@@ -1,5 +1,6 @@
 """Chat orchestrator."""
 
+import asyncio
 import uuid
 from typing import AsyncGenerator, List, Callable, Awaitable, Optional, Any
 import structlog
@@ -67,30 +68,34 @@ class ChatOrchestrator:
             chunk_texts = [c.text for c in chunk_models]
             embeddings = await self.embedding_provider.embed_texts(chunk_texts)
             
-            if embeddings:
-                await self.ivm_service.validate_document_relevance(embeddings)
-                
-                chunk_vectors = []
-                for model, emb in zip(chunk_models, embeddings):
-                    chunk_vectors.append(
-                        ChunkVector(
-                            chunk_id=model.id,
-                            parent_chunk_id=doc_id,
-                            doc_id=doc_id,
-                            dense_vector=emb.dense,
-                            sparse_indices=emb.sparse_indices,
-                            sparse_values=emb.sparse_values,
-                            session_id=session_id,
-                        )
+            if not embeddings:
+                raise ValueError("Failed to generate embeddings for all document chunks")
+
+            await self.ivm_service.validate_document_relevance(embeddings)
+            
+            chunk_vectors = []
+            for model, emb in zip(chunk_models, embeddings):
+                chunk_vectors.append(
+                    ChunkVector(
+                        chunk_id=model.id,
+                        parent_chunk_id=doc_id,
+                        doc_id=doc_id,
+                        dense_vector=emb.dense,
+                        sparse_indices=emb.sparse_indices,
+                        sparse_values=emb.sparse_values,
+                        session_id=session_id,
                     )
-                await self.vector_store.upsert_chunks(chunk_vectors)
+                )
+            await self.vector_store.upsert_chunks(chunk_vectors)
 
     async def delete_document_vectors(self, doc_ids: List[str]) -> None:
-        for doc_id in doc_ids:
+
+        async def _delete(doc_id: str) -> None:
             try:
                 await self.vector_store.delete_by_doc_id(doc_id)
             except Exception:
                 logger.error(f"Failed to delete Qdrant vectors for doc {doc_id}", exc_info=True)
+        await asyncio.gather(*[_delete(doc_id) for doc_id in doc_ids])
 
     async def process(
         self, 
@@ -173,7 +178,7 @@ class ChatOrchestrator:
 
             await on_finish(response_content)
 
-    async def _retrieve_session_context(self, session_id: str, query: str, chunk_provider: Any) -> List[str]:
+    async def _retrieve_session_context(self, session_id: str, query: str, chunk_provider: ISessionChunkProvider) -> List[str]:
         try:
             query_embeddings = await self.embedding_provider.embed_texts([query])
             if not query_embeddings:
