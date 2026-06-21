@@ -5,4 +5,4 @@ python = "3.11"
 _.python.venv = { path = ".venv", create = true }
 
 [tasks]
-dev = "uvicorn app.main:app --reload"
+dev = "uvicorn app.main:fastapi_app --reload"

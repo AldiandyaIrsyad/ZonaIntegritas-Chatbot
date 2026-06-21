@@ -1,54 +1,74 @@
-from functools import lru_cache
+"""
+Dependency injection for the Chat module.
+"""
 
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_qdrant_settings, get_storage_settings
-from app.infra.db import get_db_session as get_db
-from app.infra import (
-    LocalStorageProvider,
-    QdrantStore,
-)
-from app.rag import (
-    get_document_parser,
-    get_embedding_provider,
-)
-from app.ivm.dependency import get_ivm_service
+from app.shared.db import get_db_session
+from app.chat.config import get_chat_config
+from app.chat.infra import LLMConnection, PromptGuardClient, NLIClient, PostgresChatRepository, EmbeddingClient
+from app.chat.application.chat_service import ChatService
+from app.kb.dependency import get_search_service
+from app.kb.application.search_service import SearchService
 
-from app.core.interfaces.ai import IEmbeddingProvider
-from app.core.interfaces.infra import IDocumentParser, IStorageProvider, IVectorStore
-from app.core.interfaces.ivm import IIVMService
+from app.thesis.ivm.service import IVMService
+from app.thesis.ivm.strategies import SilhouetteKNNStrategy
+from app.thesis.ram.service import RAMService
 
-from app.chat.repository import ChatRepository
-from app.chat.service import ChatService
+async def get_chat_repo(db: AsyncSession = Depends(get_db_session)) -> PostgresChatRepository:
+    return PostgresChatRepository(db)
 
+def get_llm_connection() -> LLMConnection:
+    config = get_chat_config()
+    return LLMConnection(base_url=config.llm_base_url, api_key=config.llm_api_key)
 
-@lru_cache
-def get_session_vector_store() -> IVectorStore:
-    """Singleton QdrantStore instance for session-specific documents."""
-    settings = get_qdrant_settings()
-    return QdrantStore(
-        host=settings.host,
-        port=settings.port,
-        collection_name=settings.collection_name,
+def get_prompt_guard_client() -> PromptGuardClient:
+    config = get_chat_config()
+    return PromptGuardClient(base_url=config.infinity_url, model=config.prompt_guard_model, security_threshold=config.security_threshold)
+
+def get_nli_client() -> NLIClient:
+    config = get_chat_config()
+    return NLIClient(base_url=config.infinity_url, model=config.nli_model)
+
+def get_embedding_client() -> EmbeddingClient:
+    config = get_chat_config()
+    return EmbeddingClient(base_url=config.infinity_url, model="BBAAI/bge-m3")
+
+def get_ivm_service(
+    safety_client: PromptGuardClient = Depends(get_prompt_guard_client)
+) -> IVMService:
+    config = get_chat_config()
+    return IVMService(
+        safety_model=safety_client,
+        relevance_strategy=SilhouetteKNNStrategy(),
+        similarity_threshold=config.similarity_threshold
     )
 
-@lru_cache
-def get_user_storage_provider() -> IStorageProvider:
-    """Singleton StorageProvider for user-uploaded documents."""
-    settings = get_storage_settings()
-    return LocalStorageProvider(settings.user_upload_dir)
+def get_ram_service(
+    nli_client: NLIClient = Depends(get_nli_client),
+    embedding_client: EmbeddingClient = Depends(get_embedding_client)
+) -> RAMService:
+    return RAMService(
+        nli_model=nli_client,
+        embedding_model=embedding_client,
+        enabled=True
+    )
 
-def get_chat_repository(db: AsyncSession = Depends(get_db)) -> ChatRepository:
-    """Request-scoped ChatRepository."""
-    return ChatRepository(db)
-
-def get_chat_service(
-    repository: ChatRepository = Depends(get_chat_repository),
-    storage: IStorageProvider = Depends(get_user_storage_provider),
+async def get_chat_service(
+    chat_repo: PostgresChatRepository = Depends(get_chat_repo),
+    llm_conn: LLMConnection = Depends(get_llm_connection),
+    search_service: SearchService = Depends(get_search_service),
+    ivm_service: IVMService = Depends(get_ivm_service),
+    ram_service: RAMService = Depends(get_ram_service)
 ) -> ChatService:
-    """Request-scoped ChatService."""
+    config = get_chat_config()
     return ChatService(
-        repository=repository,
-        storage=storage,
+        chat_repo=chat_repo,
+        llm_conn=llm_conn,
+        search_service=search_service,
+        ivm_service=ivm_service,
+        ram_service=ram_service,
+        model_name=config.llm_model,
+        system_prompt=config.system_prompt
     )

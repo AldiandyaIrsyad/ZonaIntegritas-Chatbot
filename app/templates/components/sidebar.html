@@ -80,7 +80,7 @@
       
       async loadSessions() {
         try {
-          const res = await fetch('/api/sessions');
+          const res = await fetch('/api/chat/sessions');
           const data = await res.json();
           this.sessions = data.reverse();
         } catch (e) {
@@ -109,7 +109,7 @@
       async deleteSession(id) {
         if (!confirm('Are you sure you want to delete this chat?')) return;
         try {
-          const res = await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+          const res = await fetch(`/api/chat/sessions/${id}`, { method: 'DELETE' });
           if (res.ok) {
             if (this.currentSessionId === id) {
               if (window.location.pathname === '/') {

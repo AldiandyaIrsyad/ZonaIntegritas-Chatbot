@@ -1,1 +1,0 @@
-"""App namespace package."""

@@ -1,70 +1,50 @@
-"""API routing for the chat module.
-
-Defines endpoints for session management, PDF uploads, and real-time streaming chat.
 """
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from pydantic import BaseModel
-from fastapi.responses import StreamingResponse
-from typing import Any
+JSON API endpoints for the Chat module.
+"""
 
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from typing import List, Dict, Any
+
+from app.chat.application.chat_service import ChatService
 from app.chat.dependency import get_chat_service
-from app.chat.service import ChatService
-from app.orchestrator.service import ChatOrchestrator
-from app.orchestrator.dependency import get_chat_orchestrator
 
 router = APIRouter()
 
 class ChatRequest(BaseModel):
-    """Payload for incoming chat messages."""
     message: str
 
+@router.post("/api/chat/sessions", status_code=201)
+async def create_session(service: ChatService = Depends(get_chat_service)) -> Any:
+    """Create a new chat session."""
+    return await service.create_session()
 
-@router.post("/sessions/{session_id}/upload")
-async def upload_session_file(
-    session_id: str, 
-    file: UploadFile = File(...), 
-    service: ChatService = Depends(get_chat_service),
-    orchestrator: ChatOrchestrator = Depends(get_chat_orchestrator)
-) -> dict[str, Any]:
-    return await service.upload_pdf(session_id, file, orchestrator)
-
-
-@router.get("/sessions")
-async def get_sessions(service: ChatService = Depends(get_chat_service)) -> list[dict[str, Any]]:
+@router.get("/api/chat/sessions")
+async def list_sessions(service: ChatService = Depends(get_chat_service)) -> Any:
+    """List all chat sessions."""
     return await service.list_sessions()
 
-
-@router.post("/sessions")
-async def create_session(service: ChatService = Depends(get_chat_service)) -> dict[str, Any]:
-    return await service.create_new_session()
-
-
-@router.get("/sessions/{session_id}")
-async def get_session(session_id: str, service: ChatService = Depends(get_chat_service)) -> dict[str, Any]:
-    data = await service.get_session_details(session_id)
-    if not data:
+@router.get("/api/chat/sessions/{session_id}")
+async def get_session(session_id: str, service: ChatService = Depends(get_chat_service)) -> Any:
+    """Get chat session details."""
+    session = await service.get_session(session_id)
+    if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    return data
+    return session
 
-
-@router.post("/sessions/{session_id}/stream")
-async def chat_stream(
-    session_id: str, 
-    req: ChatRequest, 
-    service: ChatService = Depends(get_chat_service),
-    orchestrator: ChatOrchestrator = Depends(get_chat_orchestrator)
-) -> StreamingResponse:
-    generator = service.process_chat_message(session_id, req.message, orchestrator)
-    return StreamingResponse(generator, media_type="text/plain")
-
-
-@router.delete("/sessions/{session_id}")
-async def delete_session(
-    session_id: str, 
-    service: ChatService = Depends(get_chat_service),
-    orchestrator: ChatOrchestrator = Depends(get_chat_orchestrator)
-) -> dict[str, Any]:
-    success = await service.delete_session(session_id, orchestrator)
+@router.delete("/api/chat/sessions/{session_id}")
+async def delete_session(session_id: str, service: ChatService = Depends(get_chat_service)) -> Any:
+    """Delete a chat session."""
+    success = await service.delete_session(session_id)
     if not success:
         raise HTTPException(status_code=404, detail="Session not found")
-    return {"status": "success", "message": "Session deleted"}
+    return {"status": "success"}
+
+@router.post("/api/chat/sessions/{session_id}/stream")
+async def chat_stream(session_id: str, request: ChatRequest, service: ChatService = Depends(get_chat_service)) -> Any:
+    """Stream a chat response from the LLM, passing through IVM and RAM."""
+    return StreamingResponse(
+        service.process_chat_message(session_id, request.message),
+        media_type="application/x-ndjson"
+    )

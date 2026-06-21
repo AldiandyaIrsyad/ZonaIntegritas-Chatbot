@@ -20,7 +20,7 @@ block layout %} {% include "components/sidebar.html" %}
     id="chat-messages"
     class="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 scroll-smooth"
   >
-    <template x-if="messages.length === 0 && documents.length === 0 && !pendingDocument">
+    <template x-if="messages.length === 0 && !pendingDocument">
       {% include "components/empty_state.html" %}
     </template>
 
@@ -175,7 +175,7 @@ block layout %} {% include "components/sidebar.html" %}
 
       async loadSession(id) {
         try {
-          const res = await fetch(`/api/sessions/${id}`);
+          const res = await fetch(`/api/chat/sessions/${id}`);
           const data = await res.json();
           if (data.error) return;
           this.title = data.title;
@@ -207,7 +207,7 @@ block layout %} {% include "components/sidebar.html" %}
         // Ensure a session exists before uploading (the backend requires it).
         if (!this.currentSessionId) {
           try {
-            const res = await fetch("/api/sessions", { method: "POST" });
+            const res = await fetch("/api/chat/sessions", { method: "POST" });
             if (!res.ok) throw new Error("Failed to create session");
             const data = await res.json();
             this.currentSessionId = data.id;
@@ -250,7 +250,7 @@ block layout %} {% include "components/sidebar.html" %}
 
         if (!this.currentSessionId) {
           try {
-            const res = await fetch("/api/sessions", { method: "POST" });
+            const res = await fetch("/api/chat/sessions", { method: "POST" });
             const data = await res.json();
             this.currentSessionId = data.id;
             window.dispatchEvent(
@@ -279,7 +279,7 @@ block layout %} {% include "components/sidebar.html" %}
 
         try {
           const response = await fetch(
-            `/api/sessions/${this.currentSessionId}/stream`,
+            `/api/chat/sessions/${this.currentSessionId}/stream`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },

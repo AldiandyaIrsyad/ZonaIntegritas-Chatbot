@@ -1,5 +1,9 @@
+name: skripsi
 services:
-  postgres_db:
+
+  
+  ## DATABASES
+  postgres:
     image: postgres:17-alpine
     container_name: postgres_db
     restart: always
@@ -12,31 +16,8 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
-
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama_backend
-    ports:
-      - "127.0.0.1:${LLM_OLLAMA_PORT}:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    restart: unless-stopped
-
-  ollama-provisioner:
-    image: alpine:latest
-    container_name: ollama_provisioner
-    profiles: ["provisioner"]
-    depends_on:
-      - ollama
-    entrypoint: [ "/bin/sh", "-c" ]
-    command: >
-      echo 'Waiting for Ollama to start...' &&
-      until curl -s http://ollama:11434/api/tags > /dev/null; do sleep 2; done &&
-      curl -X POST http://ollama:11434/api/pull -d '{"name": "${LLM_OLLAMA_MODEL}"}'
-
-
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.18.2
     container_name: qdrant_vector_db
     restart: unless-stopped
     ports:
@@ -47,8 +28,9 @@ services:
     profiles: ["ingestion", "chat"]
 
 
+  ## THIRD PARTY
   infinity:
-    image: michaelf34/infinity:latest
+    image: michaelf34/infinity:0.0.77
     container_name: infinity_embeddings
     restart: unless-stopped
     ports:
@@ -78,7 +60,7 @@ services:
       - ./models/prompt_guard/config.json:/app/.cache/huggingface/hub/models--meta-llama--Llama-Prompt-Guard-2-86M/snapshots/a8ded8e697ce7c355e395a0df51f94adb4a2fd27/config.json:ro
 
   unstructured-api:
-    image: quay.io/unstructured-io/unstructured-api:latest
+    image: quay.io/unstructured-io/unstructured-api:0.1.7
     container_name: unstructured_parser
     restart: unless-stopped
     ports:
@@ -86,6 +68,30 @@ services:
 
     environment:
       HF_TOKEN: ${UNSTRUCTURED_HF_TOKEN}
+
+  ## LLM
+  # ollama:
+  #   image: ollama/ollama:0.24.0
+  #   container_name: ollama_backend
+  #   ports:
+  #     - "127.0.0.1:${LLM_OLLAMA_PORT}:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   restart: unless-stopped
+
+  # ollama-provisioner:
+  #   image: alpine:latest
+  #   container_name: ollama_provisioner
+  #   profiles: ["provisioner"]
+  #   depends_on:
+  #     - ollama
+  #   entrypoint: [ "/bin/sh", "-c" ]
+  #   command: >
+  #     echo 'Waiting for Ollama to start...' &&
+  #     until curl -s http://ollama:11434/api/tags > /dev/null; do sleep 2; done &&
+  #     curl -X POST http://ollama:11434/api/pull -d '{"name": "${LLM_OLLAMA_MODEL}"}'
+
+
   # --- Observability Stack ---
   loki:
     image: grafana/loki:3.5.0
