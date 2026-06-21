@@ -53,7 +53,7 @@ class UnstructuredClient(IDocumentParser):
             metadata = elem.get("metadata") or {}
             
             # For tables, if text_as_html is available, prefer it over plain text
-            if elem_type == "Table" and "text_as_html" in metadata:
+            if elem_type == "Table" and metadata.get("text_as_html"):
                 text = metadata["text_as_html"]
             
             if not text:
