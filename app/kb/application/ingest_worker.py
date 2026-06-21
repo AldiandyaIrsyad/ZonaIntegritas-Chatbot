@@ -70,6 +70,7 @@ class IngestWorker:
                     text=pc.text,
                     chunk_index=pc.chunk_index,
                     page=pc.page,
+                    breadcrumbs=pc.breadcrumbs,
                 )
                 for pc in parent_chunk_data
             ]
@@ -101,6 +102,7 @@ class IngestWorker:
                     dense_vector=emb.dense,
                     sparse_indices=emb.sparse_indices,
                     sparse_values=emb.sparse_values,
+                    breadcrumbs=child.breadcrumbs,
                 )
                 for child, emb in zip(all_children, embeddings)
             ]

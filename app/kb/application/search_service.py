@@ -73,6 +73,7 @@ class SearchService:
                         score=result.score,
                         source_title=doc_title_map.get(result.doc_id, result.doc_id),
                         page=parent.page,
+                        breadcrumbs=parent.breadcrumbs,
                     )
                 )
 

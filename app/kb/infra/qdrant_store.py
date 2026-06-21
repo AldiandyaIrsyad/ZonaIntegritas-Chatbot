@@ -71,6 +71,7 @@ class QdrantStore(IVectorStore):
                 "parent_chunk_id": chunk.parent_chunk_id,
                 "doc_id": chunk.doc_id,
                 "is_active": True,
+                "breadcrumbs": chunk.breadcrumbs,
             }
             if chunk.session_id:
                 payload["session_id"] = chunk.session_id
