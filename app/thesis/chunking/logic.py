@@ -116,7 +116,7 @@ def create_parent_chunks(
                 _flush_current()
 
             # Update heading stack AFTER flushing the previous section
-            depth = element.metadata.get("category_depth", 0)
+            depth = element.metadata.get("category_depth") or 0
             
             # Pop elements from stack that are at the same or deeper level
             while heading_stack and heading_stack[-1][0] >= depth:
