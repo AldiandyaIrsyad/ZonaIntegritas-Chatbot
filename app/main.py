@@ -10,7 +10,6 @@ from fastapi.staticfiles import StaticFiles
 from app.api.routes import router
 from app.knowledge_base.api import router as kb_api_router
 from app.knowledge_base.presentation import router as kb_presentation_router
-from app.ram import ram_api_router, ram_presentation_router
 from app.chat.api import router as chat_api_router
 from app.chat.presentation import router as chat_presentation_router
 from app.core.config import get_app_settings, get_qdrant_settings
@@ -62,7 +61,5 @@ app = FastAPI(
 app.include_router(router)
 app.include_router(kb_api_router)
 app.include_router(kb_presentation_router)
-app.include_router(ram_api_router)
-app.include_router(ram_presentation_router)
 app.include_router(chat_api_router, prefix="/api")
 app.include_router(chat_presentation_router)

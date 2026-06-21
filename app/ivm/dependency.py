@@ -11,6 +11,7 @@ from app.infra import PromptGuardProvider
 from app.rag.dependency import get_embedding_provider, get_vector_store
 
 from .service import IVMService
+from .strategies import SilhouetteKNNStrategy, TopOneStrategy
 
 
 @lru_cache
@@ -32,10 +33,17 @@ def get_ivm_service() -> IIVMService:
         security_threshold=settings.security_threshold,
     )
 
+    if settings.relevance_strategy == "top_one":
+        relevance_strategy = TopOneStrategy()
+    else:
+        relevance_strategy = SilhouetteKNNStrategy()
+
     return IVMService(
         prompt_guard=prompt_guard,
         security_threshold=settings.security_threshold,
         similarity_threshold=settings.similarity_threshold,
         embedding_provider=embedding_provider,
         vector_store=vector_store,
+        top_k=settings.top_k,
+        relevance_strategy=relevance_strategy,
     )

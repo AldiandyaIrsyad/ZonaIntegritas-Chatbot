@@ -103,7 +103,16 @@ class ChatOrchestrator:
     ) -> AsyncGenerator[str, None]:
         """Process an incoming user message and yield a streaming LLM response."""
         # 1. Input validation
-        await self.ivm_service.validate_prompt(message_text)
+        try: 
+            await self.ivm_service.validate_prompt(message_text)
+        except Exception as e:
+            logger.warning("Failed to validate prompt in orchestrator", error=str(e))
+            error_msg = f"Blocked by IVM: {str(e)}"
+            yield error_msg
+            await on_finish(error_msg)
+            return
+
+
 
         # 2. Session-document context (user-uploaded PDF)
         session_texts: List[str] = []

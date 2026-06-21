@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 from app.core.interfaces.ai import IEmbeddingProvider, IPromptGuard, EmbeddingResult
 from app.core.interfaces.infra import IVectorStore
+from app.core.interfaces.ivm import IRelevanceStrategy
 
 logger = structlog.get_logger(__name__)
 
@@ -35,12 +36,16 @@ class IVMService:
         similarity_threshold: float,
         embedding_provider: IEmbeddingProvider,
         vector_store: IVectorStore,
+        top_k: int,
+        relevance_strategy: IRelevanceStrategy,
     ):
         self.prompt_guard = prompt_guard
         self.security_threshold = security_threshold
         self.similarity_threshold = similarity_threshold
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
+        self.top_k = top_k
+        self.relevance_strategy = relevance_strategy
 
     async def validate_prompt(self, query: str) -> None:
         """Validates the user's prompt for injection and relevance.
@@ -54,10 +59,10 @@ class IVMService:
         if not query.strip():
             return
             
-        await self._check_malicious(query)
-        await self._check_relevance(query)
+        await self.check_malicious(query)
+        await self.check_relevance(query)
 
-    async def _check_malicious(self, query: str) -> None:
+    async def check_malicious(self, query: str) -> None:
         """Validates the query against Prompt Guard.
 
         Args:
@@ -78,7 +83,7 @@ class IVMService:
                 detail="Malicious prompt detected."
             )
 
-    async def _check_relevance(self, query: str) -> None:
+    async def check_relevance(self, query: str) -> None:
         """Validates that the query is relevant to the knowledge base.
 
         Uses BGE-M3 pre-RAG check against the vector store.
@@ -100,7 +105,7 @@ class IVMService:
                 dense_vector=query_emb.dense,
                 sparse_indices=query_emb.sparse_indices,
                 sparse_values=query_emb.sparse_values,
-                top_k=1,
+                top_k=self.top_k,
             )
 
             if not search_results:
@@ -108,16 +113,23 @@ class IVMService:
                 # If no search results because KB is empty, let it pass.
                 return
 
-            best_score = search_results[0].score
-
-            logger.info("relevance_check", query=query, best_score=best_score, threshold=self.similarity_threshold)
+            is_relevant = self.relevance_strategy.evaluate(
+                results=search_results, 
+                similarity_threshold=self.similarity_threshold
+            )
             
-            # Since hybrid_search uses RRF or cosine depending on sparse vectors, 
-            # the threshold might need tuning. 
-            if best_score < self.similarity_threshold:
+            logger.info(
+                "relevance_check", 
+                query=query, 
+                top_k_scores=[res.score for res in search_results], 
+                threshold=self.similarity_threshold,
+                is_relevant=is_relevant
+            )
+            
+            if not is_relevant:
                 logger.warning(
                     "irrelevant_query_detected", 
-                    max_score=best_score, 
+                    top_k_scores=[res.score for res in search_results], 
                     threshold=self.similarity_threshold
                 )
                 raise HTTPException(
@@ -157,20 +169,28 @@ class IVMService:
                     dense_vector=emb.dense,
                     sparse_indices=emb.sparse_indices,
                     sparse_values=emb.sparse_values,
-                    top_k=1,
+                    top_k=self.top_k,
                 )
 
                 if not search_results:
                     # If KB is empty, we allow the upload
                     return
 
-                best_score = search_results[0].score
-                best_overall_score = max(best_overall_score, best_score)
+                is_relevant = self.relevance_strategy.evaluate(
+                    results=search_results,
+                    similarity_threshold=self.similarity_threshold
+                )
 
-                if best_overall_score >= self.similarity_threshold:
+                if is_relevant:
                     # Found at least one relevant chunk, document is allowed
-                    logger.info("document_relevant", best_chunk_score=best_score, threshold=self.similarity_threshold)
+                    logger.info(
+                        "document_relevant", 
+                        top_k_scores=[res.score for res in search_results], 
+                        threshold=self.similarity_threshold
+                    )
                     return
+
+                best_overall_score = max(best_overall_score, search_results[0].score)
 
             # If we get here, none of the sampled chunks were relevant
             logger.warning(

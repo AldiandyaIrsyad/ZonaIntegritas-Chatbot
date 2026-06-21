@@ -83,6 +83,9 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:${UNSTRUCTURED_PORT:-8001}:8000"
+
+    environment:
+      HF_TOKEN: ${UNSTRUCTURED_HF_TOKEN}
   # --- Observability Stack ---
   loki:
     image: grafana/loki:3.5.0

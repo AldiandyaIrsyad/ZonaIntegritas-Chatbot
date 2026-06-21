@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import load_dotenv
 from functools import lru_cache
 
-
+# This allows variable within .env
 load_dotenv(override=True) 
 
 
@@ -231,7 +231,9 @@ def get_storage_settings() -> StorageSettings:
 class IVMSettings(BaseSettings):
     """Input Validation Module settings."""
     security_threshold: float = Field(default=0.5, description="Score threshold for injection detection")
-    similarity_threshold: float = Field(default=0.1, description="Score threshold for semantic relevance")
+    similarity_threshold: float = Field(default=0.5, description="Score threshold for semantic relevance")
+    top_k: int = Field(default=3, description="Top K results for k-NN voting in relevance checks")
+    relevance_strategy: str = Field(default="silhouette_knn", description="Strategy for relevance evaluation (top_one or silhouette_knn)")
 
     model_config = SettingsConfigDict(
         env_file=".env",

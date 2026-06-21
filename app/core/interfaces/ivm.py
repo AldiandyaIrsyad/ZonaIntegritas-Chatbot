@@ -2,6 +2,23 @@
 from typing import List, Protocol
 
 from app.core.interfaces.ai import EmbeddingResult
+from app.core.interfaces.infra import SearchResult
+
+
+class IRelevanceStrategy(Protocol):
+    """Strategy for evaluating query relevance against vector search results."""
+    
+    def evaluate(self, results: List[SearchResult], similarity_threshold: float) -> bool:
+        """Evaluates relevance of the results.
+        
+        Args:
+            results: List of SearchResult from the vector store.
+            similarity_threshold: The configured relevance threshold.
+            
+        Returns:
+            bool: True if relevant, False if irrelevant/flagged.
+        """
+        ...
 
 
 class IIVMService(Protocol):
