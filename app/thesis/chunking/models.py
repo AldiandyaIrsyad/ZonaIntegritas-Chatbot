@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -17,6 +17,7 @@ class ParentChunkData(BaseModel):
     text: str
     chunk_index: int
     page: Optional[int] = None
+    breadcrumbs: List[str] = []
 
 
 class ChildChunkData(BaseModel):
@@ -26,3 +27,4 @@ class ChildChunkData(BaseModel):
     doc_id: str
     text: str
     page: Optional[int] = None
+    breadcrumbs: List[str] = []

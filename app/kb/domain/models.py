@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from pydantic import BaseModel
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.shared.db import Base
@@ -50,6 +50,7 @@ class ParentChunk(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     page: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    breadcrumbs: Mapped[list[str]] = mapped_column(JSON, default=list, server_default="[]", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -88,5 +89,6 @@ class RetrievedContext(BaseModel):
     score: float
     source_title: str = ""
     page: Optional[int] = None
+    breadcrumbs: List[str] = []
     dense_vector: Optional[List[float]] = None
     

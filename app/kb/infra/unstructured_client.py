@@ -48,15 +48,22 @@ class UnstructuredClient(IDocumentParser):
         elements: List[ParsedElement] = []
         for elem in raw_output:
             text = elem.get("text", "").strip()
+            
+            elem_type = elem.get("type", "UncategorizedText")
+            metadata = elem.get("metadata") or {}
+            
+            # For tables, if text_as_html is available, prefer it over plain text
+            if elem_type == "Table" and metadata.get("text_as_html"):
+                text = metadata["text_as_html"]
+            
             if not text:
                 continue
 
-            elem_type = elem.get("type", "UncategorizedText")
             elements.append(
                 ParsedElement(
                     element_type=elem_type,
                     text=text,
-                    metadata=elem.get("metadata") or {},
+                    metadata=metadata,
                 )
             )
 

@@ -33,6 +33,7 @@ class ChunkVector:
     dense_vector: List[float]
     sparse_indices: List[int]
     sparse_values: List[float]
+    breadcrumbs: List[str]
     session_id: Optional[str] = None
 
 @dataclass
