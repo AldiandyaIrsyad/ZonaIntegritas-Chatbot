@@ -31,3 +31,19 @@ class IRelevanceStrategy(Protocol):
             bool: True if relevant, False if irrelevant/flagged.
         """
         ...
+
+
+class IJudge(Protocol):
+    """Structural contract for an LLM-based judge."""
+
+    async def evaluate_relevance(self, query: str, context: str) -> bool:
+        """Evaluate if the given query is relevant to the provided context.
+        
+        Args:
+            query: The user query to evaluate.
+            context: The text context to check relevance against.
+            
+        Returns:
+            bool: True if the query is relevant to the context, False otherwise.
+        """
+        ...

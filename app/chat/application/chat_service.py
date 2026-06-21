@@ -94,8 +94,8 @@ class ChatService:
             if not precheck_contexts:
                 raise IrrelevantQueryException("No relevant contexts found in the knowledge base.")
             
-            scores = [ctx.score for ctx in precheck_contexts]
-            self.ivm_service.check_relevance(message_text, scores)
+            context_chunks = [ctx.text for ctx in precheck_contexts]
+            await self.ivm_service.check_relevance(message_text, context_chunks)
 
             # 4. Deep Context Retrieval (KB)
             full_contexts = await self.search_service.search(message_text, top_k=15, session_id=session_id)
