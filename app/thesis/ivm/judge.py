@@ -43,7 +43,7 @@ class LLMJudge(IJudge):
             logger.debug("llm_judge.result", query=query, response=response_text)
             
             # Fail closed: if we don't get a clear YES, it's irrelevant.
-            return "YES" in response_text
+            return response_text.startswith("YES")
         except Exception as e:
             logger.error("llm_judge.error", error=str(e), exc_info=True)
             # Fail closed on exception
