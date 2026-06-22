@@ -13,7 +13,7 @@ from app.kb.dependency import get_search_service
 from app.kb.application.search_service import SearchService
 
 from app.thesis.ivm.service import IVMService
-from app.thesis.ivm.strategies import SilhouetteKNNStrategy
+from app.thesis.ivm.judge import LLMJudge
 from app.thesis.ram.service import RAMService
 
 async def get_chat_repo(db: AsyncSession = Depends(get_db_session)) -> PostgresChatRepository:
@@ -39,10 +39,13 @@ def get_ivm_service(
     safety_client: PromptGuardClient = Depends(get_prompt_guard_client)
 ) -> IVMService:
     config = get_chat_config()
+    # Create a separate instance of LLM connection for the Judge
+    judge_llm = LLMConnection(base_url=config.llm_base_url, api_key=config.llm_api_key)
+    judge = LLMJudge(llm_connection=judge_llm, model=config.llm_model)
+    
     return IVMService(
         safety_model=safety_client,
-        relevance_strategy=SilhouetteKNNStrategy(),
-        similarity_threshold=config.similarity_threshold
+        judge=judge
     )
 
 def get_ram_service(
