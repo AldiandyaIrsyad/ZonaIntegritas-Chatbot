@@ -86,9 +86,9 @@ class IVMService:
                 )
                 raise MaliciousPromptException("Malicious prompt detected.")
                 
-            start += window_size - overlap
-            if start >= len(query):
+            if end >= len(query):
                 break
+            start += window_size - overlap
 
     async def check_relevance(self, query: str, context_chunks: List[str]) -> None:
         """Validates that the query is relevant to the retrieved contexts using LLM Judge.
