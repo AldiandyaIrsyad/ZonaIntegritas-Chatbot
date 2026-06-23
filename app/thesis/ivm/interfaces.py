@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Protocol
+from typing import List, Protocol, AsyncIterator, Any, Dict
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,22 @@ class IRelevanceStrategy(Protocol):
         Returns:
             bool: True if relevant, False if irrelevant/flagged.
         """
+        ...
+
+
+class ILLMJudgeConnection(Protocol):
+    """Structural contract for an LLM connection used by the judge.
+    
+    This breaks the dependency on the chat module's ILLMConnection.
+    """
+
+    def stream_chat(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        max_tokens: int = 100,
+    ) -> AsyncIterator[str]:
+        """Stream a chat completion."""
         ...
 
 

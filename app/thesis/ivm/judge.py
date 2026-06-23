@@ -2,8 +2,7 @@
 LLM-based Judge implementation for relevance checking.
 """
 import structlog
-from app.chat.domain.interfaces import ILLMConnection
-from app.thesis.ivm.interfaces import IJudge
+from app.thesis.ivm.interfaces import IJudge, ILLMJudgeConnection
 
 logger = structlog.get_logger(__name__)
 
@@ -11,7 +10,7 @@ logger = structlog.get_logger(__name__)
 class LLMJudge(IJudge):
     """Judge that uses an LLM to evaluate relevance."""
 
-    def __init__(self, llm_connection: ILLMConnection, model: str = "llama3-70b-8192") -> None:
+    def __init__(self, llm_connection: ILLMJudgeConnection, model: str = "llama3-70b-8192") -> None:
         self.llm_connection = llm_connection
         self.model = model
         self.system_prompt = (
