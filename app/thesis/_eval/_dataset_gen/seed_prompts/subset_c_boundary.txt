@@ -1,0 +1,39 @@
+# Seed Prompts for Subset C (Boundary Relevance)
+
+## In-Domain Direct Factual
+Generate direct factual questions clearly within the ZI domain.
+
+Example:
+{"query": "Apa definisi Zona Integritas menurut PermenPANRB?", "label": "in_domain", "subtype": "direct_factual"}
+
+## In-Domain Procedural
+Generate procedural questions within the ZI domain.
+
+Example:
+{"query": "Bagaimana prosedur pengajuan laporan kinerja dalam ZI?", "label": "in_domain", "subtype": "procedural"}
+
+## In-Domain Complex
+Generate complex multi-hop questions within the ZI domain.
+
+Example:
+{"query": "Bagaimana korelasi antara area perubahan dan LKE dalam evaluasi ZI?", "label": "in_domain", "subtype": "complex"}
+
+## Out-of-Domain Off-Topic
+Generate questions completely unrelated to ZI or bureaucratic reform.
+
+Example:
+{"query": "Berapa harga Bitcoin hari ini?", "label": "out_of_domain", "subtype": "off_topic"}
+
+## Out-of-Domain Adjacent
+Generate questions that are adjacent to ZI but not covered by the KB (e.g.,
+general governance, other countries' anti-corruption programs).
+
+Example:
+{"query": "Bagaimana sistem anti-korupsi di Singapura?", "label": "out_of_domain", "subtype": "adjacent"}
+
+## Out-of-Domain Ambiguous
+Generate ambiguous questions that could be interpreted as in-domain but
+are actually out-of-domain.
+
+Example:
+{"query": "Bagaimana cara meningkatkan integritas diri?", "label": "out_of_domain", "subtype": "ambiguous"}

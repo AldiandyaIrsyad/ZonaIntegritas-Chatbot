@@ -1,0 +1,29 @@
+# Seed Prompts for Subset A (RAG QA Triplets)
+
+## Factual Questions
+Generate factual questions that can be answered directly from a single paragraph
+of the source document. The answer should be a verbatim or near-verbatim extraction.
+
+Example:
+{"question": "Apa yang dimaksud dengan Zona Integritas?", "category": "factual", "ground_truth_answer": "Zona Integritas adalah wilayah di lingkungan instansi pemerintah yang bebas dari KKN", "source_context": "Zona Integritas (ZI) adalah wilayah di lingkungan instansi pemerintah yang bebas dari Korupsi, Kolusi, dan Nepotisme (KKN)."}
+
+## Procedural Questions
+Generate procedural questions about steps, processes, or procedures described
+in the document. The answer should list the steps in order.
+
+Example:
+{"question": "Apa saja tahapan dalam build Zona Integritas menuju WBK dan WBBM?", "category": "procedural", "ground_truth_answer": "Tahapan meliputi: 1) Persiapan, 2) Pelaksanaan, 3) Evaluasi, 4) Penilaian", "source_context": "Build Zona Integritas menuju WBK dan WBBM dilakukan melalui tahapan: 1) Persiapan, 2) Pelaksanaan, 3) Evaluasi, 4) Penilaian."}
+
+## Multi-hop Questions
+Generate multi-hop questions that require synthesizing information from multiple
+paragraphs or sections of the document.
+
+Example:
+{"question": "Bagaimana hubungan antara LKE dan area perubahan dalam ZI?", "category": "multi-hop", "ground_truth_answer": "LKE digunakan untuk menilai area perubahan yang telah dilaksanakan", "source_context": "LKE adalah instrumen penilaian. Area perubahan adalah fokus perubahan. LKE digunakan untuk menilai pencapaian area perubahan."}
+
+## Out-of-Domain Questions
+Generate questions that are outside the domain of the knowledge base (not about
+Zona Integritas, bureaucratic reform, or related topics).
+
+Example:
+{"question": "Berapa harga emas hari ini?", "category": "out-of-domain", "ground_truth_answer": "NONE", "source_context": "NONE"}

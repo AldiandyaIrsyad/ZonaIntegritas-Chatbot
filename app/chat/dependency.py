@@ -33,7 +33,7 @@ def get_nli_client() -> NLIClient:
 
 def get_embedding_client() -> EmbeddingClient:
     config = get_chat_config()
-    return EmbeddingClient(base_url=config.infinity_url, model="BBAAI/bge-m3")
+    return EmbeddingClient(base_url=config.infinity_url, model="BAAI/bge-m3")
 
 def get_ivm_service(
     safety_client: PromptGuardClient = Depends(get_prompt_guard_client)
@@ -73,5 +73,6 @@ async def get_chat_service(
         ivm_service=ivm_service,
         ram_service=ram_service,
         model_name=config.llm_model,
-        system_prompt=config.system_prompt
+        system_prompt=config.system_prompt,
+        temperature=config.llm_temperature,
     )

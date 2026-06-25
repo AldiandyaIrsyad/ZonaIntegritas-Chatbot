@@ -35,13 +35,15 @@ class LLMConnection(ILLMConnection):
         model: str,
         messages: List[Dict[str, str]],
         max_tokens: int,
+        temperature: float = 0.0,
     ) -> AsyncIterator[str]:
-        logger.debug("chat.llm.stream_start", model=model, message_count=len(messages), max_tokens=max_tokens)
+        logger.debug("chat.llm.stream_start", model=model, message_count=len(messages), max_tokens=max_tokens, temperature=temperature)
         try:
             stream = await self._client.chat.completions.create(
                 model=model,
                 messages=messages,  # type: ignore
                 max_tokens=max_tokens,
+                temperature=temperature,
                 stream=True,
             )
             async for chunk in stream:  # type: ignore[union-attr]

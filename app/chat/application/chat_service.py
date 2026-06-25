@@ -30,6 +30,7 @@ class ChatService:
         ram_service: RAMService,
         model_name: str,
         system_prompt: str,
+        temperature: float = 0.0,
     ):
         self.chat_repo = chat_repo
         self.llm_conn = llm_conn
@@ -38,6 +39,7 @@ class ChatService:
         self.ram_service = ram_service
         self.model_name = model_name
         self.system_prompt = system_prompt
+        self.temperature = temperature
 
     async def create_session(self) -> Dict[str, Any]:
         """Create a new chat session."""
@@ -70,6 +72,52 @@ class ChatService:
             return user_message
         context_str = "\n\n".join([f"[{i+1}] {ctx.text}" for i, ctx in enumerate(contexts)])
         return f"Context:\n{context_str}\n\nQuestion:\n{user_message}"
+
+    @staticmethod
+    def _format_citation(result: Any) -> str:
+        """Format an NLI assessment result into a canonical citation marker.
+
+        Produces a marker of the form ``*(STATUS: SCORE; SOURCE; Page N)*``
+        where STATUS is one of Supported/Contradiction/Neutral, SCORE is the
+        dominant NLI confidence (2 decimals), SOURCE is the document title
+        (omitted if empty), and Page N is included only when a page number
+        is available. This format is parsed by the frontend ``renderMessage``
+        function to render colored citation badges with tooltips.
+
+        Args:
+            result: An ``NLIResult`` with ``label``, per-class scores,
+                ``source_title``, and optional ``page``.
+
+        Returns:
+            A citation marker string, or an empty string if the result is None.
+        """
+        if result is None:
+            return ""
+
+        label_map = {
+            "entailment": "Supported",
+            "contradiction": "Contradiction",
+            "neutral": "Neutral",
+        }
+        status = label_map.get(result.label, "Neutral")
+
+        # Pick the dominant score for the predicted label
+        score_map = {
+            "entailment": result.entailment_score,
+            "contradiction": result.contradiction_score,
+            "neutral": result.neutral_score,
+        }
+        score = score_map.get(result.label, max(
+            result.entailment_score, result.contradiction_score, result.neutral_score
+        ))
+
+        parts = [f"{status}: {score:.2f}"]
+        if result.source_title:
+            parts.append(result.source_title)
+        if result.page is not None:
+            parts.append(f"Page {result.page}")
+
+        return f" *({'; '.join(parts)})*"
 
     async def process_chat_message(self, session_id: str, message_text: str) -> AsyncGenerator[str, None]:
         """The main generation pipeline: Safety -> Pre-check -> Context -> Generate -> Assess."""
@@ -124,16 +172,30 @@ class ChatService:
 
             # Prepare RAM evaluation
             premise = self.ram_service.build_premise(ram_contexts)
-            
+
+            # Emit retrieved context so downstream consumers (e.g. Subset D
+            # dataset generation) can capture the source passages used for
+            # generation. This is emitted as a single NDJSON event before
+            # streaming begins.
+            yield json.dumps({
+                "type": "context",
+                "content": "\n\n".join(ctx.text for ctx in ram_contexts),
+                "sources": [
+                    {"title": ctx.source_title, "page": ctx.page}
+                    for ctx in ram_contexts
+                ],
+            }) + "\n"
+
             # We buffer the stream by sentence to evaluate each complete sentence
             buffer = ""
             final_output = ""
-            
+
             # 6. Stream and Assess
             stream = self.llm_conn.stream_chat(
                 model=self.model_name,
                 messages=messages,
-                max_tokens=1024
+                max_tokens=1024,
+                temperature=self.temperature,
             )
             
             async for chunk in stream:
@@ -147,18 +209,7 @@ class ChatService:
                             sentence = sentence.strip() + "."
                             if len(sentence) > 10: # Only assess meaningful sentences
                                 result = await self.ram_service.assess_sentence(sentence, premise, ram_contexts)
-                                
-                                # Format output
-                                out_sentence = sentence
-                                if result.label == "contradiction":
-                                    out_sentence += " *(contradicts context)*"
-                                elif result.label == "neutral":
-                                    out_sentence += " *(unverified)*"
-                                else:
-                                    # Entailment - add citation
-                                    if result.source_title:
-                                        out_sentence += f" [{result.source_title}]"
-                                
+                                out_sentence = sentence + self._format_citation(result)
                                 final_output += out_sentence + " "
                                 yield json.dumps({"type": "chunk", "content": out_sentence + " "}) + "\n"
                             else:
@@ -172,13 +223,7 @@ class ChatService:
                 sentence = buffer.strip()
                 if len(sentence) > 10:
                     result = await self.ram_service.assess_sentence(sentence, premise, ram_contexts)
-                    if result.label == "contradiction":
-                        sentence += " *(contradicts context)*"
-                    elif result.label == "neutral":
-                        sentence += " *(unverified)*"
-                    else:
-                        if result.source_title:
-                            sentence += f" [{result.source_title}]"
+                    sentence = sentence + self._format_citation(result)
                 final_output += sentence
                 yield json.dumps({"type": "chunk", "content": sentence}) + "\n"
 

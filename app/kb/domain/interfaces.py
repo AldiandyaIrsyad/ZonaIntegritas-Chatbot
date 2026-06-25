@@ -25,6 +25,34 @@ class ITextEmbedder(Protocol):
         ...
 
 @dataclass
+class RerankResult:
+    """Result of a reranking operation for a single document.
+
+    Attributes:
+        index: Original position of the document in the input list.
+        score: Relevance score assigned by the reranker (higher = more relevant).
+    """
+    index: int
+    score: float
+
+class IReranker(Protocol):
+    """Protocol for reranking retrieved documents by relevance to a query."""
+    async def rerank(self, query: str, documents: List[str], top_k: Optional[int] = None) -> List[RerankResult]:
+        """Rerank documents by relevance to the query.
+
+        Args:
+            query: The search query.
+            documents: List of document texts in their original retrieval order.
+            top_k: If provided, return only the top-k most relevant documents.
+
+        Returns:
+            List of RerankResult ordered by descending relevance score.
+        """
+        ...
+    async def close(self) -> None:
+        ...
+
+@dataclass
 class ChunkVector:
     """A vectorized child chunk to be stored in the vector database."""
     chunk_id: str
@@ -34,6 +62,7 @@ class ChunkVector:
     sparse_indices: List[int]
     sparse_values: List[float]
     breadcrumbs: List[str]
+    content_type: str = "text"
     session_id: Optional[str] = None
 
 @dataclass
@@ -57,6 +86,7 @@ class IVectorStore(Protocol):
         sparse_values: List[float],
         top_k: int = 15,
         session_id: Optional[str] = None,
+        mode: str = "hybrid",
     ) -> List[SearchResult]:
         ...
     async def update_payload(self, doc_id: str, payload: Dict[str, Any]) -> None:

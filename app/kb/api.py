@@ -1,16 +1,28 @@
 """JSON API endpoints for knowledge base administration."""
-from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
-from typing import Any
+from typing import Any, List, Optional
 from starlette.responses import JSONResponse
 
 from app.kb.application.kb_service import KBApplicationService
-from app.kb.dependency import get_kb_service
+from app.kb.application.search_service import SearchService
+from app.kb.dependency import get_kb_service, get_search_service
 
 router = APIRouter()
 
 class PDFUpdateRequest(BaseModel):
     active: bool
+
+class SearchResultItem(BaseModel):
+    """A single search result returned to the client."""
+    chunk_id: str
+    parent_chunk_id: str
+    doc_id: str
+    text: str
+    score: float
+    source_title: str
+    page: Optional[int] = None
+    breadcrumbs: List[str] = []
 
 @router.get("/api/admin/pdfs")
 async def get_pdfs(service: KBApplicationService = Depends(get_kb_service)) -> Any:
@@ -67,3 +79,33 @@ async def get_ingestion_status(
     if not result:
         raise HTTPException(status_code=404, detail="PDF not found")
     return result
+
+
+@router.get("/api/kb/search", response_model=List[SearchResultItem])
+async def search_knowledge_base(
+    q: str = Query(..., min_length=1, description="Search query"),
+    top_k: int = Query(default=15, ge=1, le=100, description="Number of results to return"),
+    session_id: Optional[str] = Query(default=None, description="Optional session scope"),
+    mode: str = Query(default="hybrid", description="Retrieval mode: hybrid, dense, or sparse"),
+    search_service: SearchService = Depends(get_search_service),
+) -> List[SearchResultItem]:
+    """Search the knowledge base for contexts relevant to a query.
+
+    Returns hybrid (dense + sparse with RRF fusion) search results by default.
+    Set ``mode`` to ``dense`` or ``sparse`` for ablation experiments.
+    Used by the chat pipeline and the retrieval evaluation script (Experiment 2).
+    """
+    contexts = await search_service.search(query=q, top_k=top_k, session_id=session_id, mode=mode)
+    return [
+        SearchResultItem(
+            chunk_id=c.chunk_id,
+            parent_chunk_id=c.parent_chunk_id,
+            doc_id=c.doc_id,
+            text=c.text,
+            score=c.score,
+            source_title=c.source_title,
+            page=c.page,
+            breadcrumbs=c.breadcrumbs,
+        )
+        for c in contexts
+    ]

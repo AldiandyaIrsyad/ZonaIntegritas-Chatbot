@@ -8,6 +8,7 @@ class ILLMConnection(Protocol):
         model: str,
         messages: List[Dict[str, str]],
         max_tokens: int,
+        temperature: float = 0.0,
     ) -> AsyncIterator[str]:
         ...
     async def close(self) -> None:

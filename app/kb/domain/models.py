@@ -37,6 +37,13 @@ class ParentChunk(Base):
     Child chunks (sentence-level) are indexed in Qdrant for retrieval precision.
     When a child chunk matches a query, the corresponding parent chunk's full
     text is fetched from this table to provide broader context to the LLM.
+
+    Attributes:
+        content_type: The structural type of this chunk's content
+            (text, table, figure, hybrid). Used for citation attribution
+            and retrieval filtering.
+        element_metadata: Preserved metadata from the source element
+            (e.g. raw HTML for tables, image path for figures, table summary).
     """
     __tablename__ = "parent_chunks"
 
@@ -51,6 +58,12 @@ class ParentChunk(Base):
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     page: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     breadcrumbs: Mapped[list[str]] = mapped_column(JSON, default=list, server_default="[]", nullable=False)
+    content_type: Mapped[str] = mapped_column(
+        String, default="text", server_default="text", nullable=False,
+    )
+    element_metadata: Mapped[dict] = mapped_column(
+        JSON, default=dict, server_default="{}", nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -90,5 +103,6 @@ class RetrievedContext(BaseModel):
     source_title: str = ""
     page: Optional[int] = None
     breadcrumbs: List[str] = []
+    content_type: str = "text"
     dense_vector: Optional[List[float]] = None
     
