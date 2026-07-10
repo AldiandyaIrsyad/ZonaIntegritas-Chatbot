@@ -29,18 +29,19 @@ from typing import Dict, List
 import structlog
 
 from app.thesis._eval._dataset_gen.config import DatasetGenSettings, get_dataset_gen_settings
+from app.thesis._eval._dataset_gen.concordance import BlindInjectionTracker
 from app.thesis._eval._dataset_gen.generator import DatasetGenerator
 from app.thesis._eval._dataset_gen.panel import EvaluatorPanel
 
 logger = structlog.get_logger(__name__)
 
 SUBTYPES = [
-    ("direct_factual", "in_domain", 10),
-    ("procedural", "in_domain", 10),
-    ("complex", "in_domain", 10),
+    # (subtype, expected_label, count) — matches skripsi Tabel 3.5
+    ("direct_zi", "in_domain", 15),
+    ("indirect_zi", "in_domain", 15),
+    ("near_miss_government", "out_of_domain", 10),
+    ("adjacent_legal", "out_of_domain", 10),
     ("off_topic", "out_of_domain", 10),
-    ("adjacent", "out_of_domain", 10),
-    ("ambiguous", "out_of_domain", 10),
 ]
 
 GENERATOR_SYSTEM_PROMPT = """\
@@ -83,11 +84,12 @@ async def build_subset_c(
         count: Target number of accepted items.
     """
     if not settings.openrouter_api_key:
-        print("ERROR: DATAGEN_OPENROUTER_API_KEY not set.", file=sys.stderr)
+        logger.error("datagen.subset_c.missing_api_key")
         sys.exit(1)
 
     generator = DatasetGenerator(settings)
     panel = EvaluatorPanel(settings)
+    blind_tracker = BlindInjectionTracker()
 
     accepted_items: List[Dict[str, str]] = []
     total_generated = 0
@@ -99,24 +101,22 @@ async def build_subset_c(
                 break
 
             n = min(per_subtype_count, count - len(accepted_items))
-            print(f"\nGenerating {n} {subtype} queries (expected: {expected_label})...")
+            logger.info("datagen.subset_c.generating", subtype=subtype, batch_size=n, expected_label=expected_label)
 
             seed_prompt = (
                 f"Generate {n} boundary relevance queries of subtype '{subtype}'.\n"
                 f"Subtype '{subtype}' means: "
             )
-            if subtype == "direct_factual":
-                seed_prompt += "direct factual questions clearly within the ZI domain."
-            elif subtype == "procedural":
-                seed_prompt += "procedural questions within the ZI domain."
-            elif subtype == "complex":
-                seed_prompt += "complex multi-hop questions within the ZI domain."
-            elif subtype == "off_topic":
-                seed_prompt += "questions completely unrelated to ZI or bureaucratic reform."
-            elif subtype == "adjacent":
-                seed_prompt += "questions adjacent to ZI but not covered by the KB (e.g., other countries' anti-corruption)."
-            else:  # ambiguous
-                seed_prompt += "ambiguous questions that could be interpreted as in-domain but are actually out-of-domain."
+            if subtype == "direct_zi":
+                seed_prompt += "questions that explicitly discuss ZI topics: WBK criteria, Area Perubahan, LKE."
+            elif subtype == "indirect_zi":
+                seed_prompt += "questions about ZI with non-standard formulation: colloquial language, ambiguous references."
+            elif subtype == "near_miss_government":
+                seed_prompt += "government topics that share ZI vocabulary but are NOT covered in the knowledge base."
+            elif subtype == "adjacent_legal":
+                seed_prompt += "Indonesian legal/regulatory questions outside ZI (e.g. UU ASN, procurement law)."
+            else:  # off_topic
+                seed_prompt += "unrelated questions formulated in a formal bureaucratic tone."
 
             try:
                 drafts = await generator.generate(
@@ -125,7 +125,7 @@ async def build_subset_c(
                     system_prompt=GENERATOR_SYSTEM_PROMPT,
                 )
             except Exception as e:
-                print(f"  Generator error: {e}", file=sys.stderr)
+                logger.error("datagen.subset_c.generator_error", error=str(e), exc_info=True)
                 continue
 
             total_generated += len(drafts)
@@ -157,23 +157,33 @@ async def build_subset_c(
                         context=validation_context,
                     )
                 except Exception as e:
-                    print(f"  Panel error: {e}", file=sys.stderr)
+                    logger.error("datagen.subset_c.panel_error", error=str(e), exc_info=True)
                     continue
 
                 if verdict.accepted:
-                    accepted_items.append({
+                    row = {
                         "query": query,
                         "label": label,
                         "subtype": stype,
-                    })
-                    print(f"  ✓ Accepted ({len(accepted_items)}/{count})")
+                    }
+                    accepted_items.append(row)
+                    # Track 5/5-unanimous items for blind injection
+                    if verdict.yes_count == len(verdict.votes):
+                        blind_tracker.add_candidate({**row, "_panel_yes": verdict.yes_count})
+                    logger.info("datagen.subset_c.accepted", accepted=len(accepted_items), target=count)
                 else:
                     total_rejected += 1
-                    print(f"  ✗ Rejected ({verdict.yes_count}/{verdict.no_count + verdict.yes_count})")
+                    logger.info("datagen.subset_c.rejected", yes=verdict.yes_count, total=verdict.no_count + verdict.yes_count)
 
     finally:
         await generator.aclose()
         await panel.aclose()
+
+    # Write blind-injection sidecar
+    blind_tracker.write_sidecar(
+        output_path.replace(".csv", "_blind_injection.csv"),
+        fieldnames=["query", "label", "subtype"],
+    )
 
     # Write CSV
     output = Path(output_path)
@@ -184,13 +194,13 @@ async def build_subset_c(
         writer.writeheader()
         writer.writerows(accepted_items)
 
-    print(f"\n{'=' * 60}")
-    print(f"Subset C generation complete:")
-    print(f"  Generated: {total_generated}")
-    print(f"  Accepted:  {len(accepted_items)}")
-    print(f"  Rejected:  {total_rejected}")
-    print(f"  Output:    {output_path}")
-    print(f"{'=' * 60}")
+    logger.info(
+        "datagen.subset_c.complete",
+        generated=total_generated,
+        accepted=len(accepted_items),
+        rejected=total_rejected,
+        output=output_path,
+    )
 
 
 def main() -> None:

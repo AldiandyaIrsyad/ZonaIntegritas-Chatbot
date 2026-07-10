@@ -95,7 +95,7 @@ class SearchService:
                     )
                 )
 
-        # 6. Rerank (optional) — re-order contexts by relevance to the query
+        # 6. Rerank (optional) re-order contexts by relevance to the query
         if self.reranker is not None and contexts:
             try:
                 rerank_results = await self.reranker.rerank(

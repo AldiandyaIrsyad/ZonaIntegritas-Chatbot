@@ -54,6 +54,37 @@ class DatasetGenerator:
             headers={"Authorization": f"Bearer {settings.openrouter_api_key}"},
             timeout=httpx.Timeout(120.0, connect=10.0),
         )
+        # Models that require reasoning and cannot have it disabled.
+        self._reasoning_mandatory = {
+            "google/gemini-3.1-pro-preview",
+        }
+
+    def _build_payload(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: int,
+    ) -> Dict[str, object]:
+        """Build the OpenRouter request payload for the generator model.
+
+        Conditionally includes ``reasoning: {enabled: false}`` for models
+        that support disabling reasoning.
+
+        Args:
+            messages: Chat messages.
+            max_tokens: Maximum tokens for the response.
+
+        Returns:
+            Request payload dict.
+        """
+        payload: Dict[str, object] = {
+            "model": self._settings.generator_model,
+            "messages": messages,
+            "temperature": self._settings.generator_temperature,
+            "max_tokens": max_tokens,
+        }
+        if self._settings.generator_model not in self._reasoning_mandatory:
+            payload["reasoning"] = {"enabled": False}
+        return payload
 
     async def generate(
         self,
@@ -86,16 +117,11 @@ class DatasetGenerator:
 
         response = await self._client.post(
             "/chat/completions",
-            json={
-                "model": self._settings.generator_model,
-                "messages": messages,
-                "temperature": self._settings.generator_temperature,
-                "max_tokens": 4096,
-            },
+            json=self._build_payload(messages, max_tokens=8192),
         )
         response.raise_for_status()
         data = response.json()
-        raw_output = data["choices"][0]["message"]["content"]
+        raw_output = self._extract_content(data)
 
         items = self._parse_jsonl(raw_output)
         logger.info(
@@ -161,16 +187,35 @@ class DatasetGenerator:
 
         response = await self._client.post(
             "/chat/completions",
-            json={
-                "model": self._settings.generator_model,
-                "messages": messages,
-                "temperature": self._settings.generator_temperature,
-                "max_tokens": 2048,
-            },
+            json=self._build_payload(messages, max_tokens=8192),
         )
         response.raise_for_status()
         data = response.json()
-        return data["choices"][0]["message"]["content"]
+        return self._extract_content(data)
+
+    @staticmethod
+    def _extract_content(data: Dict[str, Any]) -> str:
+        """Extract text content from an OpenRouter chat completion response.
+
+        Handles reasoning models that may return ``content: null`` with the
+        actual text in a ``reasoning`` field. If both are present, prefers
+        ``content``. If both are empty, returns empty string.
+
+        Args:
+            data: Parsed JSON response from OpenRouter.
+
+        Returns:
+            The response text.
+        """
+        message = data.get("choices", [{}])[0].get("message", {})
+        content = message.get("content")
+        if content and content.strip():
+            return content
+        # Fall back to reasoning field (reasoning models with max_tokens too low)
+        reasoning = message.get("reasoning")
+        if reasoning and reasoning.strip():
+            return reasoning
+        return "" if content is None else (content or "")
 
     async def aclose(self) -> None:
         """Close the HTTP client."""

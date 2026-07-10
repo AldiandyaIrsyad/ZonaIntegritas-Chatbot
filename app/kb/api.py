@@ -27,7 +27,18 @@ class SearchResultItem(BaseModel):
 @router.get("/api/admin/pdfs")
 async def get_pdfs(service: KBApplicationService = Depends(get_kb_service)) -> Any:
     """Retrieve all uploaded PDF documents with their metadata."""
-    return await service.list_pdfs()
+    pdfs = await service.list_pdfs()
+    return [
+        {
+            "id": str(p.id),
+            "title": p.title,
+            "description": p.description,
+            "active": p.active,
+            "ingestion_status": p.ingestion_status,
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+        }
+        for p in pdfs
+    ]
 
 @router.post("/api/admin/pdfs", status_code=202)
 async def upload_pdf(
@@ -79,6 +90,20 @@ async def get_ingestion_status(
     if not result:
         raise HTTPException(status_code=404, detail="PDF not found")
     return result
+
+
+@router.post("/api/admin/pdfs/{pdf_id}/reingest", status_code=202)
+async def reingest_pdf(
+    pdf_id: str,
+    background_tasks: BackgroundTasks,
+    service: KBApplicationService = Depends(get_kb_service),
+) -> Any:
+    """Re-trigger ingestion for a PDF document (e.g. after a crash left it stuck)."""
+    pdf = await service.kb_repo.get_pdf_by_id(pdf_id)
+    if not pdf:
+        raise HTTPException(status_code=404, detail="PDF not found")
+    background_tasks.add_task(service.ingest_worker.ingest_document, doc_id=pdf_id)
+    return {"id": pdf_id, "status": "reingest_triggered"}
 
 
 @router.get("/api/kb/search", response_model=List[SearchResultItem])

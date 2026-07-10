@@ -15,12 +15,88 @@ Usage:
 
 from __future__ import annotations
 
+import csv
+import random
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+# Fixed seed for reproducibility (matches _shared/metrics.py bootstrap seed)
+BLIND_INJECTION_SEED = 42
+
+
+@dataclass
+class BlindInjectionTracker:
+    """Tracks 5/5-consensus items for blind injection into human verification.
+
+    Per skripsi §3.2.1d, ~20% of the items shown to the human verifier are
+    "blind injections" — items where all 5 panel models unanimously agreed
+    (5/5 consensus). The human verifies these without knowing their status.
+    If the human agrees with the panel on >=95% of these, the pipeline is
+    deemed reliable.
+
+    Attributes:
+        candidates: Items with 5/5 unanimous panel agreement.
+        selected: Items chosen for blind injection (~20% of candidates).
+        injection_ratio: Fraction of candidates to inject (default 0.20).
+    """
+
+    candidates: List[Dict[str, Any]] = field(default_factory=list)
+    selected: List[Dict[str, Any]] = field(default_factory=list)
+    injection_ratio: float = 0.20
+
+    def add_candidate(self, item: Dict[str, Any]) -> None:
+        """Record a 5/5-unanimous panel item as a blind-injection candidate.
+
+        Args:
+            item: The accepted dataset row (must include the panel verdict).
+        """
+        self.candidates.append(item)
+
+    def select_for_injection(self) -> List[Dict[str, Any]]:
+        """Randomly select ~20% of candidates for blind injection.
+
+        Uses a fixed seed for reproducibility.
+
+        Returns:
+            List of selected items (also stored in ``self.selected``).
+        """
+        if not self.candidates:
+            self.selected = []
+            return []
+        rng = random.Random(BLIND_INJECTION_SEED)
+        n_select = max(1, int(len(self.candidates) * self.injection_ratio))
+        n_select = min(n_select, len(self.candidates))
+        self.selected = rng.sample(self.candidates, n_select)
+        return self.selected
+
+    def write_sidecar(self, path: str, fieldnames: List[str]) -> None:
+        """Write the blind-injection items to a sidecar CSV.
+
+        Args:
+            path: Output CSV path.
+            fieldnames: Column names for the CSV.
+        """
+        if not self.selected:
+            self.select_for_injection()
+        output = Path(path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for item in self.selected:
+                # Strip non-CSV fields (like verdict objects)
+                row = {k: v for k, v in item.items() if k in fieldnames}
+                writer.writerow(row)
+        logger.info(
+            "concordance.blind_injection_written",
+            path=str(output),
+            count=len(self.selected),
+        )
 
 
 @dataclass

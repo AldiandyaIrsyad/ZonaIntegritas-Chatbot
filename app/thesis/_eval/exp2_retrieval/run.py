@@ -21,7 +21,7 @@ import asyncio
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import httpx
 
@@ -80,49 +80,30 @@ async def evaluate_mode(
 ) -> RetrievalMetrics:
     """Evaluate a single retrieval mode over the dataset.
 
+    Collects (retrieved_doc_ids, [relevant_doc_id]) tuples per query and
+    delegates to ``compute_retrieval_metrics`` for Hit Rate@k and MRR@k
+    aggregation (k ∈ {1, 3, 5}).
+
     Args:
         api_url: Base URL of the running application.
         dataset: List of Subset A rows.
         mode: Retrieval mode ("hybrid", "dense", or "sparse").
-        top_k: Maximum k for Hit Rate@k computation.
+        top_k: Number of results to retrieve per query.
 
     Returns:
         Aggregated RetrievalMetrics across all queries.
     """
-    all_hit_1: List[bool] = []
-    all_hit_3: List[bool] = []
-    all_hit_5: List[bool] = []
-    all_rr: List[float] = []
+    results_per_query: List[Tuple[List[str], List[str]]] = []
 
     for i, row in enumerate(dataset, 1):
         retrieved_ids = await retrieve(api_url, row.question, top_k, mode)
         relevant_id = row.source_doc_id
-
-        hit_1 = relevant_id in retrieved_ids[:1]
-        hit_3 = relevant_id in retrieved_ids[:3]
-        hit_5 = relevant_id in retrieved_ids[:5]
-
-        rr = 0.0
-        for rank, rid in enumerate(retrieved_ids, 1):
-            if rid == relevant_id:
-                rr = 1.0 / rank
-                break
-
-        all_hit_1.append(hit_1)
-        all_hit_3.append(hit_3)
-        all_hit_5.append(hit_5)
-        all_rr.append(rr)
+        results_per_query.append((retrieved_ids, [relevant_id] if relevant_id else []))
 
         if i % 10 == 0:
             print(f"  [{mode}] Processed {i}/{len(dataset)} queries...")
 
-    return RetrievalMetrics(
-        hit_rate_at_1=sum(all_hit_1) / len(all_hit_1) if all_hit_1 else 0.0,
-        hit_rate_at_3=sum(all_hit_3) / len(all_hit_3) if all_hit_3 else 0.0,
-        hit_rate_at_5=sum(all_hit_5) / len(all_hit_5) if all_hit_5 else 0.0,
-        mrr=sum(all_rr) / len(all_rr) if all_rr else 0.0,
-        total=len(dataset),
-    )
+    return compute_retrieval_metrics(results_per_query)
 
 
 async def evaluate_mode_per_category(
@@ -169,25 +150,27 @@ def print_report(
     print(f"\n{'=' * 70}")
     print(f"  Retrieval Mode: {mode_name}")
     print(f"{'=' * 70}")
-    print(f"  Total Queries: {overall.total}")
+    print(f"  Total Queries: {overall.query_count}")
     print()
     print(f"  {'Metric':<20} {'Value':>10}")
     print(f"  {'-' * 32}")
     print(f"  {'Hit Rate@1':<20} {overall.hit_rate_at_1:>10.4f}")
     print(f"  {'Hit Rate@3':<20} {overall.hit_rate_at_3:>10.4f}")
     print(f"  {'Hit Rate@5':<20} {overall.hit_rate_at_5:>10.4f}")
-    print(f"  {'MRR':<20} {overall.mrr:>10.4f}")
+    print(f"  {'MRR@1':<20} {overall.mrr_at_1:>10.4f}")
+    print(f"  {'MRR@3':<20} {overall.mrr_at_3:>10.4f}")
+    print(f"  {'MRR@5':<20} {overall.mrr_at_5:>10.4f}")
 
     if per_category:
         print(f"\n  Per Category:")
-        print(f"  {'Category':<25} {'N':>5} {'HR@1':>8} {'HR@3':>8} {'HR@5':>8} {'MRR':>8}")
-        print(f"  {'-' * 65}")
+        print(f"  {'Category':<25} {'N':>5} {'HR@1':>8} {'HR@3':>8} {'HR@5':>8} {'MRR@5':>8}")
+        print(f"  {'-' * 70}")
         for r in per_category:
             m = r.metrics
             print(
                 f"  {r.category:<25} {r.sample_count:>5} "
                 f"{m.hit_rate_at_1:>8.4f} {m.hit_rate_at_3:>8.4f} "
-                f"{m.hit_rate_at_5:>8.4f} {m.mrr:>8.4f}"
+                f"{m.hit_rate_at_5:>8.4f} {m.mrr_at_5:>8.4f}"
             )
     print()
 
@@ -204,7 +187,13 @@ async def async_main(args: argparse.Namespace) -> None:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Loaded {len(dataset)} samples from Subset A")
+    # Filter out out-of-domain rows: they have source_doc_id="NONE" and
+    # always score 0 on retrieval, which would pollute the metrics without
+    # providing meaningful signal (Issue 7).
+    in_domain_dataset = [r for r in dataset if r.category != "out-of-domain"]
+    skipped = len(dataset) - len(in_domain_dataset)
+    print(f"Loaded {len(dataset)} samples from Subset A ({skipped} out-of-domain rows filtered)")
+    dataset = in_domain_dataset
 
     modes_to_eval: List[str] = []
     if args.mode == "all":

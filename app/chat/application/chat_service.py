@@ -119,34 +119,58 @@ class ChatService:
 
         return f" *({'; '.join(parts)})*"
 
-    async def process_chat_message(self, session_id: str, message_text: str) -> AsyncGenerator[str, None]:
-        """The main generation pipeline: Safety -> Pre-check -> Context -> Generate -> Assess."""
+    async def process_chat_message(
+        self, session_id: str, message_text: str, skip_guardrails: bool = False
+    ) -> AsyncGenerator[str, None]:
+        """The main generation pipeline: Safety -> Pre-check -> Context -> Generate -> Assess.
+
+        When ``skip_guardrails`` is True, the IVM safety/relevance checks and
+        the RAM per-sentence assessment are bypassed (baseline mode for
+        Experiment 4). Retrieval still runs so the LLM has context.
+        """
         
         # 1. Initialize or get session
         session = await self.chat_repo.get_session_by_id(session_id, load_messages=True)
+        is_new_session = False
         if not session:
             session = await self.chat_repo.create_session(session_id, message_text[:20] + "...")
+            is_new_session = True
         elif session.title == "New Chat":
             new_title = message_text[:30] + ("..." if len(message_text) > 30 else "")
             await self.chat_repo.update_session_title(session, new_title)
+
+        # Capture history BEFORE any DB writes to avoid lazy-load issues
+        # in async context (greenlet_spawn errors after flush/commit).
+        # For newly created sessions, messages is empty (no lazy load needed).
+        if is_new_session:
+            history: List = []
+        else:
+            history = list(session.messages[-10:]) if session and session.messages else []
 
         # Record user message
         await self.chat_repo.create_message(session_id, "user", message_text, raw_content=message_text)
 
         try:
             # 2. Safety Check (IVM)
-            await self.ivm_service.check_malicious(message_text)
+            if not skip_guardrails:
+                await self.ivm_service.check_malicious(message_text)
 
             # 3. Pre-check Relevance (IVM + KB)
-            precheck_contexts = await self.search_service.search(message_text, top_k=3, session_id=session_id)
-            if not precheck_contexts:
-                raise IrrelevantQueryException("No relevant contexts found in the knowledge base.")
-            
-            context_chunks = [ctx.text for ctx in precheck_contexts]
-            await self.ivm_service.check_relevance(message_text, context_chunks)
+            # NOTE: We intentionally do NOT pass session_id here. The chat
+            # session ID is unrelated to the KB chunk session_id payload —
+            # KB chunks are ingested without a session_id and the Qdrant
+            # filter would return zero results if we passed the chat
+            # session ID.
+            precheck_contexts = await self.search_service.search(message_text, top_k=3)
+            if not skip_guardrails:
+                if not precheck_contexts:
+                    raise IrrelevantQueryException("No relevant contexts found in the knowledge base.")
+
+                context_chunks = [ctx.text for ctx in precheck_contexts]
+                await self.ivm_service.check_relevance(message_text, context_chunks)
 
             # 4. Deep Context Retrieval (KB)
-            full_contexts = await self.search_service.search(message_text, top_k=15, session_id=session_id)
+            full_contexts = await self.search_service.search(message_text, top_k=15)
             
             # Map KB contexts to RAM contexts
             ram_contexts = [
@@ -163,7 +187,6 @@ class ChatService:
             
             messages = [{"role": "system", "content": self.system_prompt}]
             # Add history (up to last 5 messages to avoid blowing up context window)
-            history = session.messages[-10:] if session else []
             for msg in history:
                 messages.append({"role": msg.role, "content": msg.content})
             
@@ -207,9 +230,13 @@ class ChatService:
                         # Process all but the last incomplete fragment
                         for sentence in sentences[:-1]:
                             sentence = sentence.strip() + "."
-                            if len(sentence) > 10: # Only assess meaningful sentences
-                                result = await self.ram_service.assess_sentence(sentence, premise, ram_contexts)
-                                out_sentence = sentence + self._format_citation(result)
+                            if len(sentence) > 10:  # Only assess meaningful sentences
+                                if skip_guardrails:
+                                    # Baseline mode: no RAM assessment, no citation
+                                    out_sentence = sentence
+                                else:
+                                    result = await self.ram_service.assess_sentence(sentence, premise, ram_contexts)
+                                    out_sentence = sentence + self._format_citation(result)
                                 final_output += out_sentence + " "
                                 yield json.dumps({"type": "chunk", "content": out_sentence + " "}) + "\n"
                             else:
@@ -221,7 +248,7 @@ class ChatService:
             # Process any remaining buffer
             if buffer.strip():
                 sentence = buffer.strip()
-                if len(sentence) > 10:
+                if len(sentence) > 10 and not skip_guardrails:
                     result = await self.ram_service.assess_sentence(sentence, premise, ram_contexts)
                     sentence = sentence + self._format_citation(result)
                 final_output += sentence

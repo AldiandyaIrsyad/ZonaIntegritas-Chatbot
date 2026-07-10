@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import json
 import re
 import sys
 from pathlib import Path
@@ -37,6 +38,7 @@ import httpx
 import structlog
 
 from app.thesis._eval._dataset_gen.config import DatasetGenSettings, get_dataset_gen_settings
+from app.thesis._eval._dataset_gen.concordance import BlindInjectionTracker
 from app.thesis._eval._dataset_gen.panel import EvaluatorPanel
 
 logger = structlog.get_logger(__name__)
@@ -60,8 +62,6 @@ Label the sentence as one of:
 - "partially_supported": Some claims in the sentence are supported, others are not
 - "not_supported": The sentence contradicts or is not supported by the context
 - "no_source_needed": The sentence doesn't need verification (greetings, transitions, etc.)
-
-Answer with ONLY the label name (one of: supported, partially_supported, not_supported, no_source_needed).
 """
 
 
@@ -87,6 +87,11 @@ async def run_pipeline(
 ) -> Optional[Dict[str, Any]]:
     """Run a question through the full chat pipeline.
 
+    Calls the streaming chat endpoint (``/api/chat/sessions/{id}/stream``)
+    and consumes the NDJSON stream, accumulating ``chunk`` events into the
+    response text and capturing the ``context`` event emitted before
+    streaming begins.
+
     Args:
         api_url: Base URL of the running application.
         session_id: Chat session ID.
@@ -95,11 +100,12 @@ async def run_pipeline(
     Returns:
         Dict with response text and retrieved context, or None on error.
     """
-    async with httpx.AsyncClient(base_url=api_url, timeout=120.0) as client:
-        # Send message and collect NDJSON stream
+    async with httpx.AsyncClient(base_url=api_url, timeout=180.0) as client:
+        # Send message and collect NDJSON stream.
+        # The chat API expects {"message": ...} (see app/chat/api.py ChatRequest).
         response = await client.post(
-            f"/api/chat/sessions/{session_id}/messages",
-            json={"content": question},
+            f"/api/chat/sessions/{session_id}/stream",
+            json={"message": question},
             headers={"Accept": "application/x-ndjson"},
         )
         if response.status_code != 200:
@@ -113,13 +119,16 @@ async def run_pipeline(
             if not line:
                 continue
             try:
-                import json
                 chunk = json.loads(line)
-                if chunk.get("type") == "token":
+                chunk_type = chunk.get("type", "")
+                if chunk_type == "chunk":
                     full_response += chunk.get("content", "")
-                elif chunk.get("type") == "context":
+                elif chunk_type == "context":
                     retrieved_context = chunk.get("content", "")
-                elif chunk.get("type") == "done":
+                elif chunk_type == "error":
+                    # Pipeline rejected the query (e.g. IVM block); stop early
+                    return {"response": chunk.get("content", ""), "context": retrieved_context}
+                elif chunk_type == "done":
                     break
             except Exception:
                 continue
@@ -157,7 +166,7 @@ def load_subset_a(path: str, count: int) -> List[Dict[str, str]]:
     """
     input_path = Path(path)
     if not input_path.exists():
-        print(f"ERROR: Subset A file not found: {path}", file=sys.stderr)
+        logger.error("datagen.subset_d.subset_a_not_found", path=path)
         sys.exit(1)
 
     with input_path.open("r", encoding="utf-8") as f:
@@ -205,18 +214,19 @@ async def build_subset_d(
         count: Number of questions to process.
     """
     if not settings.openrouter_api_key:
-        print("ERROR: DATAGEN_OPENROUTER_API_KEY not set.", file=sys.stderr)
+        logger.error("datagen.subset_d.missing_api_key")
         sys.exit(1)
 
     # 1. Load Subset A questions
-    print("Loading Subset A questions...")
+    logger.info("datagen.subset_d.loading_subset_a")
     questions = load_subset_a(subset_a_path, count)
     if not questions:
-        print("ERROR: No questions found in Subset A.", file=sys.stderr)
+        logger.error("datagen.subset_d.no_questions")
         sys.exit(1)
-    print(f"Loaded {len(questions)} questions")
+    logger.info("datagen.subset_d.loaded_questions", count=len(questions))
 
     panel = EvaluatorPanel(settings)
+    blind_tracker = BlindInjectionTracker()
 
     accepted_items: List[Dict[str, Any]] = []
     total_sentences = 0
@@ -226,23 +236,23 @@ async def build_subset_d(
         for i, q in enumerate(questions):
             question = q.get("question", "").strip()
             question_id = f"q-{i + 1:03d}"
-            print(f"\n[{i + 1}/{len(questions)}] Processing: {question[:60]}...")
+            logger.info("datagen.subset_d.processing", index=i + 1, total=len(questions), question=question[:60])
 
             # 2. Create session and run pipeline
             try:
                 session_id = await create_session(api_url)
             except Exception as e:
-                print(f"  Failed to create session: {e}", file=sys.stderr)
+                logger.error("datagen.subset_d.session_create_failed", error=str(e), exc_info=True)
                 continue
 
             try:
                 result = await run_pipeline(api_url, session_id, question)
             except Exception as e:
-                print(f"  Pipeline error: {e}", file=sys.stderr)
+                logger.error("datagen.subset_d.pipeline_error", error=str(e), exc_info=True)
                 continue
 
             if not result or not result.get("response"):
-                print("  No response from pipeline, skipping")
+                logger.warning("datagen.subset_d.no_response", question_id=question_id)
                 continue
 
             full_response = result["response"]
@@ -250,9 +260,9 @@ async def build_subset_d(
 
             # 3. Decompose into sentences
             sentences = split_sentences(full_response)
-            print(f"  Decomposed into {len(sentences)} sentences")
+            logger.info("datagen.subset_d.decomposed", question_id=question_id, sentence_count=len(sentences))
 
-            # 4. Panel labels each sentence
+            # 4. Panel labels each sentence via majority label vote
             for sent_idx, sentence in enumerate(sentences):
                 validation_context = VALIDATION_PROMPT.format(
                     question=question,
@@ -263,42 +273,52 @@ async def build_subset_d(
                 )
 
                 try:
-                    verdict = await panel.evaluate(
-                        prompt="Is this sentence label correct?",
+                    verdict = await panel.evaluate_label(
+                        prompt="Assign the correct label to this sentence.",
                         context=validation_context,
+                        valid_labels=LABELS,
                     )
                 except Exception as e:
-                    print(f"  Panel error on sentence {sent_idx}: {e}", file=sys.stderr)
+                    logger.error("datagen.subset_d.panel_error", sentence_id=sent_idx, error=str(e), exc_info=True)
                     continue
 
-                if verdict.accepted:
-                    # Extract the label from the panel's context
-                    # The panel votes YES/NO on whether the label is correct
-                    # We need to determine the actual label
-                    # Since the panel validates, we use the majority label
-                    # For simplicity, we use the first YES vote's parsed label
-                    label = _extract_label_from_verdict(verdict, validation_context)
-                    if label:
-                        accepted_items.append({
-                            "question_id": question_id,
-                            "question": question,
-                            "full_response": full_response,
-                            "sentence_id": sent_idx,
-                            "sentence_text": sentence,
-                            "retrieved_context": retrieved_context,
-                            "label": label,
-                            "verifier_note": f"Panel accepted ({verdict.yes_count}/{verdict.yes_count + verdict.no_count})",
-                        })
-                        total_sentences += 1
-                        print(f"  ✓ Sentence {sent_idx}: {label}")
-                    else:
-                        total_rejected += 1
+                if verdict.accepted and verdict.accepted_label:
+                    label = verdict.accepted_label
+                    vote_summary = ", ".join(
+                        f"{v.label or 'none'}" for v in verdict.votes
+                    )
+                    row = {
+                        "question_id": question_id,
+                        "question": question,
+                        "full_response": full_response,
+                        "sentence_id": sent_idx,
+                        "sentence_text": sentence,
+                        "retrieved_context": retrieved_context,
+                        "label": label,
+                        "verifier_note": f"Panel majority ({verdict.label_counts}; votes: {vote_summary})",
+                    }
+                    accepted_items.append(row)
+                    total_sentences += 1
+                    # Track 5/5-unanimous label items for blind injection
+                    top_count = max(verdict.label_counts.values()) if verdict.label_counts else 0
+                    if top_count == len(verdict.votes):
+                        blind_tracker.add_candidate({**row, "_panel_label": label})
+                    logger.info("datagen.subset_d.sentence_accepted", sentence_id=sent_idx, label=label)
                 else:
                     total_rejected += 1
-                    print(f"  ✗ Sentence {sent_idx} rejected")
+                    logger.info("datagen.subset_d.sentence_rejected", sentence_id=sent_idx, label_counts=dict(verdict.label_counts))
 
     finally:
         await panel.aclose()
+
+    # Write blind-injection sidecar
+    blind_tracker.write_sidecar(
+        output_path.replace(".csv", "_blind_injection.csv"),
+        fieldnames=[
+            "question_id", "question", "full_response", "sentence_id",
+            "sentence_text", "retrieved_context", "label", "verifier_note",
+        ],
+    )
 
     # 5. Write CSV
     output = Path(output_path)
@@ -321,34 +341,13 @@ async def build_subset_d(
         writer.writeheader()
         writer.writerows(accepted_items)
 
-    print(f"\n{'=' * 60}")
-    print(f"Subset D generation complete:")
-    print(f"  Questions processed: {len(questions)}")
-    print(f"  Sentences accepted:  {total_sentences}")
-    print(f"  Sentences rejected:  {total_rejected}")
-    print(f"  Output:              {output_path}")
-    print(f"{'=' * 60}")
-
-
-def _extract_label_from_verdict(verdict: Any, context: str) -> Optional[str]:
-    """Extract the NLI label from the panel verdict.
-
-    Since the panel votes YES/NO on the validation prompt, we need to
-    determine the actual label. We look for the label in the context.
-
-    Args:
-        verdict: The panel verdict.
-        context: The validation context.
-
-    Returns:
-        The label string, or None if not found.
-    """
-    # The validation prompt asks the panel to answer with the label name
-    # We check the votes for label mentions
-    for label in LABELS:
-        if label in context.lower():
-            return label
-    return None
+    logger.info(
+        "datagen.subset_d.complete",
+        questions_processed=len(questions),
+        sentences_accepted=total_sentences,
+        sentences_rejected=total_rejected,
+        output=output_path,
+    )
 
 
 def main() -> None:
@@ -371,7 +370,6 @@ def main() -> None:
         default="data/subset_d.csv",
         help="Output CSV path",
     )
-    parser._actions[0].dest = "count"  # type: ignore
     parser.add_argument(
         "--count",
         type=int,

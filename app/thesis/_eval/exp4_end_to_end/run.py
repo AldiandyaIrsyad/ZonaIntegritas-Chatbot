@@ -157,6 +157,7 @@ async def run_pipeline(
     api_url: str,
     row: SubsetARow,
     session_id: Optional[str] = None,
+    skip_guardrails: bool = False,
 ) -> PipelineResult:
     """Run the full RAG pipeline on a single query via the chat API.
 
@@ -164,6 +165,8 @@ async def run_pipeline(
         api_url: Base URL of the running application.
         row: Subset A row with question and ground truth.
         session_id: Optional session ID for the chat.
+        skip_guardrails: If True, append ``?skip_guardrails=true`` to bypass
+            IVM + RAM (baseline mode for Experiment 4).
 
     Returns:
         PipelineResult with response and parsed citations.
@@ -178,11 +181,14 @@ async def run_pipeline(
             except Exception:
                 session_id = None
 
-        # Send the message
+        # Send the message to the streaming endpoint
+        stream_url = f"/api/chat/sessions/{session_id}/stream"
+        if skip_guardrails:
+            stream_url += "?skip_guardrails=true"
         try:
             resp = await client.post(
-                f"/api/chat/sessions/{session_id}/messages",
-                json={"content": row.question},
+                stream_url,
+                json={"message": row.question},
                 timeout=120.0,
             )
             if resp.status_code != 200:
@@ -194,8 +200,9 @@ async def run_pipeline(
                     ground_truth=row.ground_truth_answer,
                 )
 
-            # The response may be NDJSON stream or plain JSON
+            # The response is an NDJSON stream
             response_text = ""
+            retrieved_context = ""
             content_type = resp.headers.get("content-type", "")
             if "application/x-ndjson" in content_type or "text/plain" in content_type:
                 for line in resp.text.strip().split("\n"):
@@ -203,9 +210,13 @@ async def run_pipeline(
                         continue
                     try:
                         chunk = json.loads(line)
-                        if chunk.get("type") == "token":
+                        chunk_type = chunk.get("type")
+                        if chunk_type == "chunk":
                             response_text += chunk.get("content", "")
-                        elif chunk.get("type") == "abstain":
+                        elif chunk_type == "context":
+                            retrieved_context = chunk.get("content", "")
+                        elif chunk_type == "error":
+                            # IVM block or pipeline rejection → abstained
                             return PipelineResult(
                                 question=row.question,
                                 response=chunk.get("content", ""),
@@ -213,6 +224,8 @@ async def run_pipeline(
                                 category=row.category,
                                 ground_truth=row.ground_truth_answer,
                             )
+                        elif chunk_type == "done":
+                            break
                     except json.JSONDecodeError:
                         response_text += line
             else:
@@ -245,8 +258,9 @@ async def run_no_guardrail_pipeline(
 ) -> PipelineResult:
     """Run the pipeline without guardrails (baseline).
 
-    This calls the same chat endpoint but with a flag to skip IVM and RAM.
-    If the API doesn't support skipping, falls back to the standard pipeline.
+    Calls the chat endpoint with ``?skip_guardrails=true`` to bypass IVM
+    (safety + relevance) and RAM (per-sentence assessment). Retrieval still
+    runs so the LLM has context.
 
     Args:
         api_url: Base URL of the running application.
@@ -256,11 +270,7 @@ async def run_no_guardrail_pipeline(
     Returns:
         PipelineResult.
     """
-    # The baseline uses the same endpoint — in a real experiment, you would
-    # either: (a) run a separate app instance with IVM/RAM disabled, or
-    # (b) add a query param to skip guardrails. For now, we call the standard
-    # pipeline and note that the baseline comparison requires a separate run.
-    return await run_pipeline(api_url, row, session_id)
+    return await run_pipeline(api_url, row, session_id, skip_guardrails=True)
 
 
 def compute_e2e_metrics(

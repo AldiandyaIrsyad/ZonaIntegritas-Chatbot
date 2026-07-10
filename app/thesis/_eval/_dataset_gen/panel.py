@@ -117,6 +117,41 @@ class EvaluatorPanel:
         )
         self._models = settings.panel_model_list
         self._threshold = settings.acceptance_threshold
+        # Models that require reasoning and cannot have it disabled.
+        # These will still work — we just don't send reasoning:{enabled:false}.
+        self._reasoning_mandatory = {
+            "google/gemini-3.1-pro-preview",
+        }
+
+    def _build_payload(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        max_tokens: int,
+    ) -> Dict[str, object]:
+        """Build the OpenRouter request payload for a panel model.
+
+        Conditionally includes ``reasoning: {enabled: false}`` for models
+        that support disabling reasoning. Models with mandatory reasoning
+        (e.g. Gemini 3.1 Pro Preview) are sent without the parameter.
+
+        Args:
+            model: Model identifier.
+            messages: Chat messages.
+            max_tokens: Maximum tokens for the response.
+
+        Returns:
+            Request payload dict.
+        """
+        payload: Dict[str, object] = {
+            "model": model,
+            "messages": messages,
+            "temperature": self._settings.panel_temperature,
+            "max_tokens": max_tokens,
+        }
+        if model not in self._reasoning_mandatory:
+            payload["reasoning"] = {"enabled": False}
+        return payload
 
     async def evaluate(
         self,
@@ -207,16 +242,11 @@ class EvaluatorPanel:
 
         response = await self._client.post(
             "/chat/completions",
-            json={
-                "model": model,
-                "messages": messages,
-                "temperature": self._settings.panel_temperature,
-                "max_tokens": 10,
-            },
+            json=self._build_payload(model, messages, max_tokens=1024),
         )
         response.raise_for_status()
         data = response.json()
-        vote_text = data["choices"][0]["message"]["content"].strip()
+        vote_text = self._extract_content(data)
 
         # Parse YES/NO
         parsed = self._parse_yes_no(vote_text)
@@ -242,6 +272,168 @@ class EvaluatorPanel:
             return False
         # Ambiguous — fail-closed
         return False
+
+    async def evaluate_label(
+        self,
+        prompt: str,
+        context: str,
+        valid_labels: List[str],
+    ) -> LabelVerdict:
+        """Evaluate a draft item by assigning a label (majority voting).
+
+        Each panel model independently assigns one of ``valid_labels`` to the
+        item. The item is accepted if >= ``acceptance_threshold`` models agree
+        on the *same* label. This is used by Subset D where each sentence must
+        be labeled (supported / partially_supported / not_supported /
+        no_source_needed) rather than voted YES/NO.
+
+        Args:
+            prompt: Evaluation prompt (instructions for the panel).
+            context: The draft item to evaluate (appended to prompt).
+            valid_labels: Allowed label strings (case-insensitive matching).
+
+        Returns:
+            LabelVerdict with per-model votes and the majority label.
+        """
+        tasks = [
+            self._evaluate_label_single(model, prompt, context, valid_labels)
+            for model in self._models
+        ]
+        votes = await asyncio.gather(*tasks, return_exceptions=True)
+
+        label_votes: List[LabelVote] = []
+        for model, result in zip(self._models, votes):
+            if isinstance(result, Exception):
+                logger.warning(
+                    "panel.label_vote.error",
+                    model=model,
+                    error=str(result),
+                )
+                label_votes.append(LabelVote(
+                    model=model,
+                    vote=f"ERROR: {result}",
+                    label="",
+                ))
+            else:
+                label_votes.append(result)
+
+        label_counts: Dict[str, int] = {}
+        for v in label_votes:
+            if v.label:
+                label_counts[v.label] = label_counts.get(v.label, 0) + 1
+
+        accepted_label: Optional[str] = None
+        accepted = False
+        if label_counts:
+            top_label, top_count = max(label_counts.items(), key=lambda x: x[1])
+            if top_count >= self._threshold:
+                accepted_label = top_label
+                accepted = True
+
+        logger.info(
+            "panel.label_verdict",
+            label_counts=label_counts,
+            accepted_label=accepted_label,
+            accepted=accepted,
+            threshold=self._threshold,
+        )
+
+        return LabelVerdict(
+            votes=label_votes,
+            label_counts=label_counts,
+            accepted_label=accepted_label,
+            accepted=accepted,
+            acceptance_threshold=self._threshold,
+        )
+
+    async def _evaluate_label_single(
+        self,
+        model: str,
+        prompt: str,
+        context: str,
+        valid_labels: List[str],
+    ) -> LabelVote:
+        """Assign a label to an item with a single panel model.
+
+        Args:
+            model: Model identifier.
+            prompt: Evaluation prompt.
+            context: Draft item context.
+            valid_labels: Allowed label strings.
+
+        Returns:
+            LabelVote with the model's assigned label.
+        """
+        labels_str = ", ".join(valid_labels)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are an evaluator. Assign exactly one label from the "
+                    f"following list: {labels_str}. "
+                    "Respond with ONLY the label name, nothing else."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"{prompt}\n\n{context}",
+            },
+        ]
+
+        response = await self._client.post(
+            "/chat/completions",
+            json=self._build_payload(model, messages, max_tokens=1024),
+        )
+        response.raise_for_status()
+        data = response.json()
+        vote_text = self._extract_content(data)
+
+        label = self._parse_label(vote_text, valid_labels)
+
+        return LabelVote(model=model, vote=vote_text, label=label)
+
+    @staticmethod
+    def _parse_label(text: str, valid_labels: List[str]) -> str:
+        """Parse a label response from the model.
+
+        Args:
+            text: Raw model response.
+            valid_labels: Allowed label strings (case-insensitive).
+
+        Returns:
+            The matched label (lowercased), or empty string if no match.
+        """
+        text_lower = text.lower().strip()
+        # Normalize: remove quotes, punctuation, whitespace
+        text_clean = re.sub(r'["\'.!,;:]', '', text_lower).strip()
+        for label in valid_labels:
+            label_lower = label.lower().strip()
+            # Exact match or the label appears as a whole word
+            if text_clean == label_lower or re.search(r'\b' + re.escape(label_lower) + r'\b', text_clean):
+                return label_lower
+        return ""
+
+    @staticmethod
+    def _extract_content(data: Dict[str, object]) -> str:
+        """Extract text content from an OpenRouter chat completion response.
+
+        Handles reasoning models that may return ``content: null`` with the
+        actual text in a ``reasoning`` field.
+
+        Args:
+            data: Parsed JSON response from OpenRouter.
+
+        Returns:
+            The response text (stripped).
+        """
+        message = data.get("choices", [{}])[0].get("message", {})
+        content = message.get("content")
+        if content and isinstance(content, str) and content.strip():
+            return content.strip()
+        reasoning = message.get("reasoning")
+        if reasoning and isinstance(reasoning, str) and reasoning.strip():
+            return reasoning.strip()
+        return ""
 
     async def aclose(self) -> None:
         """Close the HTTP client."""

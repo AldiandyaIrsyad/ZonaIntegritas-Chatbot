@@ -28,18 +28,18 @@ class LLMJudge(IJudge):
             {"role": "user", "content": f"Context:\n{context}\n\nQuery: {query}\n\nIs this relevant?"}
         ]
         
-        logger.debug("llm_judge.evaluating", query=query)
+        logger.info("llm_judge.evaluating", query=query[:100])
         try:
             response_chunks = []
             async for chunk in self.llm_connection.stream_chat(
                 model=self.model,
                 messages=messages,
-                max_tokens=10
+                max_tokens=50
             ):
                 response_chunks.append(chunk)
                 
             response_text = "".join(response_chunks).strip().upper()
-            logger.debug("llm_judge.result", query=query, response=response_text)
+            logger.info("llm_judge.result", query=query[:100], response=response_text, chunk_count=len(response_chunks))
             
             # Fail closed: if we don't get a clear YES, it's irrelevant.
             return response_text.startswith("YES")

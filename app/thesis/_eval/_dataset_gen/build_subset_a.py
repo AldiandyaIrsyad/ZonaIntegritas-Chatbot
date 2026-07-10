@@ -34,6 +34,7 @@ import httpx
 import structlog
 
 from app.thesis._eval._dataset_gen.config import DatasetGenSettings, get_dataset_gen_settings
+from app.thesis._eval._dataset_gen.concordance import BlindInjectionTracker
 from app.thesis._eval._dataset_gen.generator import DatasetGenerator
 from app.thesis._eval._dataset_gen.panel import EvaluatorPanel
 
@@ -88,21 +89,28 @@ async def fetch_kb_documents(api_url: str) -> List[Dict[str, Any]]:
         return [d for d in docs if d.get("active", True)]
 
 
-async def fetch_document_text(api_url: str, doc_id: str) -> str:
+async def fetch_document_text(api_url: str, doc_id: str, doc_title: str) -> str:
     """Fetch text content for a document by searching its chunks.
+
+    Uses the document's own title as the search query (domain-agnostic) and
+    post-filters by ``doc_id`` to ensure only this document's chunks are
+    joined. ``top_k`` is set to the API maximum (100) to maximise coverage.
 
     Args:
         api_url: Base URL of the running application.
-        doc_id: Document ID.
+        doc_id: Document ID (used as a post-filter).
+        doc_title: Document title (used as the search query).
 
     Returns:
-        Concatenated text from the document's parent chunks.
+        Concatenated text from the document's chunks, or empty string on
+        failure.
     """
+    if not doc_title:
+        return ""
     async with httpx.AsyncClient(base_url=api_url, timeout=30.0) as client:
-        # Use a broad search to retrieve chunks from this document
         response = await client.get(
             "/api/kb/search",
-            params={"q": "zona integritas", "top_k": 50},
+            params={"q": doc_title, "top_k": 100},
         )
         if response.status_code != 200:
             return ""
@@ -127,120 +135,177 @@ async def build_subset_a(
         count: Target number of accepted items.
     """
     if not settings.openrouter_api_key:
-        print("ERROR: DATAGEN_OPENROUTER_API_KEY not set.", file=sys.stderr)
+        logger.error("datagen.subset_a.missing_api_key")
         sys.exit(1)
 
     # 1. Fetch KB documents
-    print("Fetching KB documents...")
+    logger.info("datagen.subset_a.fetching_docs")
     docs = await fetch_kb_documents(api_url)
     if not docs:
-        print("ERROR: No active documents found in KB.", file=sys.stderr)
+        logger.error("datagen.subset_a.no_active_docs")
         sys.exit(1)
-    print(f"Found {len(docs)} active documents")
+    logger.info("datagen.subset_a.docs_found", count=len(docs))
 
     # 2. Initialize generator and panel
     generator = DatasetGenerator(settings)
     panel = EvaluatorPanel(settings)
+    blind_tracker = BlindInjectionTracker()
 
     accepted_items: List[Dict[str, str]] = []
     total_generated = 0
     total_rejected = 0
 
+    # Per-category targets matching skripsi Tabel 3.3 (total 85, within 80-100 range).
+    # Scaled proportionally when --count differs from 85.
+    CATEGORY_TARGETS = {"factual": 30, "procedural": 25, "multi-hop": 20, "out-of-domain": 10}
+    scale = count / sum(CATEGORY_TARGETS.values()) if count != 85 else 1.0
+    category_targets = {cat: max(1, int(t * scale)) for cat, t in CATEGORY_TARGETS.items()}
+
+    # Track accepted counts per category
+    accepted_per_category: Dict[str, int] = {cat: 0 for cat in CATEGORIES}
+
     try:
-        for doc in docs:
-            if len(accepted_items) >= count:
-                break
-
-            doc_id = doc.get("id", "")
-            doc_title = doc.get("title", "Unknown")
-            print(f"\nProcessing document: {doc_title} ({doc_id})")
-
-            # Fetch document text
-            doc_text = await fetch_document_text(api_url, doc_id)
-            if not doc_text:
-                print(f"  No text found for document {doc_id}, skipping")
-                continue
-
-            # Generate drafts for each category
-            for category in CATEGORIES:
-                if len(accepted_items) >= count:
+        # Iterate documents round-robin, generating per-category items until targets met
+        doc_cycle = 0
+        max_cycles = 5  # safety bound to avoid infinite loops if acceptance rate is low
+        while (
+            any(accepted_per_category[c] < category_targets[c] for c in CATEGORIES)
+            and len(accepted_items) < count
+            and doc_cycle < max_cycles
+        ):
+            for doc in docs:
+                if all(accepted_per_category[c] >= category_targets[c] for c in CATEGORIES):
                     break
 
-                items_per_category = max(1, count // (len(docs) * len(CATEGORIES)))
-                print(f"  Generating {items_per_category} {category} questions...")
-
-                seed_prompt = (
-                    f"Based on this document about Zona Integritas:\n\n{doc_text[:3000]}\n\n"
-                    f"Generate {items_per_category} {category} questions in Indonesian. "
-                    f"Category '{category}' means: "
+                doc_id = doc.get("id", "")
+                doc_title = doc.get("title", "Unknown")
+                logger.info(
+                    "datagen.subset_a.processing_doc",
+                    cycle=doc_cycle + 1,
+                    doc_id=doc_id,
+                    doc_title=doc_title,
                 )
-                if category == "factual":
-                    seed_prompt += "questions answerable from a single paragraph."
-                elif category == "procedural":
-                    seed_prompt += "questions about steps, processes, or procedures."
-                elif category == "multi-hop":
-                    seed_prompt += "questions requiring synthesis of multiple paragraphs."
-                else:  # out-of-domain
-                    seed_prompt += "questions OUTSIDE the ZI domain (not about bureaucratic reform)."
 
-                try:
-                    drafts = await generator.generate(
-                        seed_prompt=seed_prompt,
-                        count=items_per_category,
-                        system_prompt=GENERATOR_SYSTEM_PROMPT,
+                # Fetch document text
+                doc_text = await fetch_document_text(api_url, doc_id, doc_title)
+                if not doc_text:
+                    logger.warning(
+                        "datagen.subset_a.no_text_for_doc",
+                        doc_id=doc_id,
+                        doc_title=doc_title,
                     )
-                except Exception as e:
-                    print(f"  Generator error: {e}", file=sys.stderr)
                     continue
 
-                total_generated += len(drafts)
-
-                # Validate each draft
-                for draft in drafts:
-                    if len(accepted_items) >= count:
-                        break
-
-                    if not isinstance(draft.parsed, dict):
+                # Generate drafts for each category that still needs items
+                for category in CATEGORIES:
+                    remaining = category_targets[category] - accepted_per_category[category]
+                    if remaining <= 0:
                         continue
 
-                    item = draft.parsed
-                    question = item.get("question", "").strip()
-                    if not question:
-                        continue
-
-                    # Validate with panel
-                    validation_context = VALIDATION_PROMPT.format(
-                        question=question,
-                        category=item.get("category", category),
-                        ground_truth_answer=item.get("ground_truth_answer", ""),
-                        source_context=item.get("source_context", ""),
+                    items_per_category = min(remaining, 5)  # generate in small batches
+                    logger.info(
+                        "datagen.subset_a.generating",
+                        category=category,
+                        batch_size=items_per_category,
+                        target=category_targets[category],
+                        have=accepted_per_category[category],
                     )
 
+                    seed_prompt = (
+                        f"Based on this document about Zona Integritas:\n\n{doc_text[:3000]}\n\n"
+                        f"Generate {items_per_category} {category} questions in Indonesian. "
+                        f"Category '{category}' means: "
+                    )
+                    if category == "factual":
+                        seed_prompt += "questions answerable from a single paragraph."
+                    elif category == "procedural":
+                        seed_prompt += "questions about steps, processes, or procedures."
+                    elif category == "multi-hop":
+                        seed_prompt += "questions requiring synthesis of multiple paragraphs."
+                    else:  # out-of-domain
+                        seed_prompt += "questions OUTSIDE the ZI domain (not about bureaucratic reform)."
+
                     try:
-                        verdict = await panel.evaluate(
-                            prompt="Is this QA triplet valid and high-quality?",
-                            context=validation_context,
+                        drafts = await generator.generate(
+                            seed_prompt=seed_prompt,
+                            count=items_per_category,
+                            system_prompt=GENERATOR_SYSTEM_PROMPT,
                         )
                     except Exception as e:
-                        print(f"  Panel error: {e}", file=sys.stderr)
+                        logger.error("datagen.subset_a.generator_error", error=str(e), exc_info=True)
                         continue
 
-                    if verdict.accepted:
-                        accepted_items.append({
-                            "question": question,
-                            "category": item.get("category", category),
-                            "ground_truth_answer": item.get("ground_truth_answer", ""),
-                            "source_doc_id": doc_id if category != "out-of-domain" else "NONE",
-                            "source_context": item.get("source_context", ""),
-                        })
-                        print(f"  ✓ Accepted ({len(accepted_items)}/{count})")
-                    else:
-                        total_rejected += 1
-                        print(f"  ✗ Rejected ({verdict.yes_count}/{verdict.no_count + verdict.yes_count})")
+                    total_generated += len(drafts)
+
+                    # Validate each draft
+                    for draft in drafts:
+                        if accepted_per_category[category] >= category_targets[category]:
+                            break
+                        if len(accepted_items) >= count:
+                            break
+
+                        if not isinstance(draft.parsed, dict):
+                            continue
+
+                        item = draft.parsed
+                        question = item.get("question", "").strip()
+                        if not question:
+                            continue
+
+                        # Validate with panel
+                        validation_context = VALIDATION_PROMPT.format(
+                            question=question,
+                            category=item.get("category", category),
+                            ground_truth_answer=item.get("ground_truth_answer", ""),
+                            source_context=item.get("source_context", ""),
+                        )
+
+                        try:
+                            verdict = await panel.evaluate(
+                                prompt="Is this QA triplet valid and high-quality?",
+                                context=validation_context,
+                            )
+                        except Exception as e:
+                            logger.error("datagen.subset_a.panel_error", error=str(e), exc_info=True)
+                            continue
+
+                        if verdict.accepted:
+                            row = {
+                                "question": question,
+                                "category": item.get("category", category),
+                                "ground_truth_answer": item.get("ground_truth_answer", ""),
+                                "source_doc_id": doc_id if category != "out-of-domain" else "NONE",
+                                "source_context": item.get("source_context", ""),
+                            }
+                            accepted_items.append(row)
+                            accepted_per_category[category] += 1
+                            # Track 5/5-unanimous items for blind injection
+                            if verdict.yes_count == len(verdict.votes):
+                                blind_tracker.add_candidate({**row, "_panel_yes": verdict.yes_count})
+                            logger.info(
+                                "datagen.subset_a.accepted",
+                                category=category,
+                                accepted=accepted_per_category[category],
+                                target=category_targets[category],
+                            )
+                        else:
+                            total_rejected += 1
+                            logger.info(
+                                "datagen.subset_a.rejected",
+                                yes=verdict.yes_count,
+                                total=verdict.no_count + verdict.yes_count,
+                            )
+            doc_cycle += 1
 
     finally:
         await generator.aclose()
         await panel.aclose()
+
+    # Write blind-injection sidecar
+    blind_tracker.write_sidecar(
+        output_path.replace(".csv", "_blind_injection.csv"),
+        fieldnames=["question", "category", "ground_truth_answer", "source_doc_id", "source_context"],
+    )
 
     # 3. Write CSV
     output = Path(output_path)
@@ -254,13 +319,13 @@ async def build_subset_a(
         writer.writeheader()
         writer.writerows(accepted_items)
 
-    print(f"\n{'=' * 60}")
-    print(f"Subset A generation complete:")
-    print(f"  Generated: {total_generated}")
-    print(f"  Accepted:  {len(accepted_items)}")
-    print(f"  Rejected:  {total_rejected}")
-    print(f"  Output:    {output_path}")
-    print(f"{'=' * 60}")
+    logger.info(
+        "datagen.subset_a.complete",
+        generated=total_generated,
+        accepted=len(accepted_items),
+        rejected=total_rejected,
+        output=output_path,
+    )
 
 
 def main() -> None:

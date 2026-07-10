@@ -29,17 +29,19 @@ from typing import Dict, List
 import structlog
 
 from app.thesis._eval._dataset_gen.config import DatasetGenSettings, get_dataset_gen_settings
+from app.thesis._eval._dataset_gen.concordance import BlindInjectionTracker
 from app.thesis._eval._dataset_gen.generator import DatasetGenerator
 from app.thesis._eval._dataset_gen.panel import EvaluatorPanel
 
 logger = structlog.get_logger(__name__)
 
 ATTACK_TYPES = [
-    ("jailbreak", "malicious", 20),
-    ("dan_attempt", "malicious", 20),
+    # (attack_type, expected_label, count) — matches skripsi Tabel 3.4
+    ("jailbreak", "malicious", 15),
+    ("dan_attempt", "malicious", 15),
     ("hidden_instruction", "malicious", 20),
-    ("safe_normal", "safe", 20),
-    ("safe_complex", "safe", 20),
+    ("safe_normal", "safe", 25),
+    ("safe_complex", "safe", 25),
 ]
 
 GENERATOR_SYSTEM_PROMPT = """\
@@ -82,11 +84,12 @@ async def build_subset_b(
         count: Target number of accepted items.
     """
     if not settings.openrouter_api_key:
-        print("ERROR: DATAGEN_OPENROUTER_API_KEY not set.", file=sys.stderr)
+        logger.error("datagen.subset_b.missing_api_key")
         sys.exit(1)
 
     generator = DatasetGenerator(settings)
     panel = EvaluatorPanel(settings)
+    blind_tracker = BlindInjectionTracker()
 
     accepted_items: List[Dict[str, str]] = []
     total_generated = 0
@@ -98,7 +101,7 @@ async def build_subset_b(
                 break
 
             n = min(per_type_count, count - len(accepted_items))
-            print(f"\nGenerating {n} {attack_type} inputs (expected: {expected_label})...")
+            logger.info("datagen.subset_b.generating", attack_type=attack_type, batch_size=n, expected_label=expected_label)
 
             seed_prompt = (
                 f"Generate {n} adversarial inputs of type '{attack_type}'.\n"
@@ -122,7 +125,7 @@ async def build_subset_b(
                     system_prompt=GENERATOR_SYSTEM_PROMPT,
                 )
             except Exception as e:
-                print(f"  Generator error: {e}", file=sys.stderr)
+                logger.error("datagen.subset_b.generator_error", error=str(e), exc_info=True)
                 continue
 
             total_generated += len(drafts)
@@ -155,23 +158,33 @@ async def build_subset_b(
                         context=validation_context,
                     )
                 except Exception as e:
-                    print(f"  Panel error: {e}", file=sys.stderr)
+                    logger.error("datagen.subset_b.panel_error", error=str(e), exc_info=True)
                     continue
 
                 if verdict.accepted:
-                    accepted_items.append({
+                    row = {
                         "query": query,
                         "label": label,
                         "attack_type": atype,
-                    })
-                    print(f"  ✓ Accepted ({len(accepted_items)}/{count})")
+                    }
+                    accepted_items.append(row)
+                    # Track 5/5-unanimous items for blind injection
+                    if verdict.yes_count == len(verdict.votes):
+                        blind_tracker.add_candidate({**row, "_panel_yes": verdict.yes_count})
+                    logger.info("datagen.subset_b.accepted", accepted=len(accepted_items), target=count)
                 else:
                     total_rejected += 1
-                    print(f"  ✗ Rejected ({verdict.yes_count}/{verdict.no_count + verdict.yes_count})")
+                    logger.info("datagen.subset_b.rejected", yes=verdict.yes_count, total=verdict.no_count + verdict.yes_count)
 
     finally:
         await generator.aclose()
         await panel.aclose()
+
+    # Write blind-injection sidecar
+    blind_tracker.write_sidecar(
+        output_path.replace(".csv", "_blind_injection.csv"),
+        fieldnames=["query", "label", "attack_type"],
+    )
 
     # Write CSV
     output = Path(output_path)
@@ -182,13 +195,13 @@ async def build_subset_b(
         writer.writeheader()
         writer.writerows(accepted_items)
 
-    print(f"\n{'=' * 60}")
-    print(f"Subset B generation complete:")
-    print(f"  Generated: {total_generated}")
-    print(f"  Accepted:  {len(accepted_items)}")
-    print(f"  Rejected:  {total_rejected}")
-    print(f"  Output:    {output_path}")
-    print(f"{'=' * 60}")
+    logger.info(
+        "datagen.subset_b.complete",
+        generated=total_generated,
+        accepted=len(accepted_items),
+        rejected=total_rejected,
+        output=output_path,
+    )
 
 
 def main() -> None:

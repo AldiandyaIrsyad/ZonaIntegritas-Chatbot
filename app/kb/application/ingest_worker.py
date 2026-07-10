@@ -19,6 +19,12 @@ from app.thesis.chunking.logic import create_parent_chunks, split_into_children
 from app.thesis.chunking.models import ChildChunkData, ContentType, ParentChunkData, ParsedElement
 from app.thesis.chunking.router import classify_element
 from app.thesis.chunking.interfaces import IVLMEnricher
+from app.thesis.chunking.page_classifier import (
+    PageType,
+    classify_all_pages,
+    VLM_PAGE_EXTRACTION_PROMPT,
+)
+from app.thesis.chunking.table_converter import html_table_to_markdown
 from app.thesis.ivm.service import IVMService, IrrelevantDocumentException
 
 logger = structlog.get_logger(__name__)
@@ -100,7 +106,15 @@ class IngestWorker:
                         await self.db.commit()
                         return
 
-            # 1c. VLM enrichment — generate text descriptions for FIGURE elements
+            # 1c. Per-page hybrid routing:
+            #    - TABLE_RICH pages: convert HTML tables → Markdown in-place
+            #    - VISUAL pages: discard Unstructured garbage, send page to VLM
+            #    - TEXT_RICH/MIXED pages: keep as-is
+            elements = await self._process_pages_hybrid(elements, str(pdf_doc.pdf_path), doc_id)
+
+            # 1d. VLM enrichment — generate text descriptions for any remaining FIGURE elements
+            #     (VISUAL pages are already handled in _process_pages_hybrid;
+            #      this step covers isolated Image elements on otherwise text-rich pages)
             elements = await self._enrich_figures(elements, str(pdf_doc.pdf_path), doc_id)
 
             # 2. Pure Chunking Algorithm (Thesis)
@@ -121,6 +135,7 @@ class IngestWorker:
                 for pc in parent_chunk_data
             ]
             await self.kb_repo.save_parent_chunks(parent_chunk_models)
+            await self.db.commit()
 
             # 4. Split into children
             all_children: list[ChildChunkData] = []
@@ -129,7 +144,9 @@ class IngestWorker:
 
             if not all_children:
                 await self.kb_repo.update_ingestion_task(task.id, "completed")
-                pdf_doc.ingestion_status = "completed"  # type: ignore
+                doc = await self.kb_repo.get_pdf_by_id(doc_id)
+                if doc:
+                    doc.ingestion_status = "completed"  # type: ignore
                 await self.db.commit()
                 return
 
@@ -153,11 +170,20 @@ class IngestWorker:
                 )
                 for child, emb in zip(all_children, embeddings)
             ]
+            
+            # Check if document was deleted by user during long processing
+            current_doc = await self.kb_repo.get_pdf_by_id(doc_id)
+            if not current_doc:
+                logger.warning("kb.ingest.aborted_document_deleted", doc_id=doc_id)
+                return
+                
             await self.vector_store.upsert_chunks(chunk_vectors)
 
             # 7. Complete
             await self.kb_repo.update_ingestion_task(task.id, "completed")
-            pdf_doc.ingestion_status = "completed"  # type: ignore
+            doc = await self.kb_repo.get_pdf_by_id(doc_id)
+            if doc:
+                doc.ingestion_status = "completed"  # type: ignore
             await self.db.commit()
 
             logger.info("kb.ingest.completed", doc_id=doc_id)
@@ -174,6 +200,165 @@ class IngestWorker:
             except Exception as rollback_err:
                 logger.error("kb.ingest.status_update_failed", error=str(rollback_err))
             raise
+
+    async def _process_pages_hybrid(
+        self,
+        elements: list[ParsedElement],
+        pdf_path: str,
+        doc_id: str,
+    ) -> list[ParsedElement]:
+        """Route each PDF page to the best extraction strategy.
+
+        This is the core of the per-page hybrid routing pipeline. For every
+        page in the document:
+
+        - **TEXT_RICH / MIXED**: Keep the Unstructured elements as-is. No
+          transformation needed.
+        - **TABLE_RICH**: Convert all ``Table`` element HTML strings to
+          Markdown in-place using :func:`html_table_to_markdown`. Non-table
+          elements on the same page are kept unchanged.
+        - **VISUAL**: Unstructured output is unreliable (flowcharts, diagrams,
+          SOP pages with embedded images producing hundreds of garbage elements).
+          Discard all Unstructured elements for this page and replace them with
+          a single :class:`ParsedElement` whose text is the VLM's full-page
+          Markdown extraction. If no VLM is configured, the garbage Unstructured
+          elements are filtered out (they cannot be embedded).
+
+        The method also converts HTML tables to Markdown on TABLE_RICH pages
+        regardless of whether a VLM is available.
+
+        Args:
+            elements: Parsed elements from the document parser (all pages).
+            pdf_path: Path to the source PDF (for page image rendering).
+            doc_id: Document UUID for logging.
+
+        Returns:
+            Processed elements list with tables converted and VISUAL pages
+            replaced by VLM-extracted Markdown elements.
+        """
+        if not elements:
+            return elements
+
+        # Classify all pages from the flat element list
+        page_classifications = classify_all_pages(elements)
+
+        visual_pages = {
+            page for page, cls in page_classifications.items()
+            if cls.page_type == PageType.VISUAL
+        }
+        table_rich_pages = {
+            page for page, cls in page_classifications.items()
+            if cls.page_type == PageType.TABLE_RICH
+        }
+
+        logger.info(
+            "kb.ingest.page_routing",
+            doc_id=doc_id,
+            total_pages=len(page_classifications),
+            visual_pages=len(visual_pages),
+            table_rich_pages=len(table_rich_pages),
+        )
+
+        # Track which element pages we need to VLM-process
+        vlm_extracted_pages: set[object] = set()
+        result_elements: list[ParsedElement] = []
+        os.makedirs(self.image_dir, exist_ok=True)
+
+        for el in elements:
+            page = el.metadata.get("page_number")
+
+            # --- VISUAL page handling ---
+            if page in visual_pages:
+                # Each visual page is replaced by one VLM-extracted element.
+                # We only process the first element encounter per page.
+                if page in vlm_extracted_pages:
+                    continue  # Already processed this page, discard rest
+
+                vlm_extracted_pages.add(page)
+
+                if self.vlm_enricher is None:
+                    logger.warning(
+                        "kb.ingest.visual_page_skipped",
+                        doc_id=doc_id,
+                        page=page,
+                        reason="no_vlm_enricher",
+                    )
+                    continue  # Drop garbage elements, no VLM to replace them
+
+                image_path = self._extract_page_image(pdf_path, page or 1, doc_id)
+                if not image_path:
+                    logger.warning(
+                        "kb.ingest.visual_page_image_failed",
+                        doc_id=doc_id,
+                        page=page,
+                    )
+                    continue
+
+                try:
+                    markdown_text = await self.vlm_enricher.describe_image(
+                        image_path,
+                        prompt=VLM_PAGE_EXTRACTION_PROMPT,
+                    )
+                    if markdown_text and markdown_text.strip():
+                        result_elements.append(
+                            ParsedElement(
+                                element_type="NarrativeText",
+                                text=markdown_text.strip(),
+                                metadata={
+                                    "page_number": page,
+                                    "source": "vlm_page_extraction",
+                                },
+                            )
+                        )
+                        logger.info(
+                            "kb.ingest.visual_page_extracted",
+                            doc_id=doc_id,
+                            page=page,
+                            text_len=len(markdown_text),
+                        )
+                    else:
+                        logger.warning(
+                            "kb.ingest.visual_page_vlm_empty",
+                            doc_id=doc_id,
+                            page=page,
+                        )
+                except Exception as exc:
+                    logger.error(
+                        "kb.ingest.visual_page_vlm_failed",
+                        doc_id=doc_id,
+                        page=page,
+                        error=str(exc),
+                    )
+                continue
+
+            # --- TABLE_RICH page: convert Table HTML → Markdown in-place ---
+            if page in table_rich_pages and el.element_type == "Table":
+                html_text = el.metadata.get("text_as_html") or el.text
+                if html_text and html_text.strip():
+                    markdown = html_table_to_markdown(html_text)
+                    el = ParsedElement(
+                        element_type=el.element_type,
+                        text=markdown,
+                        metadata={**el.metadata, "text_as_html": html_text},
+                        content_type=el.content_type,
+                    )
+                    logger.debug(
+                        "kb.ingest.table_converted",
+                        doc_id=doc_id,
+                        page=page,
+                        original_len=len(html_text),
+                        markdown_len=len(markdown),
+                    )
+
+            result_elements.append(el)
+
+        logger.info(
+            "kb.ingest.page_routing_complete",
+            doc_id=doc_id,
+            input_elements=len(elements),
+            output_elements=len(result_elements),
+        )
+        return result_elements
 
     async def _enrich_figures(
         self,
