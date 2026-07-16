@@ -19,7 +19,8 @@ from typing import List, Optional
 
 import structlog
 
-from .interfaces import IEmbeddingModel, INLIModel, NLIResult, RetrievedContext
+from .interfaces import IRerankerModel, INLIModel, NLIResult, RetrievedContext
+from .text_utils import split_sentences
 
 logger = structlog.get_logger(__name__)
 
@@ -29,6 +30,22 @@ LABEL_CONTRADICTION = "contradiction"
 
 # How many contexts to include in the premise (prevents exceeding NLI max_length)
 MAX_PREMISE_CONTEXTS = 5
+
+# Max length of the evidence snippet surfaced in citation tooltips.
+EVIDENCE_SNIPPET_MAX_CHARS = 140
+
+
+def _sanitize_snippet(text: str, max_len: int = EVIDENCE_SNIPPET_MAX_CHARS) -> str:
+    """Collapse whitespace and strip characters that would break the
+    ``*(STATUS: SCORE; ...; Evidence:"...")*`` citation marker grammar,
+    then truncate for display.
+    """
+    cleaned = " ".join(text.split())
+    cleaned = cleaned.replace('"', "'")
+    cleaned = cleaned.translate(str.maketrans("", "", ";)*"))
+    if len(cleaned) > max_len:
+        cleaned = cleaned[: max_len - 1].rstrip() + "…"
+    return cleaned
 
 
 class RAMService:
@@ -44,13 +61,13 @@ class RAMService:
 
     Args:
         nli_model (INLIModel): The NLI inference client.
-        embedding_model (IEmbeddingModel): The embedding client.
+        reranker_model (IRerankerModel): The reranker client for exact premise extraction.
         enabled (bool, optional): Whether NLI assessment is enabled. Defaults to True.
     """
 
-    def __init__(self, nli_model: INLIModel, embedding_model: IEmbeddingModel, enabled: bool = True):
+    def __init__(self, nli_model: INLIModel, reranker_model: IRerankerModel, enabled: bool = True):
         self.nli_model = nli_model
-        self.embedding_model = embedding_model
+        self.reranker_model = reranker_model
         self.enabled = enabled
 
     def build_premise(self, contexts: List[RetrievedContext]) -> str:
@@ -85,16 +102,14 @@ class RAMService:
         sentence: str,
         premise: str,
         contexts: List[RetrievedContext],
-        context_embs: Optional[List[List[float]]] = None,
     ) -> NLIResult:
-        """Run NLI on a single sentence against the most relevant KB premise chunk.
-        Uses embeddings to find the most relevant chunk first, then runs NLI against it.
+        """Run NLI on a single sentence (proposition) against the most relevant KB premise chunk.
+        Uses a reranker with sliding windows to find the exact sub-chunk first, then runs NLI against it.
 
         Args:
             sentence (str): A complete sentence from the LLM's response (hypothesis).
             premise (str): The concatenated KB context string (legacy, not used for NLI).
             contexts (List[RetrievedContext]): The retrieved contexts to reverse map against.
-            context_embs (Optional[List[List[float]]]): Precomputed dense embeddings for contexts.
 
         Returns:
             NLIResult: NLIResult with canonical label and confidence scores.
@@ -113,59 +128,58 @@ class RAMService:
                 contradiction_score=0.0,
             )
 
-        best_ctx = None
-
+        best_ctx = contexts[0]
+        best_premise = best_ctx.text[:800] # Fallback
+        
         try:
-            # Reverse mapping using embeddings to find the best context FIRST
-            sentence_embs = await self.embedding_model.embed_texts([sentence])
-            if not sentence_embs:
-                return NLIResult(label=LABEL_NEUTRAL, entailment_score=0.5, contradiction_score=0.0)
-                
-            sentence_dense = sentence_embs[0]
-            
             top_contexts = contexts[:MAX_PREMISE_CONTEXTS]
             
-            if context_embs is None:
-                context_texts = [ctx.text for ctx in top_contexts]
-                context_embs = await self.embedding_model.embed_texts(context_texts)
+            # Create sliding windows of ~2-3 sentences for precise reranking
+            windows: List[str] = []
+            window_to_ctx: List[RetrievedContext] = []
             
-            if not context_embs or len(context_embs) != len(top_contexts):
+            for ctx in top_contexts:
+                # Split into sentence-like units for windowing (guards
+                # against markdown list markers being mistaken for
+                # sentence ends; see text_utils.split_sentences).
+                sentences = [
+                    s if s.endswith((".", "?", "!")) else s + "."
+                    for s in split_sentences(ctx.text)
+                ]
+                # Group into windows of 3 sentences with 1 sentence overlap
+                if not sentences:
+                    windows.append(ctx.text)
+                    window_to_ctx.append(ctx)
+                    continue
+                    
+                window_size = 3
+                step = 2
+                for i in range(0, max(1, len(sentences)), step):
+                    window = " ".join(sentences[i:i + window_size])
+                    if len(window) > 20: # skip tiny fragments
+                        windows.append(window)
+                        window_to_ctx.append(ctx)
+            
+            if not windows:
                 return NLIResult(label=LABEL_NEUTRAL, entailment_score=0.5, contradiction_score=0.0)
 
-            best_idx = 0
-            best_score = -1.0
+            # Rerank windows against the hypothesis sentence
+            rerank_results = await self.reranker_model.rerank(
+                query=sentence,
+                documents=windows,
+                top_k=1
+            )
             
-            for i, c_dense in enumerate(context_embs):
-                # Cosine similarity
-                dot_product = sum(a * b for a, b in zip(sentence_dense, c_dense))
-                norm_a = math.sqrt(sum(a * a for a in sentence_dense))
-                norm_b = math.sqrt(sum(b * b for b in c_dense))
-                
-                if norm_a == 0 or norm_b == 0:
-                    score = 0.0
-                else:
-                    score = dot_product / (norm_a * norm_b)
+            if rerank_results:
+                top_result = rerank_results[0]
+                best_idx = top_result.index
+                if best_idx < len(windows):
+                    best_premise = windows[best_idx]
+                    best_ctx = window_to_ctx[best_idx]
                     
-                if score > best_score:
-                    best_score = score
-                    best_idx = i
-                    
-            best_ctx = top_contexts[best_idx]
-            
         except Exception as e:
-            logger.warning("Failed to reverse map citation: %s", str(e), exc_info=True)
+            logger.warning("Failed to reverse map citation with reranker: %s", str(e), exc_info=True)
             return NLIResult(label=LABEL_NEUTRAL, entailment_score=0.5, contradiction_score=0.0)
-
-        # Now run NLI using ONLY the best context text as the premise
-        best_premise = best_ctx.text
-        if len(best_premise) > 800:
-            s = difflib.SequenceMatcher(None, best_premise, sentence)
-            match = s.find_longest_match(0, len(best_premise), 0, len(sentence))
-            
-            window_size = 600
-            start_idx = max(0, match.a - window_size // 2)
-            end_idx = min(len(best_premise), match.a + match.size + window_size // 2)
-            best_premise = best_premise[start_idx:end_idx]
 
         logger.debug(
             "Assessing sentence (%d chars) against best context premise (%d chars)",
@@ -178,9 +192,11 @@ class RAMService:
             
             # NLIResult is frozen, use dataclasses.replace to attach metadata
             return dataclasses.replace(
-                result, 
-                source_title=best_ctx.source_title, 
-                page=best_ctx.page
+                result,
+                source_title=best_ctx.source_title,
+                page=best_ctx.page,
+                doc_id=best_ctx.doc_id,
+                evidence_snippet=_sanitize_snippet(best_premise),
             )
         except Exception as e:
             logger.warning("NLI check failed: %s", str(e), exc_info=True)

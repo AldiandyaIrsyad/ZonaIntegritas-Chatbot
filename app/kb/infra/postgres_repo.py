@@ -9,7 +9,7 @@ from sqlalchemy.future import select
 from sqlalchemy.orm import joinedload
 
 from app.kb.domain.interfaces import IKBRepository
-from app.kb.domain.models import PDFDocument, ParentChunk, IngestionTask
+from app.kb.domain.models import PDFDocument, ParentChunk, IngestionTask, ChildChunk
 
 logger = structlog.get_logger(__name__)
 
@@ -100,6 +100,58 @@ class PostgresKBRepository(IKBRepository):
         await self.db.flush()
         logger.info("kb.repository.chunks_deleted", count=count, doc_id=doc_id)
         return count
+
+    async def save_child_chunks(self, chunks: List[ChildChunk]) -> List[ChildChunk]:
+        """Persist child chunk records to the database."""
+        if not chunks:
+            return []
+        self.db.add_all(chunks)
+        await self.db.flush()
+        logger.info("kb.repository.child_chunks_saved", count=len(chunks))
+        return chunks
+
+    async def get_child_chunks_by_ids(self, chunk_ids: List[str]) -> List[ChildChunk]:
+        """Fetch child chunks by their primary key IDs."""
+        if not chunk_ids:
+            return []
+        result = await self.db.execute(
+            select(ChildChunk).where(ChildChunk.id.in_(chunk_ids))
+        )
+        return list(result.scalars().all())
+
+    async def get_child_chunks_by_parent_ids(self, parent_ids: List[str]) -> List[ChildChunk]:
+        """Fetch child chunks by their parent chunk IDs, ordered by ordinal."""
+        if not parent_ids:
+            return []
+        result = await self.db.execute(
+            select(ChildChunk)
+            .where(ChildChunk.parent_chunk_id.in_(parent_ids))
+            .order_by(ChildChunk.parent_chunk_id, ChildChunk.ordinal)
+        )
+        return list(result.scalars().all())
+
+    async def get_sibling_chunks(self, parent_id: str) -> List[ParentChunk]:
+        """Fetch sibling parent chunks sharing the same parent_id."""
+        result = await self.db.execute(
+            select(ParentChunk)
+            .where(ParentChunk.parent_id == parent_id)
+            .order_by(ParentChunk.ordinal)
+        )
+        return list(result.scalars().all())
+
+    async def get_chunks_by_path_prefix(self, path_prefix: str) -> List[ParentChunk]:
+        """Fetch parent chunks whose path starts with the given prefix.
+
+        Uses LIKE 'prefix%' which works on both Postgres and SQLite.
+        """
+        if not path_prefix:
+            return []
+        result = await self.db.execute(
+            select(ParentChunk)
+            .where(ParentChunk.path.like(f"{path_prefix}%"))
+            .order_by(ParentChunk.ordinal)
+        )
+        return list(result.scalars().all())
 
     async def create_ingestion_task(self, doc_id: str) -> IngestionTask:
         task = IngestionTask(doc_id=doc_id, status="pending")

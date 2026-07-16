@@ -2,7 +2,7 @@
 JSON API endpoints for the Chat module.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any
@@ -42,9 +42,19 @@ async def delete_session(session_id: str, service: ChatService = Depends(get_cha
     return {"status": "success"}
 
 @router.post("/api/chat/sessions/{session_id}/stream")
-async def chat_stream(session_id: str, request: ChatRequest, service: ChatService = Depends(get_chat_service)) -> Any:
-    """Stream a chat response from the LLM, passing through IVM and RAM."""
+async def chat_stream(
+    session_id: str,
+    request: ChatRequest,
+    skip_guardrails: bool = Query(default=False, description="Skip IVM + RAM (baseline mode)"),
+    service: ChatService = Depends(get_chat_service),
+) -> Any:
+    """Stream a chat response from the LLM, passing through IVM and RAM.
+
+    When ``skip_guardrails`` is true, the IVM safety/relevance checks and the
+    RAM per-sentence assessment are bypassed (baseline mode for Experiment 4).
+    Retrieval still runs so the LLM has context.
+    """
     return StreamingResponse(
-        service.process_chat_message(session_id, request.message),
+        service.process_chat_message(session_id, request.message, skip_guardrails=skip_guardrails),
         media_type="application/x-ndjson"
     )

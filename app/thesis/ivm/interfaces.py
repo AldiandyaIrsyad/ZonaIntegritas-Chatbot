@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Protocol
+from typing import List, Protocol, AsyncIterator, Any, Dict
 
 
 @dataclass(frozen=True)
@@ -17,19 +17,19 @@ class ISafetyModel(Protocol):
         ...
 
 
-class IRelevanceStrategy(Protocol):
-    """Strategy for evaluating query relevance against a list of similarity scores."""
+class ILLMJudgeConnection(Protocol):
+    """Structural contract for an LLM connection used by the judge.
     
-    def evaluate(self, scores: List[float], similarity_threshold: float) -> bool:
-        """Evaluates relevance based purely on a list of floating point scores.
-        
-        Args:
-            scores: List of similarity scores (e.g. cosine similarities).
-            similarity_threshold: The configured relevance threshold.
-            
-        Returns:
-            bool: True if relevant, False if irrelevant/flagged.
-        """
+    This breaks the dependency on the chat module's ILLMConnection.
+    """
+
+    def stream_chat(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        max_tokens: int = 100,
+    ) -> AsyncIterator[str]:
+        """Stream a chat completion."""
         ...
 
 
@@ -38,12 +38,37 @@ class IJudge(Protocol):
 
     async def evaluate_relevance(self, query: str, context: str) -> bool:
         """Evaluate if the given query is relevant to the provided context.
-        
+
         Args:
             query: The user query to evaluate.
             context: The text context to check relevance against.
-            
+
         Returns:
             bool: True if the query is relevant to the context, False otherwise.
+        """
+        ...
+
+
+class IRelevanceChecker(Protocol):
+    """Structural contract for an OOD/relevance decision backend.
+
+    Used by ``RelevanceService`` to decide whether a user query is in-domain.
+    Implementations live in ``app/thesis/ivm/checkers.py``.
+    """
+
+    async def check_query(
+        self, query: str, context_chunks: List[str], context_scores: List[float]
+    ) -> bool:
+        """Decide whether a user query is in-domain.
+
+        Args:
+            query: The user's raw query text.
+            context_chunks: Text of the top retrieved KB contexts for this query.
+            context_scores: Similarity scores (same order) already computed
+                by retrieval, so implementations that only need scores can
+                skip re-embedding/re-searching.
+
+        Returns:
+            bool: True if the query is relevant/in-domain.
         """
         ...

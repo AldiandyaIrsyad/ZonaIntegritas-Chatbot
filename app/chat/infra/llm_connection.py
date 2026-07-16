@@ -35,18 +35,47 @@ class LLMConnection(ILLMConnection):
         model: str,
         messages: List[Dict[str, str]],
         max_tokens: int,
+        temperature: float = 0.0,
     ) -> AsyncIterator[str]:
-        logger.debug("chat.llm.stream_start", model=model, message_count=len(messages), max_tokens=max_tokens)
+        """Stream a chat completion, handling reasoning models.
+
+        Reasoning models (e.g. Gemini 2.5 Flash, GLM 5.2) may return
+        `content: null` with the actual text in a `reasoning` field.
+        We disable reasoning via `extra_body` when possible and fall
+        back to the `reasoning` delta when `content` is absent.
+
+        Args:
+            model: Model identifier.
+            messages: Chat messages.
+            max_tokens: Maximum tokens for the response.
+            temperature: Sampling temperature.
+
+        Yields:
+            Response text chunks.
+        """
+        logger.debug("chat.llm.stream_start", model=model, message_count=len(messages), max_tokens=max_tokens, temperature=temperature)
         try:
             stream = await self._client.chat.completions.create(
                 model=model,
-                messages=messages,  # type: ignore
+                messages=messages,  
                 max_tokens=max_tokens,
+                temperature=temperature,
                 stream=True,
+                extra_body={"reasoning": {"enabled": False}},
             )
             async for chunk in stream:  # type: ignore[union-attr]
-                if chunk.choices and chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                # Primary: content field (non-reasoning models or reasoning disabled)
+                content = getattr(delta, "content", None)
+                if content:
+                    yield content
+                else:
+                    # Fallback: reasoning field (models where reasoning can't be disabled)
+                    reasoning = getattr(delta, "reasoning", None)
+                    if reasoning:
+                        yield reasoning
         except APIConnectionError as exc:
             logger.error("chat.llm.connection_error", model=model, error=str(exc))
             raise
@@ -58,6 +87,65 @@ class LLMConnection(ILLMConnection):
             raise
 
         logger.debug("chat.llm.stream_end", model=model)
+
+    async def generate(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        max_tokens: int,
+        temperature: float = 0.0,
+    ) -> str:
+        """Generate a complete (non-streaming) chat completion.
+
+        Used for tasks requiring the full response before proceeding
+        (e.g. HyDE hypothetical document generation). Uses ``stream=False``
+        on the same AsyncOpenAI client.
+
+        Args:
+            model: Model identifier.
+            messages: Chat messages.
+            max_tokens: Maximum tokens for the response.
+            temperature: Sampling temperature.
+
+        Returns:
+            The full response text.
+        """
+        logger.debug(
+            "chat.llm.generate_start",
+            model=model,
+            message_count=len(messages),
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        try:
+            response = await self._client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stream=False,
+                extra_body={"reasoning": {"enabled": False}},
+            )
+            content = response.choices[0].message.content  # type: ignore[union-attr]
+            if content:
+                return content
+            # Fallback: reasoning field (models where reasoning can't be disabled)
+            reasoning = getattr(response.choices[0].message, "reasoning", None)  # type: ignore[union-attr]
+            return reasoning or ""
+        except APIConnectionError as exc:
+            logger.error("chat.llm.connection_error", model=model, error=str(exc))
+            raise
+        except APIError as exc:
+            logger.error(
+                "chat.llm.api_error",
+                model=model,
+                status_code=getattr(exc, "status_code", None),
+                error=str(exc),
+            )
+            raise
+        except Exception as exc:
+            logger.error("chat.llm.unexpected_error", model=model, error=str(exc))
+            raise
 
     async def close(self) -> None:
         await self._client.close()

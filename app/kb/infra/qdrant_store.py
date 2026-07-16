@@ -44,6 +44,7 @@ class QdrantStore(IVectorStore):
                 ("is_active", PayloadSchemaType.BOOL),
                 ("session_id", PayloadSchemaType.KEYWORD),
                 ("doc_id", PayloadSchemaType.KEYWORD),
+                ("content_type", PayloadSchemaType.KEYWORD),
             ]:
                 await self._client.create_payload_index(
                     collection_name=self.collection_name,
@@ -72,6 +73,8 @@ class QdrantStore(IVectorStore):
                 "doc_id": chunk.doc_id,
                 "is_active": True,
                 "breadcrumbs": chunk.breadcrumbs,
+                "content_type": chunk.content_type,
+                "text": chunk.text,
             }
             if chunk.session_id:
                 payload["session_id"] = chunk.session_id
@@ -91,7 +94,22 @@ class QdrantStore(IVectorStore):
         sparse_values: List[float],
         top_k: int = 15,
         session_id: Optional[str] = None,
+        mode: str = "hybrid",
     ) -> List[SearchResult]:
+        """Search the vector store using dense, sparse, or hybrid retrieval.
+
+        Args:
+            dense_vector: Dense embedding vector (BGE-M3, 1024-dim).
+            sparse_indices: Sparse BM25 token indices.
+            sparse_values: Sparse BM25 token weights.
+            top_k: Maximum number of results to return.
+            session_id: Optional session scope filter.
+            mode: Retrieval mode — "hybrid" (RRF fusion), "dense" (dense only),
+                or "sparse" (sparse/BM25 only).
+
+        Returns:
+            List of SearchResult ordered by relevance score.
+        """
         if top_k <= 0:
             return []
 
@@ -103,11 +121,19 @@ class QdrantStore(IVectorStore):
 
         active_filter = Filter(must=must_conditions)
 
-        if not sparse_indices:
+        if mode == "dense" or not sparse_indices:
             results = await self._client.query_points(
                 collection_name=self.collection_name,
                 query=dense_vector,
                 using="dense",
+                query_filter=active_filter,
+                limit=top_k,
+            )
+        elif mode == "sparse":
+            results = await self._client.query_points(
+                collection_name=self.collection_name,
+                query=SparseVector(indices=sparse_indices, values=sparse_values),
+                using="bm25",
                 query_filter=active_filter,
                 limit=top_k,
             )
