@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from pydantic import BaseModel
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, JSON
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, String, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.shared.db import Base
@@ -68,7 +68,73 @@ class ParentChunk(Base):
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
+    # ltree hierarchy fields
+    parent_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("parent_chunks.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    path: Mapped[str] = mapped_column(String, default="", server_default="", nullable=False, index=True)
+    depth: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+
     document = relationship("PDFDocument", back_populates="parent_chunks")
+    children = relationship(
+        "ChildChunk",
+        back_populates="parent",
+        cascade="all, delete-orphan",
+        foreign_keys="ChildChunk.parent_chunk_id",
+    )
+
+
+class ChildChunk(Base):
+    """Stores sentence-level child chunks for vector search.
+
+    Child chunks are the unit of vector search in Qdrant. When a child
+    matches a query, its parent's full text is retrieved for LLM context
+    (Small-to-Big retrieval). Persisting child text in Postgres enables
+    chunk-level cross-encoder reranking and sibling/cross-ref lookups
+    without a Qdrant round-trip.
+
+    Attributes:
+        parent_chunk_id: FK to the parent chunk this child belongs to.
+        ordinal: Position within the parent chunk.
+        path: ltree-style dot path (parent path + ".c" + ordinal).
+        content_type: Structural type inherited from the parent.
+    """
+    __tablename__ = "child_chunks"
+    __table_args__ = (
+        Index("ix_child_chunks_path", "path"),
+        Index("ix_child_chunks_parent_chunk_id", "parent_chunk_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    parent_chunk_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("parent_chunks.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    doc_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("pdf_documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    path: Mapped[str] = mapped_column(String, default="", server_default="", nullable=False)
+    page: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    content_type: Mapped[str] = mapped_column(
+        String, default="text", server_default="text", nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    parent = relationship(
+        "ParentChunk",
+        back_populates="children",
+        foreign_keys=[parent_chunk_id],
+    )
 
 
 class IngestionTask(Base):
@@ -105,4 +171,8 @@ class RetrievedContext(BaseModel):
     breadcrumbs: List[str] = []
     content_type: str = "text"
     dense_vector: Optional[List[float]] = None
+    # ltree hierarchy fields
+    child_text: Optional[str] = None
+    path: str = ""
+    depth: int = 0
     

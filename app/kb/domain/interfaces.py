@@ -1,6 +1,6 @@
 from typing import Protocol, List, Optional, Any, Dict
 from dataclasses import dataclass
-from app.kb.domain.models import PDFDocument, ParentChunk, IngestionTask
+from app.kb.domain.models import PDFDocument, ParentChunk, IngestionTask, ChildChunk
 from app.thesis.chunking.models import ParsedElement
 
 class IDocumentParser(Protocol):
@@ -21,6 +21,29 @@ class ITextEmbedder(Protocol):
     """Protocol for generating text embeddings (dense and sparse)."""
     async def embed_texts(self, texts: List[str]) -> List[EmbeddingResult]:
         ...
+    async def close(self) -> None:
+        ...
+
+
+class IQueryExpander(Protocol):
+    """Protocol for query expansion (e.g. HyDE).
+
+    Implementations generate a hypothetical document from the user's raw
+    query. The expanded text is then embedded instead of the raw query to
+    improve retrieval recall (HyDE — Hypothetical Document Embeddings).
+    """
+
+    async def expand(self, query: str) -> str:
+        """Generate an expanded/hypothetical document for the query.
+
+        Args:
+            query: The user's raw search query.
+
+        Returns:
+            A hypothetical answer document text to be embedded for retrieval.
+        """
+        ...
+
     async def close(self) -> None:
         ...
 
@@ -64,6 +87,7 @@ class ChunkVector:
     breadcrumbs: List[str]
     content_type: str = "text"
     session_id: Optional[str] = None
+    text: str = ""
 
 @dataclass
 class SearchResult:
@@ -104,11 +128,17 @@ class IKBRepository(Protocol):
     async def create_pdf(self, title: str, description: str, pdf_path: str) -> PDFDocument: ...
     async def update_pdf_active_status(self, pdf_id: str, active: bool) -> Optional[PDFDocument]: ...
     async def delete_pdf(self, pdf_id: str) -> bool: ...
-    
+
     async def save_parent_chunks(self, chunks: List[ParentChunk]) -> List[ParentChunk]: ...
     async def get_parent_chunks_by_ids(self, chunk_ids: List[str]) -> List[ParentChunk]: ...
     async def delete_parent_chunks_by_doc_id(self, doc_id: str) -> int: ...
-    
+
+    async def save_child_chunks(self, chunks: List[ChildChunk]) -> List[ChildChunk]: ...
+    async def get_child_chunks_by_ids(self, chunk_ids: List[str]) -> List[ChildChunk]: ...
+    async def get_child_chunks_by_parent_ids(self, parent_ids: List[str]) -> List[ChildChunk]: ...
+    async def get_sibling_chunks(self, parent_id: str) -> List[ParentChunk]: ...
+    async def get_chunks_by_path_prefix(self, path_prefix: str) -> List[ParentChunk]: ...
+
     async def create_ingestion_task(self, doc_id: str) -> IngestionTask: ...
     async def update_ingestion_task(self, task_id: str, status: str, error_message: Optional[str] = None) -> Optional[IngestionTask]: ...
     async def get_ingestion_task_by_doc_id(self, doc_id: str) -> Optional[IngestionTask]: ...

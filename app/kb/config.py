@@ -16,6 +16,10 @@ def get_qdrant_settings() -> QdrantSettings: return QdrantSettings()
 class UnstructuredSettings(BaseSettings):
     base_url: str = Field(default="http://localhost:8001")
     port: int = Field(default=8001)
+    api_key: str = Field(
+        default="",
+        description="API key for Unstructured Cloud (Bearer token). Empty for local self-hosted.",
+    )
     extract_images: bool = Field(
         default=True,
         description="Whether to extract image/figure elements during PDF parsing.",
@@ -94,6 +98,14 @@ class VLMSettings(BaseSettings):
         default=True,
         description="Master toggle. If False, figures are skipped (no enrichment).",
     )
+    page_image_ratio_threshold: float = Field(
+        default=0.5,
+        description="Min fraction of a page's elements that must be images for VISUAL page classification.",
+    )
+    page_garbage_ratio_threshold: float = Field(
+        default=0.7,
+        description="Min fraction of a page's image elements with garbage (<=3 char) OCR text for VISUAL classification.",
+    )
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="VLM_", extra="ignore")
 
@@ -106,3 +118,5 @@ def get_vlm_settings() -> VLMSettings:
         VLMSettings: The cached settings instance.
     """
     return VLMSettings()
+
+

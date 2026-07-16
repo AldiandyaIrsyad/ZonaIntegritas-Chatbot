@@ -5,6 +5,7 @@ from typing import AsyncGenerator
 
 import structlog
 from fastapi import FastAPI
+from sqlalchemy import text
 
 from app.shared.config import get_app_settings
 from app.shared.logging import setup_logging
@@ -31,9 +32,55 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     
     # Initialize DB schema
     async with engine.begin() as conn:
+        # Create ltree extension on Postgres (no-op on SQLite)
+        if engine.dialect.name == "postgresql":
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS ltree"))
+
         await conn.run_sync(Base.metadata.create_all)
 
-    # Initialize Qdrant Collection
+        # Guarded ALTER TABLE: add new ltree columns to existing parent_chunks table
+        # (create_all won't alter existing tables)
+        if engine.dialect.name == "postgresql":
+            result = await conn.execute(text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'parent_chunks'"
+            ))
+            existing_cols = {row[0] for row in result}
+            new_cols = {
+                "parent_id": "VARCHAR REFERENCES parent_chunks(id) ON DELETE SET NULL",
+                "ordinal": "INTEGER DEFAULT 0",
+                "path": "VARCHAR DEFAULT ''",
+                "depth": "INTEGER DEFAULT 0",
+            }
+            for col_name, col_def in new_cols.items():
+                if col_name not in existing_cols:
+                    await conn.execute(text(
+                        f"ALTER TABLE parent_chunks ADD COLUMN {col_name} {col_def}"
+                    ))
+                    logger.info("db.alter_table", table="parent_chunks", column=col_name)
+
+            # Guarded ALTER TABLE: add RAG context/sources columns to existing
+            # messages table. JSONB here matches how SQLAlchemy's generic
+            # JSON model column type maps under the Postgres dialect, so
+            # fresh-DB create_all and this guarded ALTER produce the same
+            # schema.
+            result = await conn.execute(text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'messages'"
+            ))
+            existing_msg_cols = {row[0] for row in result}
+            new_msg_cols = {
+                "context": "TEXT",
+                "sources": "JSONB DEFAULT NULL",
+            }
+            for col_name, col_def in new_msg_cols.items():
+                if col_name not in existing_msg_cols:
+                    await conn.execute(text(
+                        f"ALTER TABLE messages ADD COLUMN {col_name} {col_def}"
+                    ))
+                    logger.info("db.alter_table", table="messages", column=col_name)
+
+    # Initialize Qdrant collection (main retrieval)
     kb_config = get_qdrant_settings()
     qdrant_store = QdrantStore(
         host=kb_config.host,

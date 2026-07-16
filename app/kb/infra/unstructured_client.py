@@ -2,6 +2,8 @@
 
 import os
 import time
+import asyncio
+import json
 import httpx
 import structlog
 from typing import List
@@ -20,16 +22,23 @@ class UnstructuredClient(IDocumentParser):
     in their metadata. These are later enriched by a VLM during ingestion.
     """
 
-    def __init__(self, base_url: str, extract_images: bool = True) -> None:
+    def __init__(self, base_url: str, extract_images: bool = True, api_key: str = "") -> None:
+        headers: dict[str, str] = {"accept": "application/json"}
+        if api_key:
+            # Unstructured API uses a custom header, not Authorization: Bearer
+            headers["unstructured-api-key"] = api_key
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             timeout=httpx.Timeout(900.0, connect=30.0),
+            headers=headers,
         )
         self._extract_images = extract_images
+        self._api_key = api_key
         logger.info(
             "UnstructuredClient initialized",
             base_url=base_url,
             extract_images=extract_images,
+            auth="cloud" if api_key else "local",
         )
 
     async def parse_pdf(self, file_path: str) -> List[ParsedElement]:
@@ -50,14 +59,10 @@ class UnstructuredClient(IDocumentParser):
             form_data["extract_image_block_to_payload"] = "false"
 
         try:
-            with open(resolved, "rb") as fh:
-                response = await self._client.post(
-                    "/general/v0/general",
-                    files={"files": (filename, fh, "application/pdf")},
-                    data=form_data,
-                )
-            response.raise_for_status()
-            raw_output = response.json()
+            if self._api_key:
+                raw_output = await self._parse_pdf_cloud(resolved, filename, log)
+            else:
+                raw_output = await self._parse_pdf_local(resolved, filename, log)
         except Exception as exc:
             log.error("parse.failed", error=str(exc))
             raise
@@ -111,6 +116,137 @@ class UnstructuredClient(IDocumentParser):
             execution_time_sec=round(time.perf_counter() - start_time, 2)
         )
         return elements
+
+    async def _parse_pdf_local(
+        self, resolved: str, filename: str, log: structlog.BoundLogger
+    ) -> list:
+        """Parse PDF using local Docker Unstructured API (synchronous).
+
+        Args:
+            resolved: Absolute path to the PDF file.
+            filename: Base name of the file.
+            log: Bound structlog logger.
+
+        Returns:
+            List of raw element dicts from the Unstructured API.
+        """
+        strategy = "hi_res"
+        form_data: dict[str, str] = {"strategy": strategy}
+        if self._extract_images:
+            form_data["extract_image_block_types"] = '["Image", "Table"]'
+            form_data["extract_image_block_to_payload"] = "false"
+
+        with open(resolved, "rb") as fh:
+            response = await self._client.post(
+                "/general/v0/general",
+                files={"files": (filename, fh, "application/pdf")},
+                data=form_data,
+            )
+        response.raise_for_status()
+        return response.json()
+
+    async def _parse_pdf_cloud(
+        self, resolved: str, filename: str, log: structlog.BoundLogger
+    ) -> list:
+        """Parse PDF using Unstructured Platform API (job-based async).
+
+        Implements the 3-step job pattern:
+        1. POST /jobs/ to create a partitioning job.
+        2. Poll GET /jobs/{job_id} until status is COMPLETED.
+        3. Download results from GET /jobs/{job_id}/download?file_id={file_id}.
+
+        Args:
+            resolved: Absolute path to the PDF file.
+            filename: Base name of the file.
+            log: Bound structlog logger.
+
+        Returns:
+            List of raw element dicts from the Unstructured Platform API.
+        """
+        # Step 1: Create the job
+        settings: dict = {"strategy": "hi_res"}
+        if self._extract_images:
+            settings["extract_image_block_types"] = ["Image", "Table"]
+            settings["pdf_infer_table_structure"] = True
+
+        request_data = json.dumps({
+            "job_nodes": [
+                {
+                    "name": "Partitioner",
+                    "type": "partition",
+                    "subtype": "unstructured_api",
+                    "settings": settings,
+                }
+            ]
+        })
+
+        with open(resolved, "rb") as fh:
+            response = await self._client.post(
+                "/jobs/",
+                data={"request_data": request_data},
+                files={"input_files": (filename, fh, "application/pdf")},
+            )
+        response.raise_for_status()
+        job_data = response.json()
+        job_id = job_data["id"]
+        log.info("unstructured.job.created", job_id=job_id)
+
+        # Step 2: Poll until completed
+        poll_interval = 5.0
+        max_wait = 900.0  # 15 minutes
+        elapsed = 0.0
+        while True:
+            response = await self._client.get(f"/jobs/{job_id}")
+            response.raise_for_status()
+            job_data = response.json()
+            status = job_data.get("status", "")
+            log.info(
+                "unstructured.job.poll",
+                job_id=job_id,
+                status=status,
+                elapsed_sec=round(elapsed, 1),
+            )
+            if status == "COMPLETED":
+                break
+            if status in ("FAILED", "STOPPED"):
+                raise RuntimeError(
+                    f"Unstructured job {job_id} ended with status: {status}"
+                )
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+            if elapsed >= max_wait:
+                raise TimeoutError(
+                    f"Unstructured job {job_id} timed out after {max_wait}s"
+                )
+
+        # Step 3: Download results
+        output_files = job_data.get("output_node_files") or []
+        if not output_files:
+            raise RuntimeError(
+                f"Unstructured job {job_id} completed but produced no output files"
+            )
+
+        all_elements: list = []
+        for file_info in output_files:
+            file_id = file_info["file_id"]
+            response = await self._client.get(
+                f"/jobs/{job_id}/download",
+                params={"file_id": file_id},
+            )
+            response.raise_for_status()
+            downloaded = response.json()
+            if isinstance(downloaded, list):
+                all_elements.extend(downloaded)
+            else:
+                all_elements.append(downloaded)
+
+        log.info(
+            "unstructured.job.downloaded",
+            job_id=job_id,
+            output_files=len(output_files),
+            total_elements=len(all_elements),
+        )
+        return all_elements
 
     async def close(self) -> None:
         await self._client.aclose()

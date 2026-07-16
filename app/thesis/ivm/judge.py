@@ -14,11 +14,14 @@ class LLMJudge(IJudge):
         self.llm_connection = llm_connection
         self.model = model
         self.system_prompt = (
-            "You are a strict relevance judge. Your task is to determine if a given query "
-            "is relevant to the provided context. "
-            "Reply with exactly 'YES' if the query is relevant and can be answered using the context. "
-            "Reply with exactly 'NO' if the query is entirely irrelevant, malicious, or cannot be answered "
-            "using the provided context."
+            "You are a relevance judge for a retrieval-augmented QA system. Your "
+            "task is to determine if a given query is on the same topic or domain "
+            "as the provided context, even if the context does not fully or "
+            "directly answer it. "
+            "Reply with exactly 'YES' if the query relates to the same subject "
+            "matter as the context. "
+            "Reply with exactly 'NO' only if the query is about a clearly "
+            "unrelated topic, or is malicious/nonsensical."
         )
 
     async def evaluate_relevance(self, query: str, context: str) -> bool:

@@ -1,23 +1,23 @@
-from .interfaces import IRelevanceStrategy, ISafetyModel, SafetyResult
-from .service import (
-    IrrelevantDocumentException,
-    IrrelevantQueryException,
-    IVMException,
-    IVMService,
-    MaliciousPromptException,
+from .interfaces import (
+    IRelevanceChecker,
+    ISafetyModel,
+    SafetyResult,
 )
-from .strategies import SilhouetteKNNStrategy, StrictRelevanceStrategy, TopOneStrategy
+from .service import IVMException, IVMService, MaliciousPromptException
+from .relevance_service import (
+    IrrelevantQueryException,
+    RelevanceException,
+    RelevanceService,
+)
 
 __all__ = [
-    "IRelevanceStrategy",
+    "IRelevanceChecker",
     "ISafetyModel",
     "SafetyResult",
     "IVMException",
     "MaliciousPromptException",
+    "RelevanceException",
     "IrrelevantQueryException",
-    "IrrelevantDocumentException",
     "IVMService",
-    "TopOneStrategy",
-    "SilhouetteKNNStrategy",
-    "StrictRelevanceStrategy",
+    "RelevanceService",
 ]

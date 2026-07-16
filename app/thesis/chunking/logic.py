@@ -13,9 +13,10 @@ Content-type aware:
   chunk so every child is independently embeddable.
 - Figures: VLM descriptions split at sentence boundaries if long.
 """
+import re
 import uuid
 import structlog
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -31,9 +32,85 @@ from .router import (
 logger = structlog.get_logger(__name__)
 
 # Default chunking parameters
-DEFAULT_PARENT_MAX_CHARS = 2000
+DEFAULT_PARENT_MAX_CHARS = 4096
 DEFAULT_CHILD_MAX_CHARS = 512
 DEFAULT_CHILD_OVERLAP_CHARS = 50
+
+# Minimum child text length — chunks shorter than this are treated as
+# gibberish (no meaningful context) and dropped before embedding/upsert.
+MIN_CHILD_TEXT_LENGTH = 8
+
+
+def infer_heading_depth(text: str, metadata: Dict[str, Any]) -> int:
+    """Infer the hierarchical depth of a heading element.
+
+    First checks ``metadata["category_depth"]`` from the parser. If not
+    available, falls back to heuristic pattern matching for Indonesian
+    legal documents.
+
+    Args:
+        text: The heading text.
+        metadata: Parser metadata dict.
+
+    Returns:
+        Integer depth (0 = root, higher = deeper).
+    """
+    # Try parser-provided depth first
+    category_depth = metadata.get("category_depth")
+    if category_depth is not None:
+        return int(category_depth)
+
+    # Heuristic patterns for Indonesian legal documents
+    text_stripped = text.strip()
+
+    # BAB I, BAB II, BAB X (Roman numerals) → depth 0
+    if re.match(r"^BAB\s+[IVXLC]+", text_stripped):
+        return 0
+
+    # Pasal 1, Pasal 5 → depth 1 (section-level)
+    if re.match(r"^Pasal\s+\d+", text_stripped):
+        return 1
+
+    # A. Syarat, B. Ketentuan → depth 1
+    if re.match(r"^[A-Z]\.\s", text_stripped):
+        return 1
+
+    # 1. Syarat, 2. Ketentuan → depth 2
+    if re.match(r"^\d+\.\s", text_stripped):
+        return 2
+
+    # a) Dokumen, b) Persyaratan → depth 3
+    if re.match(r"^[a-z]\)\s", text_stripped):
+        return 3
+
+    # 1) Dokumen, 2) Persyaratan → depth 4
+    if re.match(r"^\d+\)\s", text_stripped):
+        return 4
+
+    # Default: treat as root
+    return 0
+
+
+def _slug(text: str) -> str:
+    """Convert heading text to a slug suitable for ltree paths.
+
+    Lowercase, replaces spaces/punctuation with underscores, truncates
+    to 50 chars, and prefixes with ``h_`` if the result starts with a
+    digit (ltree labels cannot start with digits).
+
+    Args:
+        text: The heading text.
+
+    Returns:
+        Slug string (e.g., "bab_i", "pasal_5", "a_syarat").
+    """
+    slug = text.lower().strip()
+    slug = re.sub(r"[^a-z0-9]+", "_", slug)
+    slug = slug.strip("_")
+    slug = slug[:50]
+    if slug and slug[0].isdigit():
+        slug = "h_" + slug
+    return slug or "unnamed"
 
 
 def create_parent_chunks(
@@ -77,14 +154,16 @@ def create_parent_chunks(
     current_length = 0
     chunk_index = 0
     current_page: Optional[int] = None
+    current_fallback_page: Optional[int] = None
     has_body_text = False
     
-    # Track the hierarchical path: list of (depth, title_text)
-    heading_stack: List[tuple[int, str]] = []
+    # Track the hierarchical path: [depth, title, ordinal, path, section_chunk_id]
+    heading_stack: List[List[Any]] = []
+    ordinal_counters: Dict[int, int] = {}
     current_breadcrumbs: List[str] = []
 
     def _flush_current() -> None:
-        nonlocal current_texts, current_length, chunk_index, current_page, has_body_text
+        nonlocal current_texts, current_length, chunk_index, current_page, current_fallback_page, has_body_text
         if not current_texts:
             return
             
@@ -96,22 +175,33 @@ def create_parent_chunks(
             combined_text = context_header + combined_text
             
         if combined_text:
+            _parent_id = heading_stack[-2][4] if len(heading_stack) >= 2 else None
+            _path = heading_stack[-1][3] if heading_stack else doc_id
+            _depth = heading_stack[-1][0] if heading_stack else 0
+            _chunk_id = str(uuid.uuid4())
             parent_chunks.append(
                 ParentChunkData(
-                    id=str(uuid.uuid4()),
+                    id=_chunk_id,
                     doc_id=doc_id,
                     text=combined_text,
                     chunk_index=chunk_index,
-                    page=current_page,
+                    page=current_page if current_page is not None else current_fallback_page,
                     breadcrumbs=list(current_breadcrumbs),
                     content_type=ContentType.TEXT,
+                    parent_id=_parent_id,
+                    ordinal=chunk_index,
+                    path=_path,
+                    depth=_depth,
                 )
             )
+            if heading_stack and heading_stack[-1][4] is None:
+                heading_stack[-1][4] = _chunk_id
             chunk_index += 1
-            
+
         current_texts = []
         current_length = 0
         current_page = None
+        current_fallback_page = None
         has_body_text = False
 
     def _flush_table(element: ParsedElement) -> None:
@@ -126,9 +216,13 @@ def create_parent_chunks(
             context_header = f"[Context: {' > '.join(current_breadcrumbs)}]\n\n"
             text = context_header + text
 
+        _parent_id = heading_stack[-2][4] if len(heading_stack) >= 2 else None
+        _path = heading_stack[-1][3] if heading_stack else doc_id
+        _depth = heading_stack[-1][0] if heading_stack else 0
+        _chunk_id = str(uuid.uuid4())
         parent_chunks.append(
             ParentChunkData(
-                id=str(uuid.uuid4()),
+                id=_chunk_id,
                 doc_id=doc_id,
                 text=text,
                 chunk_index=chunk_index,
@@ -136,8 +230,14 @@ def create_parent_chunks(
                 breadcrumbs=list(current_breadcrumbs),
                 content_type=ContentType.TABLE,
                 element_metadata=dict(element.metadata),
+                parent_id=_parent_id,
+                ordinal=chunk_index,
+                path=_path,
+                depth=_depth,
             )
         )
+        if heading_stack and heading_stack[-1][4] is None:
+            heading_stack[-1][4] = _chunk_id
         chunk_index += 1
 
     def _flush_figure(element: ParsedElement) -> None:
@@ -151,9 +251,13 @@ def create_parent_chunks(
             context_header = f"[Context: {' > '.join(current_breadcrumbs)}]\n\n"
             text = context_header + text
 
+        _parent_id = heading_stack[-2][4] if len(heading_stack) >= 2 else None
+        _path = heading_stack[-1][3] if heading_stack else doc_id
+        _depth = heading_stack[-1][0] if heading_stack else 0
+        _chunk_id = str(uuid.uuid4())
         parent_chunks.append(
             ParentChunkData(
-                id=str(uuid.uuid4()),
+                id=_chunk_id,
                 doc_id=doc_id,
                 text=text,
                 chunk_index=chunk_index,
@@ -161,8 +265,14 @@ def create_parent_chunks(
                 breadcrumbs=list(current_breadcrumbs),
                 content_type=ContentType.FIGURE,
                 element_metadata=dict(element.metadata),
+                parent_id=_parent_id,
+                ordinal=chunk_index,
+                path=_path,
+                depth=_depth,
             )
         )
+        if heading_stack and heading_stack[-1][4] is None:
+            heading_stack[-1][4] = _chunk_id
         chunk_index += 1
 
     for element in elements:
@@ -198,13 +308,24 @@ def create_parent_chunks(
                 _flush_current()
 
             # Update heading stack AFTER flushing the previous section
-            depth = element.metadata.get("category_depth") or 0
-            
+            depth = infer_heading_depth(text, element.metadata)
+
             # Pop elements from stack that are at the same or deeper level
             while heading_stack and heading_stack[-1][0] >= depth:
                 heading_stack.pop()
-                
-            heading_stack.append((depth, text))
+
+            # Reset ordinal counters for deeper levels
+            for d in list(ordinal_counters):
+                if d > depth:
+                    ordinal_counters[d] = 0
+
+            # Compute ordinal and path
+            ordinal_counters[depth] = ordinal_counters.get(depth, 0) + 1
+            _ordinal = ordinal_counters[depth]
+            _parent_path = heading_stack[-1][3] if heading_stack else doc_id
+            _heading_path = f"{_parent_path}.{_slug(text)}"
+
+            heading_stack.append([depth, text, _ordinal, _heading_path, None])
             current_breadcrumbs = [h[1] for h in heading_stack]
 
         # If adding this element would exceed the limit, flush first
@@ -214,10 +335,17 @@ def create_parent_chunks(
         # Titles ARE kept in body text (helps readability)
         current_texts.append(text)
         current_length += len(text)
-        
-        if current_page is None:
+
+        if current_fallback_page is None:
+            current_fallback_page = element.metadata.get("page_number")
+
+        # Prefer the first *body* element's page over a heading's — headings
+        # often sit at the bottom of one PDF page while their body content
+        # starts on the next, which would otherwise mis-attribute the whole
+        # chunk (and its citation) to the wrong page.
+        if not is_boundary and current_page is None:
             current_page = element.metadata.get("page_number")
-            
+
         if not is_boundary:
             has_body_text = True
 
@@ -271,6 +399,30 @@ def split_into_children(
     else:
         # TEXT and HYBRID both use the standard text splitter
         children = _split_text_children(parent, max_chars, overlap_chars)
+
+    # Drop gibberish children — chunks whose stripped text is shorter than the
+    # minimum threshold carry no meaningful context for retrieval. This filters
+    # out micro-fragments (e.g. lone punctuation, single letters) before they
+    # reach the embedding model and vector store.
+    original_count = len(children)
+    children = [
+        child for child in children
+        if len(child.text.strip()) >= MIN_CHILD_TEXT_LENGTH
+    ]
+    dropped = original_count - len(children)
+    if dropped > 0:
+        logger.debug(
+            "thesis.chunking.gibberish_filtered",
+            parent_id=parent.id,
+            dropped=dropped,
+            remaining=len(children),
+        )
+
+    # Assign ordinals and ltree paths to surviving children
+    for i, child in enumerate(children):
+        child.ordinal = i
+        if parent.path:
+            child.path = f"{parent.path}.c{i}"
 
     logger.debug(
         "thesis.chunking.children_created",

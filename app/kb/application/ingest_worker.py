@@ -14,18 +14,20 @@ from app.kb.domain.interfaces import (
     IKBRepository,
     ChunkVector,
 )
-from app.kb.domain.models import ParentChunk
+from app.kb.domain.models import ParentChunk, ChildChunk
 from app.thesis.chunking.logic import create_parent_chunks, split_into_children
 from app.thesis.chunking.models import ChildChunkData, ContentType, ParentChunkData, ParsedElement
-from app.thesis.chunking.router import classify_element
-from app.thesis.chunking.interfaces import IVLMEnricher
 from app.thesis.chunking.page_classifier import (
+    DEFAULT_GARBAGE_RATIO_THRESHOLD,
+    DEFAULT_IMAGE_RATIO_THRESHOLD,
     PageType,
-    classify_all_pages,
     VLM_PAGE_EXTRACTION_PROMPT,
+    classify_page,
+    group_elements_by_page,
 )
+from app.thesis.chunking.router import classify_element
+from app.thesis.vlm.interfaces import IVLMEnricher
 from app.thesis.chunking.table_converter import html_table_to_markdown
-from app.thesis.ivm.service import IVMService, IrrelevantDocumentException
 
 logger = structlog.get_logger(__name__)
 
@@ -34,13 +36,15 @@ class IngestWorker:
     """Orchestrates the ingestion pipeline for a document into the Knowledge Base.
 
     Pipeline stages:
-    1. Parse PDF → ParsedElement[]
-    1b. IVM document relevance validation (optional)
-    2. VLM enrichment — for FIGURE elements, generate text descriptions
-    3. Create parent chunks (table-aware, figure-aware)
+    1. Parse PDF → ParsedElement[] (Unstructured API)
+    2. Route & enrich elements (single linear pass):
+       - FIGURE (Image) → VLM enrichment (generate text description)
+       - TABLE → HTML → Markdown conversion
+       - TEXT → keep as-is
+    3. Create parent chunks (table-aware, figure-aware, breadcrumbs)
     4. Save parent chunks to Postgres
-    5. Split into children (content-type-aware dispatcher)
-    6. Embed children
+    5. Split into children (content-type-aware, min-length gibberish filter)
+    6. Embed children (Infinity dense + sparse)
     7. Upsert to Qdrant
     8. Complete
     """
@@ -52,18 +56,20 @@ class IngestWorker:
         text_embedder: ITextEmbedder,
         vector_store: IVectorStore,
         kb_repo: IKBRepository,
-        ivm_service: Optional[IVMService] = None,
         vlm_enricher: Optional[IVLMEnricher] = None,
         image_dir: str = "./uploads/knowledge_base/images",
+        page_image_ratio_threshold: float = DEFAULT_IMAGE_RATIO_THRESHOLD,
+        page_garbage_ratio_threshold: float = DEFAULT_GARBAGE_RATIO_THRESHOLD,
     ):
         self.db = db
         self.document_parser = document_parser
         self.text_embedder = text_embedder
         self.vector_store = vector_store
         self.kb_repo = kb_repo
-        self.ivm_service = ivm_service
         self.vlm_enricher = vlm_enricher
         self.image_dir = image_dir
+        self.page_image_ratio_threshold = page_image_ratio_threshold
+        self.page_garbage_ratio_threshold = page_garbage_ratio_threshold
 
     async def ingest_document(self, doc_id: str) -> None:
         """Run the full ingestion pipeline for a document."""
@@ -88,39 +94,18 @@ class IngestWorker:
                 await self.db.commit()
                 return
 
-            # 1b. Document relevance validation (IVM) — sample up to 3 chunks
-            if self.ivm_service is not None:
-                sample_texts = [
-                    el.text for el in elements if el.text and el.text.strip()
-                ][:3]
-                if sample_texts:
-                    try:
-                        await self.ivm_service.validate_document_relevance(sample_texts)
-                    except IrrelevantDocumentException:
-                        logger.warning("kb.ingest.document_irrelevant", doc_id=doc_id)
-                        await self.kb_repo.update_ingestion_task(
-                            task.id, "failed",
-                            error_message="Document is not relevant to the knowledge base domain.",
-                        )
-                        pdf_doc.ingestion_status = "failed"  # type: ignore
-                        await self.db.commit()
-                        return
+            # 2. Route & enrich elements (single linear pass):
+            #    - FIGURE (Image) → VLM enrichment (generate text description)
+            #    - TABLE → HTML → Markdown conversion
+            #    - TEXT → keep as-is
+            elements = await self._route_and_enrich_elements(
+                elements, str(pdf_doc.pdf_path), doc_id
+            )
 
-            # 1c. Per-page hybrid routing:
-            #    - TABLE_RICH pages: convert HTML tables → Markdown in-place
-            #    - VISUAL pages: discard Unstructured garbage, send page to VLM
-            #    - TEXT_RICH/MIXED pages: keep as-is
-            elements = await self._process_pages_hybrid(elements, str(pdf_doc.pdf_path), doc_id)
-
-            # 1d. VLM enrichment — generate text descriptions for any remaining FIGURE elements
-            #     (VISUAL pages are already handled in _process_pages_hybrid;
-            #      this step covers isolated Image elements on otherwise text-rich pages)
-            elements = await self._enrich_figures(elements, str(pdf_doc.pdf_path), doc_id)
-
-            # 2. Pure Chunking Algorithm (Thesis)
+            # 3. Pure Chunking Algorithm (Thesis)
             parent_chunk_data = create_parent_chunks(elements, doc_id)
 
-            # 3. Save Parent Chunks to Postgres
+            # 4. Save Parent Chunks to Postgres
             parent_chunk_models = [
                 ParentChunk(
                     id=pc.id,
@@ -131,13 +116,17 @@ class IngestWorker:
                     breadcrumbs=pc.breadcrumbs,
                     content_type=pc.content_type.value,
                     element_metadata=pc.element_metadata,
+                    parent_id=pc.parent_id,
+                    ordinal=pc.ordinal,
+                    path=pc.path,
+                    depth=pc.depth,
                 )
                 for pc in parent_chunk_data
             ]
             await self.kb_repo.save_parent_chunks(parent_chunk_models)
             await self.db.commit()
 
-            # 4. Split into children
+            # 5. Split into children
             all_children: list[ChildChunkData] = []
             for parent in parent_chunk_data:
                 all_children.extend(split_into_children(parent))
@@ -152,11 +141,28 @@ class IngestWorker:
 
             logger.info("kb.ingest.chunking_complete", doc_id=doc_id, parent_chunks=len(parent_chunk_data), child_chunks=len(all_children))
 
-            # 5. Embed children
+            # 5b. Save Child Chunks to Postgres (for chunk-level reranking + sibling lookups)
+            child_chunk_models = [
+                ChildChunk(
+                    id=child.id,
+                    parent_chunk_id=child.parent_chunk_id,
+                    doc_id=child.doc_id,
+                    text=child.text,
+                    ordinal=child.ordinal,
+                    path=child.path,
+                    page=child.page,
+                    content_type=child.content_type.value,
+                )
+                for child in all_children
+            ]
+            await self.kb_repo.save_child_chunks(child_chunk_models)
+            await self.db.commit()
+
+            # 6. Embed children
             child_texts = [c.text for c in all_children]
             embeddings = await self.text_embedder.embed_texts(child_texts)
 
-            # 6. Upsert to Qdrant
+            # 7. Upsert to Qdrant
             chunk_vectors = [
                 ChunkVector(
                     chunk_id=child.id,
@@ -167,6 +173,7 @@ class IngestWorker:
                     sparse_values=emb.sparse_values,
                     breadcrumbs=child.breadcrumbs,
                     content_type=child.content_type.value,
+                    text=child.text,
                 )
                 for child, emb in zip(all_children, embeddings)
             ]
@@ -179,7 +186,7 @@ class IngestWorker:
                 
             await self.vector_store.upsert_chunks(chunk_vectors)
 
-            # 7. Complete
+            # 8. Complete
             await self.kb_repo.update_ingestion_task(task.id, "completed")
             doc = await self.kb_repo.get_pdf_by_id(doc_id)
             if doc:
@@ -201,138 +208,249 @@ class IngestWorker:
                 logger.error("kb.ingest.status_update_failed", error=str(rollback_err))
             raise
 
-    async def _process_pages_hybrid(
+    async def _route_and_enrich_elements(
         self,
         elements: list[ParsedElement],
         pdf_path: str,
         doc_id: str,
     ) -> list[ParsedElement]:
-        """Route each PDF page to the best extraction strategy.
+        """Route each parsed element to the best processing strategy.
 
-        This is the core of the per-page hybrid routing pipeline. For every
-        page in the document:
+        Groups elements by page and classifies each page via
+        :func:`classify_page`:
 
-        - **TEXT_RICH / MIXED**: Keep the Unstructured elements as-is. No
-          transformation needed.
-        - **TABLE_RICH**: Convert all ``Table`` element HTML strings to
-          Markdown in-place using :func:`html_table_to_markdown`. Non-table
-          elements on the same page are kept unchanged.
-        - **VISUAL**: Unstructured output is unreliable (flowcharts, diagrams,
-          SOP pages with embedded images producing hundreds of garbage elements).
-          Discard all Unstructured elements for this page and replace them with
-          a single :class:`ParsedElement` whose text is the VLM's full-page
-          Markdown extraction. If no VLM is configured, the garbage Unstructured
-          elements are filtered out (they cannot be embedded).
+        - **VISUAL** pages (mostly images with garbage OCR — flowcharts,
+          diagrams): the noisy per-element Unstructured output is discarded
+          and replaced by a single full-page VLM extraction
+          (:meth:`_process_visual_page`), avoiding redundant per-element VLM
+          calls when OCR mis-splits one diagram into several "figure"
+          elements. Genuine ``Title`` elements are preserved so downstream
+          heading breadcrumbs aren't lost.
+        - **TEXT_RICH / TABLE_RICH / MIXED** pages (and elements with no
+          page number) keep the original per-element routing
+          (:meth:`_route_default_page_elements`): FIGURE elements get
+          per-element VLM enrichment, TABLE elements get HTML→Markdown
+          conversion, TEXT elements are kept as-is.
 
-        The method also converts HTML tables to Markdown on TABLE_RICH pages
-        regardless of whether a VLM is available.
+        Elements with empty text after processing are filtered out.
+        Breadcrumbs are preserved — they are built later by
+        :func:`create_parent_chunks` from the heading hierarchy.
 
         Args:
-            elements: Parsed elements from the document parser (all pages).
-            pdf_path: Path to the source PDF (for page image rendering).
+            elements: Parsed elements from the document parser.
+            pdf_path: Path to the source PDF (for page image extraction).
             doc_id: Document UUID for logging.
 
         Returns:
-            Processed elements list with tables converted and VISUAL pages
-            replaced by VLM-extracted Markdown elements.
+            Processed elements list with figures enriched, tables converted,
+            and empty-text elements removed.
         """
         if not elements:
             return elements
 
-        # Classify all pages from the flat element list
-        page_classifications = classify_all_pages(elements)
+        # Classify all elements by content type
+        for el in elements:
+            el.content_type = classify_element(el)
 
-        visual_pages = {
-            page for page, cls in page_classifications.items()
-            if cls.page_type == PageType.VISUAL
-        }
-        table_rich_pages = {
-            page for page, cls in page_classifications.items()
-            if cls.page_type == PageType.TABLE_RICH
-        }
-
+        figure_count = sum(1 for el in elements if el.content_type == ContentType.FIGURE)
+        table_count = sum(1 for el in elements if el.content_type == ContentType.TABLE)
         logger.info(
-            "kb.ingest.page_routing",
+            "kb.ingest.element_routing_started",
             doc_id=doc_id,
-            total_pages=len(page_classifications),
-            visual_pages=len(visual_pages),
-            table_rich_pages=len(table_rich_pages),
+            total_elements=len(elements),
+            figures=figure_count,
+            tables=table_count,
         )
 
-        # Track which element pages we need to VLM-process
-        vlm_extracted_pages: set[object] = set()
-        result_elements: list[ParsedElement] = []
+        # Set PDF path for VLM fallback mode (heuristic description generator)
+        if self.vlm_enricher is not None and hasattr(self.vlm_enricher, "set_pdf_path"):
+            self.vlm_enricher.set_pdf_path(pdf_path)  # type: ignore[attr-defined]
+
         os.makedirs(self.image_dir, exist_ok=True)
 
-        for el in elements:
-            page = el.metadata.get("page_number")
+        page_groups = group_elements_by_page(elements)
 
-            # --- VISUAL page handling ---
-            if page in visual_pages:
-                # Each visual page is replaced by one VLM-extracted element.
-                # We only process the first element encounter per page.
-                if page in vlm_extracted_pages:
-                    continue  # Already processed this page, discard rest
+        result_elements: list[ParsedElement] = []
+        enriched_count = 0
+        tables_converted = 0
+        pages_classified = 0
+        visual_pages_count = 0
+        visual_pages_enriched = 0
+        visual_pages_failed = 0
 
-                vlm_extracted_pages.add(page)
+        for page_key, page_elements in page_groups.items():
+            classification = None
+            if page_key is not None:
+                classification = classify_page(
+                    page_elements,
+                    page_number=page_key,
+                    image_ratio_threshold=self.page_image_ratio_threshold,
+                    garbage_ratio_threshold=self.page_garbage_ratio_threshold,
+                )
+                pages_classified += 1
+                logger.debug(
+                    "kb.ingest.page_classified",
+                    doc_id=doc_id,
+                    page=page_key,
+                    page_type=classification.page_type.value,
+                    image_ratio=classification.image_ratio,
+                    garbage_ratio=classification.garbage_ratio,
+                    element_count=classification.element_count,
+                )
+
+            if classification is not None and classification.page_type == PageType.VISUAL:
+                visual_pages_count += 1
+
+                # Preserve genuine section-boundary Titles so downstream
+                # heading breadcrumbs (create_parent_chunks) aren't broken.
+                titles = [
+                    el for el in page_elements
+                    if el.element_type == "Title" and len(el.text.strip()) > 3
+                ]
+                result_elements.extend(titles)
+
+                figure_el = await self._process_visual_page(page_key, pdf_path, doc_id)
+                if figure_el is not None:
+                    figure_el.metadata.update({
+                        "source_element_count": classification.element_count,
+                        "source_image_ratio": round(classification.image_ratio, 3),
+                        "source_garbage_ratio": round(classification.garbage_ratio, 3),
+                    })
+                    result_elements.append(figure_el)
+                    enriched_count += 1
+                    visual_pages_enriched += 1
+                else:
+                    visual_pages_failed += 1
+                    logger.warning(
+                        "kb.ingest.visual_page_dropped",
+                        doc_id=doc_id,
+                        page=page_key,
+                    )
+                continue
+
+            processed, enriched_delta, tables_delta = await self._route_default_page_elements(
+                page_elements, pdf_path, doc_id,
+            )
+            result_elements.extend(processed)
+            enriched_count += enriched_delta
+            tables_converted += tables_delta
+
+        # Final filter: remove any elements with empty text (can't embed them)
+        # This catches figures where VLM failed and any other empty artifacts.
+        final_elements = [el for el in result_elements if el.text.strip()]
+        dropped = len(result_elements) - len(final_elements)
+
+        logger.info(
+            "kb.ingest.element_routing_complete",
+            doc_id=doc_id,
+            input_elements=len(elements),
+            output_elements=len(final_elements),
+            figures_enriched=enriched_count,
+            tables_converted=tables_converted,
+            dropped_empty=dropped,
+            pages_classified=pages_classified,
+            visual_pages_count=visual_pages_count,
+            visual_pages_enriched=visual_pages_enriched,
+            visual_pages_failed=visual_pages_failed,
+        )
+        return final_elements
+
+    async def _route_default_page_elements(
+        self,
+        page_elements: list[ParsedElement],
+        pdf_path: str,
+        doc_id: str,
+    ) -> tuple[list[ParsedElement], int, int]:
+        """Route one page's elements individually (non-VISUAL pages).
+
+        - **FIGURE** (Image/Figure): If the element has no text, extract the
+          page image and call the VLM enricher to generate a text description.
+          If no VLM is configured or enrichment fails, the element is dropped
+          (it cannot be embedded without text).
+        - **TABLE**: Convert HTML table markup to Markdown in-place using
+          :func:`html_table_to_markdown`, preserving the original HTML in
+          metadata. This makes the table embeddable and splittable.
+        - **TEXT** (NarrativeText, Title, etc.): Keep as-is.
+
+        Args:
+            page_elements: Elements belonging to a single page (or the
+                ``page_number is None`` bucket).
+            pdf_path: Path to the source PDF (for page image extraction).
+            doc_id: Document UUID for logging.
+
+        Returns:
+            Tuple of (processed elements, figures_enriched delta,
+            tables_converted delta).
+        """
+        result_elements: list[ParsedElement] = []
+        enriched_count = 0
+        tables_converted = 0
+
+        for el in page_elements:
+            # --- FIGURE routing: VLM enrichment for empty-text images ---
+            if el.content_type == ContentType.FIGURE:
+                # If already has text (e.g. from a previous run), keep it
+                if el.text.strip():
+                    result_elements.append(el)
+                    enriched_count += 1
+                    continue
 
                 if self.vlm_enricher is None:
-                    logger.warning(
-                        "kb.ingest.visual_page_skipped",
+                    logger.debug(
+                        "kb.ingest.figure_skipped",
                         doc_id=doc_id,
-                        page=page,
+                        page=el.metadata.get("page_number"),
                         reason="no_vlm_enricher",
                     )
-                    continue  # Drop garbage elements, no VLM to replace them
+                    continue  # Drop — can't embed without text
 
-                image_path = self._extract_page_image(pdf_path, page or 1, doc_id)
+                # Get image path from metadata, or extract the page
+                image_path = el.metadata.get("image_path")
+                page_number = el.metadata.get("page_number", 1)
+
+                if not image_path:
+                    image_path = self._extract_page_image(pdf_path, page_number, doc_id)
+                    if image_path:
+                        el.metadata["image_path"] = image_path
+
                 if not image_path:
                     logger.warning(
-                        "kb.ingest.visual_page_image_failed",
+                        "kb.ingest.figure_no_image",
                         doc_id=doc_id,
-                        page=page,
+                        page=page_number,
+                        reason="image_extraction_failed",
                     )
                     continue
 
                 try:
-                    markdown_text = await self.vlm_enricher.describe_image(
-                        image_path,
-                        prompt=VLM_PAGE_EXTRACTION_PROMPT,
-                    )
-                    if markdown_text and markdown_text.strip():
-                        result_elements.append(
-                            ParsedElement(
-                                element_type="NarrativeText",
-                                text=markdown_text.strip(),
-                                metadata={
-                                    "page_number": page,
-                                    "source": "vlm_page_extraction",
-                                },
-                            )
-                        )
+                    description = await self.vlm_enricher.describe_image(image_path)
+                    if description and description.strip():
+                        el.text = description.strip()
+                        enriched_count += 1
+                        result_elements.append(el)
                         logger.info(
-                            "kb.ingest.visual_page_extracted",
+                            "kb.ingest.figure_enriched",
                             doc_id=doc_id,
-                            page=page,
-                            text_len=len(markdown_text),
+                            page=page_number,
+                            desc_len=len(description),
                         )
                     else:
                         logger.warning(
-                            "kb.ingest.visual_page_vlm_empty",
+                            "kb.ingest.vlm_empty_description",
                             doc_id=doc_id,
-                            page=page,
+                            page=page_number,
                         )
                 except Exception as exc:
                     logger.error(
-                        "kb.ingest.visual_page_vlm_failed",
+                        "kb.ingest.vlm_enrichment_failed",
                         doc_id=doc_id,
-                        page=page,
+                        page=page_number,
                         error=str(exc),
                     )
                 continue
 
-            # --- TABLE_RICH page: convert Table HTML → Markdown in-place ---
-            if page in table_rich_pages and el.element_type == "Table":
+            # --- TABLE routing: HTML → Markdown conversion ---
+            if el.content_type == ContentType.TABLE:
                 html_text = el.metadata.get("text_as_html") or el.text
                 if html_text and html_text.strip():
                     markdown = html_table_to_markdown(html_text)
@@ -342,151 +460,104 @@ class IngestWorker:
                         metadata={**el.metadata, "text_as_html": html_text},
                         content_type=el.content_type,
                     )
+                    tables_converted += 1
                     logger.debug(
                         "kb.ingest.table_converted",
                         doc_id=doc_id,
-                        page=page,
+                        page=el.metadata.get("page_number"),
                         original_len=len(html_text),
                         markdown_len=len(markdown),
                     )
+                result_elements.append(el)
+                continue
 
+            # --- TEXT routing: keep as-is ---
             result_elements.append(el)
 
-        logger.info(
-            "kb.ingest.page_routing_complete",
-            doc_id=doc_id,
-            input_elements=len(elements),
-            output_elements=len(result_elements),
-        )
-        return result_elements
+        return result_elements, enriched_count, tables_converted
 
-    async def _enrich_figures(
+    async def _process_visual_page(
         self,
-        elements: list[ParsedElement],
+        page_number: int,
         pdf_path: str,
         doc_id: str,
-    ) -> list[ParsedElement]:
-        """Enrich FIGURE elements with VLM-generated text descriptions.
+    ) -> Optional[ParsedElement]:
+        """Run a single full-page VLM extraction for a page classified VISUAL.
 
-        For each element classified as FIGURE (Image/Figure type from the
-        parser), this method:
+        Always renders the page fresh via :meth:`_extract_page_image` rather
+        than reusing any element's ``image_path`` metadata — on VISUAL pages
+        that metadata (when present) is typically a small, unreliable crop,
+        while the full-page extraction prompt needs the whole page rendered.
 
-        1. Extracts the page image using PyMuPDF (if the parser didn't
-           already provide an image path).
-        2. Calls the VLM enricher to generate a structured text description.
-        3. Replaces the element's (likely empty) text with the description.
-
-        If no VLM enricher is configured, figure elements with empty text
-        are filtered out (they can't be embedded or searched without text).
-
-        **Fail-closed**: If VLM enrichment fails for a specific figure,
-        the error is logged and the element is kept with whatever text it
-        has (possibly empty). The chunker will skip empty-text elements.
+        Fail-closed: returns ``None`` (page's visual content is dropped) if
+        no VLM is configured, page image extraction fails, the VLM call
+        raises, or the VLM returns empty text.
 
         Args:
-            elements: Parsed elements from the document parser.
-            pdf_path: Path to the source PDF (for fallback image extraction).
+            page_number: 1-indexed page number.
+            pdf_path: Path to the source PDF.
             doc_id: Document UUID for logging.
 
         Returns:
-            The elements list with FIGURE elements enriched (text filled in).
+            A single consolidated FIGURE ``ParsedElement``, or ``None``.
         """
-        if not elements:
-            return elements
-
-        # Classify all elements first
-        for el in elements:
-            el.content_type = classify_element(el)
-
-        figure_elements = [el for el in elements if el.content_type == ContentType.FIGURE]
-        if not figure_elements:
-            return elements
-
-        logger.info(
-            "kb.ingest.vlm_enrichment_started",
-            doc_id=doc_id,
-            figure_count=len(figure_elements),
-        )
-
         if self.vlm_enricher is None:
-            # No VLM configured — filter out empty-text figures (can't embed them)
-            kept = [el for el in elements if not (el.content_type == ContentType.FIGURE and not el.text.strip())]
-            skipped = len(elements) - len(kept)
-            if skipped > 0:
-                logger.warning(
-                    "kb.ingest.figures_skipped",
-                    doc_id=doc_id,
-                    skipped=skipped,
-                    reason="no_vlm_enricher",
-                )
-            return kept
+            logger.debug(
+                "kb.ingest.visual_page_skipped",
+                doc_id=doc_id,
+                page=page_number,
+                reason="no_vlm_enricher",
+            )
+            return None
 
-        # Set PDF path for fallback mode
-        if hasattr(self.vlm_enricher, "set_pdf_path"):
-            self.vlm_enricher.set_pdf_path(pdf_path)  # type: ignore[attr-defined]
+        image_path = self._extract_page_image(pdf_path, page_number, doc_id)
+        if not image_path:
+            logger.warning(
+                "kb.ingest.visual_page_no_image",
+                doc_id=doc_id,
+                page=page_number,
+                reason="image_extraction_failed",
+            )
+            return None
 
-        os.makedirs(self.image_dir, exist_ok=True)
-        enriched_count = 0
+        try:
+            description = await self.vlm_enricher.describe_image(
+                image_path, prompt=VLM_PAGE_EXTRACTION_PROMPT
+            )
+        except Exception as exc:
+            logger.error(
+                "kb.ingest.visual_page_vlm_failed",
+                doc_id=doc_id,
+                page=page_number,
+                error=str(exc),
+            )
+            return None
 
-        for el in figure_elements:
-            # If the element already has text (e.g. from a previous run), skip
-            if el.text.strip():
-                enriched_count += 1
-                continue
-
-            # Get the image path from metadata, or extract the page
-            image_path = el.metadata.get("image_path")
-            page_number = el.metadata.get("page_number", 1)
-
-            if not image_path:
-                # Extract the page as an image using PyMuPDF
-                image_path = self._extract_page_image(pdf_path, page_number, doc_id)
-                if image_path:
-                    el.metadata["image_path"] = image_path
-
-            if not image_path:
-                logger.warning(
-                    "kb.ingest.figure_no_image",
-                    doc_id=doc_id,
-                    page=page_number,
-                    reason="image_extraction_failed",
-                )
-                continue
-
-            try:
-                description = await self.vlm_enricher.describe_image(image_path)
-                if description and description.strip():
-                    el.text = description.strip()
-                    enriched_count += 1
-                    logger.info(
-                        "kb.ingest.figure_enriched",
-                        doc_id=doc_id,
-                        page=page_number,
-                        desc_len=len(description),
-                    )
-                else:
-                    logger.warning(
-                        "kb.ingest.vlm_empty_description",
-                        doc_id=doc_id,
-                        page=page_number,
-                    )
-            except Exception as exc:
-                logger.error(
-                    "kb.ingest.vlm_enrichment_failed",
-                    doc_id=doc_id,
-                    page=page_number,
-                    error=str(exc),
-                )
+        if not description or not description.strip():
+            logger.warning(
+                "kb.ingest.visual_page_vlm_empty",
+                doc_id=doc_id,
+                page=page_number,
+            )
+            return None
 
         logger.info(
-            "kb.ingest.vlm_enrichment_completed",
+            "kb.ingest.visual_page_extracted",
             doc_id=doc_id,
-            enriched=enriched_count,
-            total_figures=len(figure_elements),
+            page=page_number,
+            desc_len=len(description),
         )
 
-        # Filter out figures that still have no text (can't embed them)
-        return [el for el in elements if el.text.strip()]
+        return ParsedElement(
+            element_type="Image",
+            text=description.strip(),
+            metadata={
+                "page_number": page_number,
+                "image_path": image_path,
+                "page_classification": "visual",
+            },
+            content_type=ContentType.FIGURE,
+        )
 
     def _extract_page_image(
         self,

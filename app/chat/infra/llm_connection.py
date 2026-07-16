@@ -88,5 +88,64 @@ class LLMConnection(ILLMConnection):
 
         logger.debug("chat.llm.stream_end", model=model)
 
+    async def generate(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        max_tokens: int,
+        temperature: float = 0.0,
+    ) -> str:
+        """Generate a complete (non-streaming) chat completion.
+
+        Used for tasks requiring the full response before proceeding
+        (e.g. HyDE hypothetical document generation). Uses ``stream=False``
+        on the same AsyncOpenAI client.
+
+        Args:
+            model: Model identifier.
+            messages: Chat messages.
+            max_tokens: Maximum tokens for the response.
+            temperature: Sampling temperature.
+
+        Returns:
+            The full response text.
+        """
+        logger.debug(
+            "chat.llm.generate_start",
+            model=model,
+            message_count=len(messages),
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        try:
+            response = await self._client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stream=False,
+                extra_body={"reasoning": {"enabled": False}},
+            )
+            content = response.choices[0].message.content  # type: ignore[union-attr]
+            if content:
+                return content
+            # Fallback: reasoning field (models where reasoning can't be disabled)
+            reasoning = getattr(response.choices[0].message, "reasoning", None)  # type: ignore[union-attr]
+            return reasoning or ""
+        except APIConnectionError as exc:
+            logger.error("chat.llm.connection_error", model=model, error=str(exc))
+            raise
+        except APIError as exc:
+            logger.error(
+                "chat.llm.api_error",
+                model=model,
+                status_code=getattr(exc, "status_code", None),
+                error=str(exc),
+            )
+            raise
+        except Exception as exc:
+            logger.error("chat.llm.unexpected_error", model=model, error=str(exc))
+            raise
+
     async def close(self) -> None:
         await self._client.close()

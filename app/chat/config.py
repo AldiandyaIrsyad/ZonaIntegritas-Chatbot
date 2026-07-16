@@ -2,6 +2,8 @@ from functools import lru_cache
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.thesis.prompts import DEFAULT_SYSTEM_PROMPT_ID
+
 class ChatConfig(BaseSettings):
     """Configuration for the Chat module.
 
@@ -32,14 +34,35 @@ class ChatConfig(BaseSettings):
         default=0.0,
         description="Sampling temperature for generation (0.0 = deterministic, per skripsi §3.2.1c)",
     )
-    system_prompt: str = Field(default="You are a helpful AI assistant answering questions based on provided knowledge base context.", description="Default system prompt")
+    system_prompt: str = Field(
+        default=DEFAULT_SYSTEM_PROMPT_ID,
+        description="Default system prompt (Bahasa Indonesia)",
+        validation_alias="CHAT_SYSTEM_PROMPT",
+    )
 
     # Safety/Relevance (IVM)
     infinity_url: str = Field(default="http://localhost:7997", description="Infinity server URL", validation_alias="INFINITY_BASE_URL")
     prompt_guard_model: str = Field(default="meta-llama/Llama-Prompt-Guard-2-86M", validation_alias="INFINITY_PROMPT_GUARD_MODEL")
     nli_model: str = Field(default="StevenLimcorn/indo-roberta-indonli", validation_alias="INFINITY_NLI_MODEL")
     security_threshold: float = Field(default=0.75, description="Threshold for prompt injection detection")
-    similarity_threshold: float = Field(default=0.4, description="Threshold for KB search relevance")
+
+    # HyDE (Hypothetical Document Embeddings) Settings
+    hyde_enabled: bool = Field(
+        default=True,
+        description="Enable HyDE: generate a hypothetical answer doc and embed that instead of the raw query",
+    )
+    hyde_max_tokens: int = Field(
+        default=256,
+        description="Max tokens for the hypothetical document generation",
+    )
+    hyde_temperature: float = Field(
+        default=0.0,
+        description="Temperature for HyDE generation (0.0 = deterministic)",
+    )
+    hyde_prompt_template: str = Field(
+        default="Write a short paragraph answering this question. Do not worry about factual accuracy or hallucinations — you are generating a semantic template to capture the right keywords and structure: {query}",
+        description="Prompt template for HyDE hypothetical document generation. {query} is replaced with the user query.",
+    )
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)
 

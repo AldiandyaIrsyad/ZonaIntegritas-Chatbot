@@ -72,6 +72,11 @@ class ParentChunkData(BaseModel):
         content_type: The structural type of this chunk's content.
         element_metadata: Preserved metadata from the source element
             (e.g. raw HTML for tables, image path for figures).
+        parent_id: UUID of the parent section's representative chunk
+            (None for root sections).
+        ordinal: Position within the parent section (uses chunk_index).
+        path: ltree-style dot path (e.g., "doc_id.bab_i.pasal_5").
+        depth: Heading depth (0 = root, higher = deeper).
     """
 
     id: str
@@ -82,6 +87,12 @@ class ParentChunkData(BaseModel):
     breadcrumbs: List[str] = []
     content_type: ContentType = ContentType.TEXT
     element_metadata: Dict[str, Any] = {}
+
+    # ltree hierarchy fields
+    parent_id: Optional[str] = None
+    ordinal: int = 0
+    path: str = ""
+    depth: int = 0
 
 
 class ChildChunkData(BaseModel):
@@ -99,6 +110,8 @@ class ChildChunkData(BaseModel):
         page: Page number inherited from the parent.
         breadcrumbs: Hierarchical section path inherited from the parent.
         content_type: The structural type inherited from the parent.
+        ordinal: Position within the parent chunk.
+        path: ltree-style path (parent path + ".c" + ordinal).
     """
 
     id: str
@@ -108,3 +121,7 @@ class ChildChunkData(BaseModel):
     page: Optional[int] = None
     breadcrumbs: List[str] = []
     content_type: ContentType = ContentType.TEXT
+
+    # ltree hierarchy fields
+    ordinal: int = 0
+    path: str = ""

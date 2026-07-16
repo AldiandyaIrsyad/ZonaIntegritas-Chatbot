@@ -1,13 +1,14 @@
 """Tests for the citation format helper in ChatService.
 
 Verifies that ``_format_citation()`` produces the canonical citation format
-``*(STATUS: SCORE; SOURCE; Page N)*`` for all three NLI labels, with and
-without source/page information.
+``*(STATUS: SCORE; SOURCE; Page N; DocID:ID)*`` for all three NLI labels,
+with and without source/page/doc_id information.
 
 Canonical format:
-    *(Supported: 0.92; Pedoman ZI UPI; Page 12)*
-    *(Contradiction: 0.88; Pedoman ZI UPI; Page 12)*
-    *(Neutral: 0.75)*
+    *(Supported: 0.92; Pedoman ZI UPI; Page 12; DocID:doc-123)*
+    *(Contradiction: 0.88; Pedoman ZI UPI; Page 12; DocID:doc-123)*
+
+Neutral (and any unrecognized label) results produce no marker at all.
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ def _make_nli_result(
     neutral_score: float = 0.03,
     source_title: str = "Pedoman ZI UPI",
     page: Optional[int] = 12,
+    doc_id: str = "doc-123",
+    evidence_snippet: str = "",
 ) -> NLIResult:
     """Create an NLIResult for testing."""
     return NLIResult(
@@ -38,6 +41,8 @@ def _make_nli_result(
         neutral_score=neutral_score,
         source_title=source_title,
         page=page,
+        doc_id=doc_id,
+        evidence_snippet=evidence_snippet,
     )
 
 
@@ -73,8 +78,8 @@ class TestFormatCitation:
         assert "Pedoman ZI UPI" in citation
         assert "Page 5" in citation
 
-    def test_neutral_with_source_and_page(self) -> None:
-        """Neutral label with source and page."""
+    def test_neutral_returns_empty(self) -> None:
+        """Neutral label should produce no citation marker at all."""
         result = _make_nli_result(
             label="neutral",
             entailment_score=0.10,
@@ -84,10 +89,7 @@ class TestFormatCitation:
             page=3,
         )
         citation = ChatService._format_citation(result)
-        assert "Neutral" in citation
-        assert "0.75" in citation
-        assert "Pedoman ZI UPI" in citation
-        assert "Page 3" in citation
+        assert citation == ""
 
     def test_without_source_title(self) -> None:
         """Citation without source title should omit it."""
@@ -119,17 +121,41 @@ class TestFormatCitation:
         assert "Page" not in citation
 
     def test_without_source_and_page(self) -> None:
-        """Citation with neither source nor page."""
+        """Citation with neither source nor page (entailment label)."""
         result = _make_nli_result(
-            label="neutral",
-            neutral_score=0.60,
+            label="entailment",
+            entailment_score=0.60,
             source_title="",
             page=None,
         )
         citation = ChatService._format_citation(result)
-        assert "Neutral" in citation
+        assert "Supported" in citation
         assert "0.60" in citation
         assert "Page" not in citation
+
+    def test_with_doc_id(self) -> None:
+        """Citation should include a DocID segment when doc_id is set."""
+        result = _make_nli_result(
+            label="entailment",
+            entailment_score=0.90,
+            source_title="Pedoman ZI UPI",
+            page=12,
+            doc_id="abc-123",
+        )
+        citation = ChatService._format_citation(result)
+        assert "DocID:abc-123" in citation
+
+    def test_without_doc_id(self) -> None:
+        """Citation should omit the DocID segment when doc_id is empty."""
+        result = _make_nli_result(
+            label="entailment",
+            entailment_score=0.90,
+            source_title="Pedoman ZI UPI",
+            page=12,
+            doc_id="",
+        )
+        citation = ChatService._format_citation(result)
+        assert "DocID" not in citation
 
     def test_none_result_returns_empty(self) -> None:
         """None result should return empty string."""
@@ -159,8 +185,8 @@ class TestFormatCitation:
         assert citation.startswith(" *(")
         assert citation.endswith(")*")
 
-    def test_unknown_label_defaults_to_neutral(self) -> None:
-        """Unknown label should default to 'Neutral'."""
+    def test_unknown_label_returns_empty(self) -> None:
+        """Unrecognized label should produce no citation marker."""
         result = _make_nli_result(
             label="unknown_label",
             neutral_score=0.50,
@@ -168,4 +194,32 @@ class TestFormatCitation:
             page=1,
         )
         citation = ChatService._format_citation(result)
-        assert "Neutral" in citation
+        assert citation == ""
+
+    def test_with_evidence_snippet(self) -> None:
+        """Citation should include a quoted Evidence segment when present."""
+        result = _make_nli_result(
+            label="entailment",
+            entailment_score=0.90,
+            source_title="Pedoman ZI UPI",
+            page=12,
+            doc_id="abc-123",
+            evidence_snippet="Permohonan diajukan melalui portal.",
+        )
+        citation = ChatService._format_citation(result)
+        assert 'Evidence:"Permohonan diajukan melalui portal."' in citation
+        # Evidence must come after DocID so the frontend regex (which
+        # expects DocID before Evidence) can parse both segments.
+        assert citation.index("DocID:") < citation.index("Evidence:")
+
+    def test_without_evidence_snippet(self) -> None:
+        """Citation should omit the Evidence segment when empty."""
+        result = _make_nli_result(
+            label="entailment",
+            entailment_score=0.90,
+            source_title="Pedoman ZI UPI",
+            page=12,
+            evidence_snippet="",
+        )
+        citation = ChatService._format_citation(result)
+        assert "Evidence" not in citation

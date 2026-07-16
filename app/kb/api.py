@@ -1,5 +1,7 @@
 """JSON API endpoints for knowledge base administration."""
+import os
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Any, List, Optional
 from starlette.responses import JSONResponse
@@ -60,6 +62,53 @@ async def upload_pdf(
         },
     )
 
+@router.post("/api/admin/pdfs/batch", status_code=202)
+async def upload_pdfs_batch(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = Form(...),
+    titles: List[str] = Form(...),
+    descriptions: List[str] = Form(default=[]),
+    service: KBApplicationService = Depends(get_kb_service),
+) -> Any:
+    """Upload multiple PDF documents at once and trigger async ingestion.
+
+    Each file is paired with a title (by index). Descriptions are optional
+    and matched by index; missing descriptions default to empty string.
+    Filenames are used as default titles by the frontend, but the user can
+    edit them in a table before submitting.
+    """
+    if len(files) != len(titles):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Number of files ({len(files)}) must match number of titles ({len(titles)})",
+        )
+    # Pad descriptions to match files length
+    desc_list = list(descriptions)
+    while len(desc_list) < len(files):
+        desc_list.append("")
+
+    results = await service.upload_pdfs_batch(
+        files=files,
+        titles=titles,
+        descriptions=desc_list,
+        bg_tasks=background_tasks,
+    )
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "accepted",
+            "count": len(results),
+            "documents": [
+                {
+                    "id": pdf.id,
+                    "title": pdf.title,
+                    "ingestion_status": pdf.ingestion_status,
+                }
+                for pdf in results
+            ],
+        },
+    )
+
 @router.put("/api/admin/pdfs/{pdf_id}/status")
 async def update_pdf_status(
     pdf_id: str, 
@@ -104,6 +153,15 @@ async def reingest_pdf(
         raise HTTPException(status_code=404, detail="PDF not found")
     background_tasks.add_task(service.ingest_worker.ingest_document, doc_id=pdf_id)
     return {"id": pdf_id, "status": "reingest_triggered"}
+
+
+@router.get("/api/kb/pdfs/{pdf_id}/download")
+async def download_pdf(pdf_id: str, service: KBApplicationService = Depends(get_kb_service)) -> Any:
+    """Serve the original PDF file for a knowledge base document."""
+    pdf = await service.kb_repo.get_pdf_by_id(pdf_id)
+    if not pdf or not os.path.exists(str(pdf.pdf_path)):
+        raise HTTPException(status_code=404, detail="PDF not found")
+    return FileResponse(str(pdf.pdf_path), filename=f"{pdf.title}.pdf", media_type="application/pdf")
 
 
 @router.get("/api/kb/search", response_model=List[SearchResultItem])

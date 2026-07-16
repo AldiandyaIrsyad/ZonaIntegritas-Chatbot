@@ -1,6 +1,6 @@
 """Database repository for the chat module."""
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -38,8 +38,23 @@ class PostgresChatRepository(IChatRepository):
         await self.db.flush()
         return session
 
-    async def create_message(self, session_id: str, role: str, content: str, raw_content: Optional[str] = None) -> Message:
-        new_msg = Message(session_id=session_id, role=role, content=content, raw_content=raw_content)
+    async def create_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        raw_content: Optional[str] = None,
+        context: Optional[str] = None,
+        sources: Optional[List[Dict[str, Any]]] = None,
+    ) -> Message:
+        new_msg = Message(
+            session_id=session_id,
+            role=role,
+            content=content,
+            raw_content=raw_content,
+            context=context,
+            sources=sources,
+        )
         self.db.add(new_msg)
         await self.db.flush()
         return new_msg
