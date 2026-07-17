@@ -18,6 +18,7 @@ from typing import Optional
 
 import httpx
 
+from app.shared.retry import external_api_retry
 from app.thesis.vlm.image_extractor import PyMuPDFImageExtractor
 from app.thesis.vlm.interfaces import IVLMEnricher
 
@@ -95,8 +96,7 @@ class OpenRouterVLMClient(IVLMEnricher):
         }
 
         try:
-            response = await self._client.post("/chat/completions", json=payload)
-            response.raise_for_status()
+            response = await self._post_chat_completions(payload)
             data = response.json()
             description = data["choices"][0]["message"]["content"].strip()
             logger.info("vlm.cloud.success", model=self._model, image=image_path, desc_len=len(description))
@@ -104,6 +104,12 @@ class OpenRouterVLMClient(IVLMEnricher):
         except Exception as exc:
             logger.error("vlm.cloud.failed", image=image_path, error=str(exc))
             raise
+
+    @external_api_retry
+    async def _post_chat_completions(self, payload: dict):
+        response = await self._client.post("/chat/completions", json=payload)
+        response.raise_for_status()
+        return response
 
     async def close(self) -> None:
         await self._client.aclose()

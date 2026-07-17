@@ -4,6 +4,7 @@ import pytest
 
 from app.thesis.chunking.table_converter import (
     html_table_to_markdown,
+    split_markdown_table_lines,
     _clean_cell_text,
 )
 from app.thesis.chunking.logic import _is_markdown_table
@@ -176,6 +177,30 @@ class TestIsMarkdownTable:
 
     def test_empty_is_not_markdown(self) -> None:
         assert _is_markdown_table("") is False
+
+
+# ---------------------------------------------------------------------------
+# split_markdown_table_lines helper
+# ---------------------------------------------------------------------------
+
+class TestSplitMarkdownTableLines:
+    def test_valid_table_returns_header_separator_and_data_rows(self) -> None:
+        text = "| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |"
+        result = split_markdown_table_lines(text)
+        assert result == ("| A | B |", "| --- | --- |", ["| 1 | 2 |", "| 3 | 4 |"])
+
+    def test_fewer_than_three_lines_returns_none(self) -> None:
+        assert split_markdown_table_lines("| A | B |\n| --- | --- |") is None
+        assert split_markdown_table_lines("| A | B |") is None
+        assert split_markdown_table_lines("") is None
+
+    def test_strips_surrounding_whitespace(self) -> None:
+        text = "\n  | A | B |\n| --- | --- |\n| 1 | 2 |\n  \n"
+        result = split_markdown_table_lines(text)
+        assert result is not None
+        header, separator, data_rows = result
+        assert header == "| A | B |"
+        assert data_rows == ["| 1 | 2 |"]
 
 
 # ---------------------------------------------------------------------------

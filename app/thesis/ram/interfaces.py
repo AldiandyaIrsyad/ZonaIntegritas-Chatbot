@@ -70,21 +70,6 @@ class INLIModel(Protocol):
         ...
 
 
-class IEmbeddingModel(Protocol):
-    """Structural contract for text embedding adapters in the research core."""
-
-    async def embed_texts(self, texts: List[str]) -> List[List[float]]:
-        """Generate dense embeddings for a list of texts.
-
-        Args:
-            texts: Input strings to embed. Order is preserved.
-
-        Returns:
-            A list of dense embedding vectors (List of floats).
-        """
-        ...
-
-
 @dataclass(frozen=True)
 class RerankResult:
     """Result of a reranking operation."""

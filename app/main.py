@@ -21,6 +21,7 @@ from app.chat.api import router as chat_router
 
 from app.kb.config import get_qdrant_settings
 from app.kb.infra.qdrant_store import QdrantStore
+from app.kb.dependency import get_vector_store, get_document_parser, get_reranker, get_text_embedder
 
 setup_logging()
 logger = structlog.get_logger(__name__)
@@ -91,6 +92,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await qdrant_store.close()
 
     yield
+
+    # Close the process-lifetime singleton clients from app.kb.dependency
+    # (each wraps an httpx.AsyncClient or in-process model that would
+    # otherwise leak). Only close getters that were actually called at least
+    # once during this app's lifetime (cache_info().currsize > 0) — calling
+    # an unused getter here would instantiate it for the first time just to
+    # immediately close it, which for get_text_embedder() means loading the
+    # entire BGE-M3 model on the way out. Independent try/except per client
+    # so one failure doesn't block the others from closing.
+    for getter in (get_document_parser, get_reranker, get_text_embedder, get_vector_store):
+        if getter.cache_info().currsize == 0:
+            continue
+        closeable = getter()
+        if closeable is None:
+            continue
+        try:
+            await closeable.close()
+        except Exception as exc:
+            logger.warning("shutdown.close_failed", target=type(closeable).__name__, error=str(exc))
+
     logger.info("application_shutdown", status="stopped")
 
 app_settings = get_app_settings()

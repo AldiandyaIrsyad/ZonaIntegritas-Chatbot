@@ -11,6 +11,7 @@ from app.thesis.chunking.page_classifier import (
     classify_all_pages,
     group_elements_by_page,
     VLM_PAGE_EXTRACTION_PROMPT,
+    _is_garbage_ocr_text,
 )
 
 
@@ -242,3 +243,47 @@ class TestVLMPrompt:
 
     def test_prompt_is_non_empty(self) -> None:
         assert len(VLM_PAGE_EXTRACTION_PROMPT) > 50
+
+
+# ---------------------------------------------------------------------------
+# _is_garbage_ocr_text — length + density heuristic
+# ---------------------------------------------------------------------------
+
+class TestIsGarbageOcrText:
+    """Regression coverage for the garbage-OCR detector.
+
+    The original _GARBAGE_TEXT_MAX_LEN=3 check missed longer noise like
+    '~   ~if ~!11' (12 chars, a real misread letterhead from the corpus) —
+    it needs both the pure-length check (still short noise) and a
+    length+density check (longer noise that's mostly non-alphanumeric).
+    """
+
+    def test_empty_text_is_garbage(self) -> None:
+        assert _is_garbage_ocr_text("") is True
+
+    def test_tiny_noise_is_garbage(self) -> None:
+        assert _is_garbage_ocr_text("L") is True
+        assert _is_garbage_ocr_text("6") is True
+        assert _is_garbage_ocr_text("qp") is True
+
+    def test_real_corpus_example_is_now_garbage(self) -> None:
+        """'~   ~if ~!11' (12 chars) previously passed the ≤3-char check."""
+        assert _is_garbage_ocr_text("~   ~if ~!11") is True
+
+    def test_short_legitimate_text_is_not_garbage(self) -> None:
+        """Short but real, mostly-alphanumeric OCR text should survive."""
+        assert _is_garbage_ocr_text("Rp5.000.000") is False
+        assert _is_garbage_ocr_text("Halaman 3") is False
+        assert _is_garbage_ocr_text("Gambar 1") is False
+
+    def test_long_real_sentence_is_not_garbage(self) -> None:
+        assert _is_garbage_ocr_text(
+            "PERATURAN REKTOR UNIVERSITAS PENDIDIKAN INDONESIA"
+        ) is False
+
+    def test_long_mostly_symbolic_text_beyond_density_window_not_flagged(self) -> None:
+        """Density check only applies up to _GARBAGE_DENSITY_MAX_LEN — longer
+        symbol-heavy strings aren't covered by this heuristic (by design, to
+        avoid false-positiving on legitimate long text with punctuation)."""
+        long_noise = "~" * 25
+        assert _is_garbage_ocr_text(long_noise) is False

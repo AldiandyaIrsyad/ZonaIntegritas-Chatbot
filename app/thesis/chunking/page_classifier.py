@@ -91,10 +91,36 @@ _VISUAL_ELEMENT_TYPES = frozenset({"Image", "Figure"})
 # Element types that count as "table" for classification
 _TABLE_ELEMENT_TYPES = frozenset({"Table"})
 
-# Maximum text length for an image element to be considered "garbage" OCR output.
-# This catches: empty strings, single-char noise ("L", "6"), 2-char OCR ("qp"),
-# 3-char noise, without needing fragile pattern matching on repeated chars.
+# Maximum text length for an image element to be considered "garbage" OCR
+# output purely on length (empty strings, single-char noise like "L"/"6",
+# 2-3 char OCR fragments like "qp").
 _GARBAGE_TEXT_MAX_LEN = 3
+
+# For longer-but-still-short OCR text, also flag as garbage when it's mostly
+# non-alphanumeric (e.g. "~   ~if ~!11" from a misread letterhead/seal) —
+# catches noise up to this length that _GARBAGE_TEXT_MAX_LEN alone misses,
+# without misclassifying short-but-legitimate OCR text (page numbers, short
+# captions), which is predominantly alphanumeric.
+_GARBAGE_DENSITY_MAX_LEN = 20
+_GARBAGE_MIN_ALNUM_RATIO = 0.5
+
+
+def _is_garbage_ocr_text(text: str) -> bool:
+    """Heuristic garbage-OCR detector for a single image/figure element's text.
+
+    Combines a pure length check (very short text is always garbage) with a
+    length-and-density check (longer-but-still-short text that's mostly
+    non-alphanumeric, e.g. OCR noise from a misread letterhead).
+    """
+    stripped = text.strip()
+    if len(stripped) <= _GARBAGE_TEXT_MAX_LEN:
+        return True
+    if len(stripped) <= _GARBAGE_DENSITY_MAX_LEN:
+        alnum_count = sum(1 for ch in stripped if ch.isalnum())
+        alnum_ratio = alnum_count / len(stripped)
+        if alnum_ratio < _GARBAGE_MIN_ALNUM_RATIO:
+            return True
+    return False
 
 # Default thresholds for VISUAL classification
 DEFAULT_IMAGE_RATIO_THRESHOLD = 0.5
@@ -163,7 +189,7 @@ def classify_page(
         etype = el.element_type
         if etype in _VISUAL_ELEMENT_TYPES:
             image_count += 1
-            if len(el.text.strip()) <= _GARBAGE_TEXT_MAX_LEN:
+            if _is_garbage_ocr_text(el.text):
                 garbage_image_count += 1
         elif etype in _TABLE_ELEMENT_TYPES:
             table_count += 1

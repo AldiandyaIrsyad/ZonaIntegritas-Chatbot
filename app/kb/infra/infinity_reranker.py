@@ -73,6 +73,11 @@ class InfinityReranker(IReranker):
         # sort defensively to guarantee the contract.
         rerank_results.sort(key=lambda r: r.score, reverse=True)
 
+        # The server is expected to honor top_k, but don't rely on it —
+        # enforce the cap client-side too.
+        if top_k is not None:
+            rerank_results = rerank_results[:top_k]
+
         logger.info(
             "kb.rerank.completed",
             query_length=len(query),

@@ -15,3 +15,7 @@ datasets/
 data/
 
 _eval/
+
+scrapers/
+
+scripts/upload_state*.json

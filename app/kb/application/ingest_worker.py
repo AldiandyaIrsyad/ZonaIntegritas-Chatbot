@@ -5,7 +5,7 @@ Asynchronous document ingestion workflow for the KB domain.
 import os
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional
+from typing import Callable, Optional
 
 from app.kb.domain.interfaces import (
     IDocumentParser,
@@ -16,7 +16,7 @@ from app.kb.domain.interfaces import (
 )
 from app.kb.domain.models import ParentChunk, ChildChunk
 from app.thesis.chunking.logic import create_parent_chunks, split_into_children
-from app.thesis.chunking.models import ChildChunkData, ContentType, ParentChunkData, ParsedElement
+from app.thesis.chunking.models import ChildChunkData, ContentType, ParsedElement
 from app.thesis.chunking.page_classifier import (
     DEFAULT_GARBAGE_RATIO_THRESHOLD,
     DEFAULT_IMAGE_RATIO_THRESHOLD,
@@ -26,6 +26,7 @@ from app.thesis.chunking.page_classifier import (
     group_elements_by_page,
 )
 from app.thesis.chunking.router import classify_element
+from app.thesis.vlm.client import DEFAULT_VLM_PROMPT
 from app.thesis.vlm.interfaces import IVLMEnricher
 from app.thesis.chunking.table_converter import html_table_to_markdown
 
@@ -60,6 +61,9 @@ class IngestWorker:
         image_dir: str = "./uploads/knowledge_base/images",
         page_image_ratio_threshold: float = DEFAULT_IMAGE_RATIO_THRESHOLD,
         page_garbage_ratio_threshold: float = DEFAULT_GARBAGE_RATIO_THRESHOLD,
+        image_description_prompt: str = DEFAULT_VLM_PROMPT,
+        page_extraction_prompt: str = VLM_PAGE_EXTRACTION_PROMPT,
+        on_stage: Optional[Callable[[str, dict], None]] = None,
     ):
         self.db = db
         self.document_parser = document_parser
@@ -70,6 +74,18 @@ class IngestWorker:
         self.image_dir = image_dir
         self.page_image_ratio_threshold = page_image_ratio_threshold
         self.page_garbage_ratio_threshold = page_garbage_ratio_threshold
+        self.image_description_prompt = image_description_prompt
+        self.page_extraction_prompt = page_extraction_prompt
+        # Optional research/visualization hook, invoked at each documented
+        # pipeline stage with whatever data is already on hand. Defaults to
+        # None so every existing caller (real ingestion) is unaffected; set
+        # by tools.visualize.production_ingestion_viz to capture the
+        # real page-classifier/VLM routing decisions for documentation.
+        self.on_stage = on_stage
+
+    def _emit(self, stage: str, data: dict) -> None:
+        if self.on_stage is not None:
+            self.on_stage(stage, data)
 
     async def ingest_document(self, doc_id: str) -> None:
         """Run the full ingestion pipeline for a document."""
@@ -88,6 +104,7 @@ class IngestWorker:
 
             # 1. Parse PDF
             elements = await self.document_parser.parse_pdf(str(pdf_doc.pdf_path))
+            self._emit("parsed", {"elements": elements})
             if not elements:
                 await self.kb_repo.update_ingestion_task(task.id, "completed")
                 pdf_doc.ingestion_status = "completed"  # type: ignore
@@ -101,9 +118,11 @@ class IngestWorker:
             elements = await self._route_and_enrich_elements(
                 elements, str(pdf_doc.pdf_path), doc_id
             )
+            self._emit("routed", {"elements": elements})
 
             # 3. Pure Chunking Algorithm (Thesis)
             parent_chunk_data = create_parent_chunks(elements, doc_id)
+            self._emit("parent_chunks", {"parent_chunk_data": parent_chunk_data})
 
             # 4. Save Parent Chunks to Postgres
             parent_chunk_models = [
@@ -140,6 +159,7 @@ class IngestWorker:
                 return
 
             logger.info("kb.ingest.chunking_complete", doc_id=doc_id, parent_chunks=len(parent_chunk_data), child_chunks=len(all_children))
+            self._emit("children", {"all_children": all_children})
 
             # 5b. Save Child Chunks to Postgres (for chunk-level reranking + sibling lookups)
             child_chunk_models = [
@@ -161,6 +181,7 @@ class IngestWorker:
             # 6. Embed children
             child_texts = [c.text for c in all_children]
             embeddings = await self.text_embedder.embed_texts(child_texts)
+            self._emit("embeddings", {"all_children": all_children, "embeddings": embeddings})
 
             # 7. Upsert to Qdrant
             chunk_vectors = [
@@ -185,6 +206,7 @@ class IngestWorker:
                 return
                 
             await self.vector_store.upsert_chunks(chunk_vectors)
+            self._emit("upserted", {"chunk_vectors": chunk_vectors})
 
             # 8. Complete
             await self.kb_repo.update_ingestion_task(task.id, "completed")
@@ -297,6 +319,7 @@ class IngestWorker:
                     garbage_ratio=classification.garbage_ratio,
                     element_count=classification.element_count,
                 )
+                self._emit("page_classified", {"classification": classification})
 
             if classification is not None and classification.page_type == PageType.VISUAL:
                 visual_pages_count += 1
@@ -423,7 +446,9 @@ class IngestWorker:
                     continue
 
                 try:
-                    description = await self.vlm_enricher.describe_image(image_path)
+                    description = await self.vlm_enricher.describe_image(
+                        image_path, prompt=self.image_description_prompt
+                    )
                     if description and description.strip():
                         el.text = description.strip()
                         enriched_count += 1
@@ -522,7 +547,7 @@ class IngestWorker:
 
         try:
             description = await self.vlm_enricher.describe_image(
-                image_path, prompt=VLM_PAGE_EXTRACTION_PROMPT
+                image_path, prompt=self.page_extraction_prompt
             )
         except Exception as exc:
             logger.error(

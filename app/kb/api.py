@@ -10,6 +10,12 @@ from app.kb.application.kb_service import KBApplicationService
 from app.kb.application.search_service import SearchService
 from app.kb.dependency import get_kb_service, get_search_service
 
+
+class NaiveSearchResultItem(BaseModel):
+    """A single naive title-search match returned to the client."""
+    id: str
+    title: str
+
 router = APIRouter()
 
 class PDFUpdateRequest(BaseModel):
@@ -87,7 +93,7 @@ async def upload_pdfs_batch(
     while len(desc_list) < len(files):
         desc_list.append("")
 
-    results = await service.upload_pdfs_batch(
+    results, failures = await service.upload_pdfs_batch(
         files=files,
         titles=titles,
         descriptions=desc_list,
@@ -96,7 +102,7 @@ async def upload_pdfs_batch(
     return JSONResponse(
         status_code=202,
         content={
-            "status": "accepted",
+            "status": "accepted" if not failures else "partial",
             "count": len(results),
             "documents": [
                 {
@@ -106,6 +112,8 @@ async def upload_pdfs_batch(
                 }
                 for pdf in results
             ],
+            "failed_count": len(failures),
+            "failures": failures,
         },
     )
 
@@ -192,3 +200,17 @@ async def search_knowledge_base(
         )
         for c in contexts
     ]
+
+
+@router.get("/api/kb/naive-search", response_model=List[NaiveSearchResultItem])
+async def naive_search_knowledge_base(
+    q: str = Query(..., min_length=1, description="Search query"),
+    service: KBApplicationService = Depends(get_kb_service),
+) -> List[NaiveSearchResultItem]:
+    """Literal, word-order-sensitive title substring search.
+
+    Reproduces the behavior of naive title-only JDIH portals for the
+    /demo comparison page — not part of the real RAG retrieval path.
+    """
+    pdfs = await service.naive_title_search(q)
+    return [NaiveSearchResultItem(id=str(p.id), title=str(p.title)) for p in pdfs]

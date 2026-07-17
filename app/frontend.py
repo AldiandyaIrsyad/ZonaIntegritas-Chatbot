@@ -17,3 +17,9 @@ async def get_admin_page(request: Request) -> Any:
     return templates.TemplateResponse(
         request=request, name="pages/admin.html"
     )
+
+@router.get("/demo/")
+async def get_demo_page(request: Request) -> Any:
+    return templates.TemplateResponse(
+        request=request, name="pages/demo.html"
+    )

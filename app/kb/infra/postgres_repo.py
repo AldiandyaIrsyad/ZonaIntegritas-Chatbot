@@ -4,6 +4,7 @@ import structlog
 from datetime import datetime, timezone
 from typing import List, Optional
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import joinedload
@@ -56,6 +57,20 @@ class PostgresKBRepository(IKBRepository):
             return True
         return False
 
+    async def search_titles_naive(self, query: str) -> List[PDFDocument]:
+        """Literal, case-insensitive, word-order-sensitive title substring
+        match — deliberately reproduces the title-only search behavior of
+        naive JDIH portals (e.g. jdih.upi.edu) for the /demo comparison
+        page. Not used by the real RAG retrieval path.
+        """
+        result = await self.db.execute(
+            select(PDFDocument)
+            .where(PDFDocument.active.is_(True))
+            .where(PDFDocument.title.ilike(f"%{query}%"))
+            .order_by(PDFDocument.created_at.desc())
+        )
+        return list(result.scalars().all())
+
     async def get_pdfs_by_ids(self, pdf_ids: List[str]) -> List[PDFDocument]:
         """Fetch multiple PDF documents by their IDs in a single query.
 
@@ -91,16 +106,6 @@ class PostgresKBRepository(IKBRepository):
         )
         return list(result.scalars().all())
 
-    async def delete_parent_chunks_by_doc_id(self, doc_id: str) -> int:
-        result = await self.db.execute(select(ParentChunk).where(ParentChunk.doc_id == doc_id))
-        chunks = result.scalars().all()
-        count = len(chunks)
-        for chunk in chunks:
-            await self.db.delete(chunk)
-        await self.db.flush()
-        logger.info("kb.repository.chunks_deleted", count=count, doc_id=doc_id)
-        return count
-
     async def save_child_chunks(self, chunks: List[ChildChunk]) -> List[ChildChunk]:
         """Persist child chunk records to the database."""
         if not chunks:
@@ -119,17 +124,6 @@ class PostgresKBRepository(IKBRepository):
         )
         return list(result.scalars().all())
 
-    async def get_child_chunks_by_parent_ids(self, parent_ids: List[str]) -> List[ChildChunk]:
-        """Fetch child chunks by their parent chunk IDs, ordered by ordinal."""
-        if not parent_ids:
-            return []
-        result = await self.db.execute(
-            select(ChildChunk)
-            .where(ChildChunk.parent_chunk_id.in_(parent_ids))
-            .order_by(ChildChunk.parent_chunk_id, ChildChunk.ordinal)
-        )
-        return list(result.scalars().all())
-
     async def get_sibling_chunks(self, parent_id: str) -> List[ParentChunk]:
         """Fetch sibling parent chunks sharing the same parent_id."""
         result = await self.db.execute(
@@ -140,15 +134,27 @@ class PostgresKBRepository(IKBRepository):
         return list(result.scalars().all())
 
     async def get_chunks_by_path_prefix(self, path_prefix: str) -> List[ParentChunk]:
-        """Fetch parent chunks whose path starts with the given prefix.
+        """Fetch parent chunks whose path contains the given segment as a
+        complete label (e.g. "pasal_5"), plus anything nested beneath it.
 
-        Uses LIKE 'prefix%' which works on both Postgres and SQLite.
+        Real paths are rooted at the document UUID (e.g.
+        ``<uuid>.bab_i_ketentuan_umum.pasal_1``), so a left-anchored
+        ``LIKE 'pasal_5%'`` can never match. A naive ``LIKE '%pasal_5%'``
+        would also false-positive on ``pasal_50``/``pasal_51`` as substrings.
+        Uses the ``ltree`` extension (already created at startup, see
+        ``app/main.py``) via an in-query cast — the ``path`` column itself is
+        plain ``VARCHAR``, so no migration is required — to match
+        ``path_prefix`` as a whole ltree label, guaranteeing segment-boundary
+        correctness.
         """
         if not path_prefix:
             return []
         result = await self.db.execute(
             select(ParentChunk)
-            .where(ParentChunk.path.like(f"{path_prefix}%"))
+            .where(
+                text("path::ltree ~ (:lq1)::lquery OR path::ltree ~ (:lq2)::lquery")
+                .bindparams(lq1=f"*.{path_prefix}", lq2=f"*.{path_prefix}.*")
+            )
             .order_by(ParentChunk.ordinal)
         )
         return list(result.scalars().all())
@@ -189,3 +195,9 @@ class PostgresKBRepository(IKBRepository):
             .limit(1)
         )
         return result.scalars().first()
+
+    async def commit(self) -> None:
+        await self.db.commit()
+
+    async def rollback(self) -> None:
+        await self.db.rollback()

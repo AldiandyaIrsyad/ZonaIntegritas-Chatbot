@@ -2,6 +2,8 @@
 Dependency injection for the KB domain.
 """
 
+from functools import lru_cache
+
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
@@ -9,9 +11,9 @@ from typing import Optional
 from app.shared.db import get_db_session
 from app.kb.config import (
     get_qdrant_settings, get_infinity_settings, get_unstructured_settings,
-    get_storage_settings, get_vlm_settings,
+    get_storage_settings, get_vlm_settings, get_bge_m3_settings,
 )
-from app.kb.infra import PostgresKBRepository, QdrantStore, UnstructuredClient, InfinityEmbeddings, InfinityReranker
+from app.kb.infra import PostgresKBRepository, QdrantStore, UnstructuredClient, BGEM3Embeddings, InfinityReranker
 from app.thesis.vlm import FallbackVLMClient, IVLMEnricher, OllamaVLMClient, OpenRouterVLMClient
 from app.kb.application.ingest_worker import IngestWorker
 from app.kb.application.search_service import SearchService
@@ -21,6 +23,13 @@ from app.kb.domain.interfaces import IQueryExpander
 async def get_kb_repo(db: AsyncSession = Depends(get_db_session)) -> PostgresKBRepository:
     return PostgresKBRepository(db)
 
+# These four are process-lifetime singletons (not per-request factories):
+# each wraps an httpx.AsyncClient (or, for BGEM3Embeddings, an in-process
+# model) that's expensive to open/load and was previously being recreated
+# on every dependency resolution with nothing ever closing it — a real
+# connection/resource leak. app/main.py's lifespan closes these on shutdown.
+
+@lru_cache
 def get_vector_store() -> QdrantStore:
     config = get_qdrant_settings()
     return QdrantStore(
@@ -29,6 +38,7 @@ def get_vector_store() -> QdrantStore:
         collection_name=config.collection_name,
     )
 
+@lru_cache
 def get_document_parser() -> UnstructuredClient:
     config = get_unstructured_settings()
     return UnstructuredClient(
@@ -37,10 +47,17 @@ def get_document_parser() -> UnstructuredClient:
         api_key=config.api_key,
     )
 
-def get_text_embedder() -> InfinityEmbeddings:
-    config = get_infinity_settings()
-    return InfinityEmbeddings(base_url=config.base_url, model=config.embedding_model)
+@lru_cache
+def get_text_embedder() -> BGEM3Embeddings:
+    config = get_bge_m3_settings()
+    return BGEM3Embeddings(
+        model_name=config.model,
+        device=config.device,
+        use_fp16=config.use_fp16,
+        batch_size=config.batch_size,
+    )
 
+@lru_cache
 def get_reranker() -> Optional[InfinityReranker]:
     config = get_infinity_settings()
     if not config.reranker_enabled:
@@ -102,7 +119,7 @@ async def get_ingest_worker(
     db: AsyncSession = Depends(get_db_session),
     repo: PostgresKBRepository = Depends(get_kb_repo),
     parser: UnstructuredClient = Depends(get_document_parser),
-    embedder: InfinityEmbeddings = Depends(get_text_embedder),
+    embedder: BGEM3Embeddings = Depends(get_text_embedder),
     vstore: QdrantStore = Depends(get_vector_store),
     vlm_enricher: Optional[IVLMEnricher] = Depends(get_vlm_enricher),
 ) -> IngestWorker:
@@ -118,6 +135,8 @@ async def get_ingest_worker(
         image_dir=storage_config.image_dir,
         page_image_ratio_threshold=vlm_settings.page_image_ratio_threshold,
         page_garbage_ratio_threshold=vlm_settings.page_garbage_ratio_threshold,
+        image_description_prompt=vlm_settings.image_description_prompt,
+        page_extraction_prompt=vlm_settings.page_extraction_prompt,
     )
 
 async def get_kb_service(
@@ -136,7 +155,7 @@ async def get_kb_service(
 async def get_search_service(
     repo: PostgresKBRepository = Depends(get_kb_repo),
     vstore: QdrantStore = Depends(get_vector_store),
-    embedder: InfinityEmbeddings = Depends(get_text_embedder),
+    embedder: BGEM3Embeddings = Depends(get_text_embedder),
     reranker: Optional[InfinityReranker] = Depends(get_reranker),
     query_expander: Optional[IQueryExpander] = Depends(get_query_expander),
 ) -> SearchService:

@@ -102,6 +102,28 @@ class QdrantPointSnapshot:
 
 
 @dataclass(frozen=True)
+class PageClassificationSnapshot:
+    """Snapshot of a single page's classification decision (see
+    ``app.thesis.chunking.page_classifier.PageClassification``).
+
+    Captured only by the production ingestion capture path
+    (:mod:`tools.visualize.production_ingestion_viz`), which drives the
+    real :class:`IngestWorker` and therefore actually calls ``classify_page``
+    — the ephemeral :mod:`ingestion_viz` runner reimplements only the
+    per-element routing and never classifies pages.
+    """
+
+    page_number: int
+    page_type: str
+    element_count: int
+    image_count: int
+    table_count: int
+    garbage_image_count: int
+    image_ratio: float
+    garbage_ratio: float
+
+
+@dataclass(frozen=True)
 class IngestionSnapshot:
     """Complete snapshot of the ingestion pipeline run."""
 
@@ -121,6 +143,7 @@ class IngestionSnapshot:
     total_element_chars: int
     total_parent_chars: int
     total_child_chars: int
+    page_classifications: List[PageClassificationSnapshot] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -154,6 +177,11 @@ class RetrievedParentSnapshot:
         path: ltree-style path of the parent.
         sibling_ids: List of sibling chunk IDs (same parent).
         cross_refs: List of cross-reference strings detected in the text.
+        provenance: How this result entered the final list — "primary"
+            (matched search directly), "sibling" (same-parent hydration), or
+            "cross_ref" (detected Pasal/BAB/Ayat reference). Only populated
+            by the production retrieval capture path
+            (:mod:`tools.visualize.production_retrieval_viz`).
     """
 
     rank: int
@@ -171,6 +199,7 @@ class RetrievedParentSnapshot:
     path: str = ""
     sibling_ids: List[str] = field(default_factory=list)
     cross_refs: List[str] = field(default_factory=list)
+    provenance: str = "primary"
 
 
 @dataclass(frozen=True)
@@ -198,6 +227,10 @@ class RetrievalSnapshot:
         sibling_count: Total sibling chunks hydrated.
         cross_ref_count: Total cross-reference chunks fetched.
         final_context_count: Final deduplicated context count.
+        detected_cross_refs: The actual Pasal/BAB/Ayat path-prefix strings
+            (e.g. "pasal_5", "bab_ii") detected in the primary results' text
+            and used to fetch cross-referenced chunks. Only populated by the
+            production retrieval capture path.
     """
 
     query: str
@@ -212,6 +245,7 @@ class RetrievalSnapshot:
     sibling_count: int = 0
     cross_ref_count: int = 0
     final_context_count: int = 0
+    detected_cross_refs: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

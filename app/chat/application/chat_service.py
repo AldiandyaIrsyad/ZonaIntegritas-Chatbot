@@ -6,6 +6,7 @@ and the LLM inference engine.
 """
 
 import json
+import re
 import uuid
 import structlog
 from typing import AsyncGenerator, List, Dict, Any, Optional, Tuple
@@ -20,6 +21,17 @@ from app.thesis.ram.interfaces import RetrievedContext as RAMRetrievedContext
 from app.thesis.ram.text_utils import split_sentences_with_seps
 
 logger = structlog.get_logger(__name__)
+
+# A Markdown table row (header, separator, or data row) starts and ends
+# with "|". Used to keep citation markers off table row lines — appending
+# text after a row's closing "|" would corrupt GFM table syntax.
+_TABLE_ROW_RE = re.compile(r'^\s*\|.*\|\s*$')
+
+# Minimum proposition length (chars) worth an NLI call. Short factual
+# completions (dates, amounts, short names) are common in this domain and
+# should still get a citation attempt, so this is intentionally low —
+# it mainly filters pure interjections ("Ya.", "Oke.").
+MIN_ASSESSABLE_LENGTH = 8
 
 class ChatService:
     """Orchestrates the chat request pipeline."""
@@ -149,8 +161,6 @@ class ChatService:
         "\\n\\n" for a paragraph break), so callers can preserve the original
         formatting instead of always rejoining with a single space.
         """
-        import re
-
         # Split on sentence boundaries (., ?, !) and newlines. Delegates to
         # the shared splitter, which guards against markdown list markers
         # (e.g. "1.", "2.") being mistaken for sentence ends, and which
@@ -186,6 +196,81 @@ class ChatService:
                 propositions.append((sub, sep if i == len(subs) - 1 else " "))
 
         return propositions
+
+    @staticmethod
+    def _is_table_row(prop_text: str) -> bool:
+        """True if a proposition is a single Markdown table line (header,
+        separator, or data row) — starts and ends with '|'.
+
+        Used to keep citation markers off table row lines, which would
+        corrupt GFM table syntax if appended inline (a valid row must
+        consist solely of pipe-delimited cells).
+
+        Known limitation: a bare-pipe-notation sentence like "|x| = 5"
+        would false-positive; accepted given this domain (Indonesian
+        regulatory/thesis prose essentially never uses that notation).
+        """
+        return bool(_TABLE_ROW_RE.match(prop_text.strip()))
+
+    async def _assess_and_format(
+        self,
+        text: str,
+        premise: str,
+        ram_contexts: List[RAMRetrievedContext],
+        skip_guardrails: bool,
+    ) -> str:
+        """Run RAM assessment (unless in baseline mode) and format the
+        result into a citation marker string (possibly "").
+
+        Shared by the per-proposition prose path and the accumulated
+        table-block path in ``_handle_complete_proposition``.
+        """
+        if skip_guardrails:
+            return ""
+        result = await self.ram_service.assess_sentence(text, premise, ram_contexts)
+        return self._format_citation(result)
+
+    async def _handle_complete_proposition(
+        self,
+        prop_text: str,
+        sep: str,
+        *,
+        ram_contexts: List[RAMRetrievedContext],
+        premise: str,
+        skip_guardrails: bool,
+        table_rows: List[Tuple[str, str]],
+    ) -> AsyncGenerator[str, None]:
+        """Process one complete (proposition, sep) pair, yielding output
+        text chunks in the order they should be streamed/appended.
+
+        Table row propositions are accumulated in the caller-owned
+        ``table_rows`` list (mutated in place) instead of being assessed
+        individually — a single row has no column headers, and injecting
+        a citation marker onto a row's line would corrupt GFM table
+        syntax. Once a non-table-row proposition arrives (the table block
+        has ended), the accumulated rows are assessed as one unit and the
+        citation is emitted as its own paragraph, never on a row line.
+        """
+        if self._is_table_row(prop_text):
+            table_rows.append((prop_text, sep))
+            yield prop_text + sep
+            return
+
+        if table_rows:
+            table_text = "\n".join(row for row, _ in table_rows)
+            table_rows.clear()
+            citation = await self._assess_and_format(table_text, premise, ram_contexts, skip_guardrails)
+            if citation:
+                yield "\n" + citation.strip() + "\n\n"
+
+        if not prop_text.endswith((".", "?", "!")):
+            prop_text += "."
+
+        if len(prop_text) > MIN_ASSESSABLE_LENGTH:
+            citation = await self._assess_and_format(prop_text, premise, ram_contexts, skip_guardrails)
+            prop_text += citation
+
+        yield prop_text + sep
 
     async def process_chat_message(
         self, session_id: str, message_text: str, skip_guardrails: bool = False
@@ -304,6 +389,12 @@ class ChatService:
             # We buffer the stream by sentence to evaluate each complete sentence
             buffer = ""
             final_output = ""
+            # Accumulates contiguous Markdown table row propositions until a
+            # non-table-row proposition ends the block (see
+            # _handle_complete_proposition). Local to this call — never
+            # instance state, since ChatService may be reused across
+            # concurrent requests.
+            table_rows: List[Tuple[str, str]] = []
 
             # 6. Stream and Assess
             stream = self.llm_conn.stream_chat(
@@ -312,7 +403,7 @@ class ChatService:
                 max_tokens=1024,
                 temperature=self.temperature,
             )
-            
+
             async for chunk in stream:
                 buffer += chunk
                 # Check if we hit a boundary that likely ends a proposition
@@ -321,35 +412,37 @@ class ChatService:
                     if len(propositions) > 1:
                         # Process all but the last incomplete fragment
                         for prop, sep in propositions[:-1]:
-                            prop_text = prop.strip()
-                            # Re-add trailing period if it was stripped by regex and wasn't a conjunction split,
-                            # or just ensure it's a complete looking sentence.
-                            if not prop_text.endswith((".", "?", "!")):
-                                prop_text += "."
-
-                            if len(prop_text) > 15:  # Only assess meaningful propositions
-                                if skip_guardrails:
-                                    # Baseline mode: no RAM assessment, no citation
-                                    out_prop = prop_text
-                                else:
-                                    result = await self.ram_service.assess_sentence(prop_text, premise, ram_contexts)
-                                    out_prop = prop_text + self._format_citation(result)
-                                final_output += out_prop + sep
-                                yield json.dumps({"type": "chunk", "content": out_prop + sep}) + "\n"
-                            else:
-                                final_output += prop_text + sep
-                                yield json.dumps({"type": "chunk", "content": prop_text + sep}) + "\n"
+                            async for out in self._handle_complete_proposition(
+                                prop, sep, ram_contexts=ram_contexts, premise=premise,
+                                skip_guardrails=skip_guardrails, table_rows=table_rows,
+                            ):
+                                final_output += out
+                                yield json.dumps({"type": "chunk", "content": out}) + "\n"
 
                         buffer = propositions[-1][0]
 
-            # Process any remaining buffer
+            # Process any remaining buffer through the same row/prose dispatch.
             if buffer.strip():
-                sentence = buffer.strip()
-                if len(sentence) > 10 and not skip_guardrails:
-                    result = await self.ram_service.assess_sentence(sentence, premise, ram_contexts)
-                    sentence = sentence + self._format_citation(result)
-                final_output += sentence
-                yield json.dumps({"type": "chunk", "content": sentence}) + "\n"
+                for prop, sep in self._split_propositions(buffer.strip()):
+                    async for out in self._handle_complete_proposition(
+                        prop, sep, ram_contexts=ram_contexts, premise=premise,
+                        skip_guardrails=skip_guardrails, table_rows=table_rows,
+                    ):
+                        final_output += out
+                        yield json.dumps({"type": "chunk", "content": out}) + "\n"
+
+            # If the answer ended while still inside a table (the last
+            # streamed content was table rows, so no trailing prose
+            # proposition ever arrived to trigger the flush inside
+            # _handle_complete_proposition), assess and flush it now.
+            if table_rows:
+                table_text = "\n".join(row for row, _ in table_rows)
+                table_rows.clear()
+                citation = await self._assess_and_format(table_text, premise, ram_contexts, skip_guardrails)
+                if citation:
+                    out = "\n" + citation.strip() + "\n\n"
+                    final_output += out
+                    yield json.dumps({"type": "chunk", "content": out}) + "\n"
 
             # Record assistant message, alongside the RAG context/sources
             # used to generate it so the frontend can restore the "view RAG

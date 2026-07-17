@@ -20,7 +20,7 @@ from typing import List, Optional
 import structlog
 
 from .interfaces import IRerankerModel, INLIModel, NLIResult, RetrievedContext
-from .text_utils import split_sentences
+from .text_utils import split_sentences, split_table_windows
 
 logger = structlog.get_logger(__name__)
 
@@ -28,11 +28,29 @@ LABEL_NEUTRAL = "neutral"
 LABEL_ENTAILMENT = "entailment"
 LABEL_CONTRADICTION = "contradiction"
 
-# How many contexts to include in the premise (prevents exceeding NLI max_length)
-MAX_PREMISE_CONTEXTS = 5
+# How many contexts to include in the premise (prevents exceeding NLI max_length).
+# Matches app.kb.application.search_service.RERANK_TOP_K: search_service
+# already cross-encoder-reranks candidates down to its top 8 before any
+# sibling/cross-ref hydration is appended, so this constant should cover the
+# full query-relevant primary set (not truncate within it), while still
+# excluding the lower-relevance sibling/cross-ref tail by default.
+MAX_PREMISE_CONTEXTS = 8
 
 # Max length of the evidence snippet surfaced in citation tooltips.
 EVIDENCE_SNIPPET_MAX_CHARS = 140
+
+# Reranked candidate windows tried per sentence before falling back to the
+# first candidate's (possibly neutral) verdict. Bounded at 2 rather than a
+# larger N: assess_sentence runs synchronously inline in the chat streaming
+# loop (awaited before the next token chunk is yielded), so each extra NLI
+# call adds directly to perceived per-sentence latency. In the common case
+# (top-1 window is a confident match) only 1 NLI call is made; the 2nd is
+# only spent when the top-1 result is neutral or low-confidence.
+NLI_CANDIDATE_WINDOWS = 2
+
+# Minimum dominant-label score for a candidate window's NLI result to
+# short-circuit the search (skip trying further candidate windows).
+NLI_CONFIDENCE_THRESHOLD = 0.5
 
 
 def _sanitize_snippet(text: str, max_len: int = EVIDENCE_SNIPPET_MAX_CHARS) -> str:
@@ -128,9 +146,6 @@ class RAMService:
                 contradiction_score=0.0,
             )
 
-        best_ctx = contexts[0]
-        best_premise = best_ctx.text[:800] # Fallback
-        
         try:
             top_contexts = contexts[:MAX_PREMISE_CONTEXTS]
             
@@ -139,6 +154,22 @@ class RAMService:
             window_to_ctx: List[RetrievedContext] = []
             
             for ctx in top_contexts:
+                if ctx.content_type == "table":
+                    # Row-group windows that repeat the header + separator
+                    # row in every window — prose sentence-splitting would
+                    # treat each row as its own "sentence" and lose the
+                    # header after the first window (see split_table_windows
+                    # docstring). Falls through to the prose path below only
+                    # if ctx.text isn't a parseable Markdown table (e.g. raw
+                    # HTML left over from a failed ingest-time conversion).
+                    table_windows = split_table_windows(ctx.text, rows_per_window=3, row_step=2)
+                    if table_windows:
+                        for window in table_windows:
+                            if len(window) > 20:
+                                windows.append(window)
+                                window_to_ctx.append(ctx)
+                        continue
+
                 # Split into sentence-like units for windowing (guards
                 # against markdown list markers being mistaken for
                 # sentence ends; see text_utils.split_sentences).
@@ -151,7 +182,7 @@ class RAMService:
                     windows.append(ctx.text)
                     window_to_ctx.append(ctx)
                     continue
-                    
+
                 window_size = 3
                 step = 2
                 for i in range(0, max(1, len(sentences)), step):
@@ -163,41 +194,62 @@ class RAMService:
             if not windows:
                 return NLIResult(label=LABEL_NEUTRAL, entailment_score=0.5, contradiction_score=0.0)
 
-            # Rerank windows against the hypothesis sentence
+            # Rerank windows against the hypothesis sentence — take the top-N
+            # candidates rather than just the single best match, since the
+            # reranker's #1 pick isn't always the window the NLI model finds
+            # entailing (see NLI_CANDIDATE_WINDOWS).
             rerank_results = await self.reranker_model.rerank(
                 query=sentence,
                 documents=windows,
-                top_k=1
+                top_k=NLI_CANDIDATE_WINDOWS,
             )
-            
-            if rerank_results:
-                top_result = rerank_results[0]
-                best_idx = top_result.index
-                if best_idx < len(windows):
-                    best_premise = windows[best_idx]
-                    best_ctx = window_to_ctx[best_idx]
-                    
+            candidate_idxs = [r.index for r in rerank_results if 0 <= r.index < len(windows)]
         except Exception as e:
             logger.warning("Failed to reverse map citation with reranker: %s", str(e), exc_info=True)
             return NLIResult(label=LABEL_NEUTRAL, entailment_score=0.5, contradiction_score=0.0)
 
-        logger.debug(
-            "Assessing sentence (%d chars) against best context premise (%d chars)",
-            len(sentence),
-            len(best_premise),
-        )
-
-        try:
-            result = await self.nli_model.check(premise=best_premise, hypothesis=sentence)
-            
-            # NLIResult is frozen, use dataclasses.replace to attach metadata
-            return dataclasses.replace(
-                result,
-                source_title=best_ctx.source_title,
-                page=best_ctx.page,
-                doc_id=best_ctx.doc_id,
-                evidence_snippet=_sanitize_snippet(best_premise),
-            )
-        except Exception as e:
-            logger.warning("NLI check failed: %s", str(e), exc_info=True)
+        if not candidate_idxs:
             return NLIResult(label=LABEL_NEUTRAL, entailment_score=0.5, contradiction_score=0.0)
+
+        # Try each candidate window in rerank order, short-circuiting on the
+        # first confident non-neutral verdict. If none qualify, fall back to
+        # the top-ranked candidate's result rather than dropping the
+        # citation entirely.
+        fallback: Optional[tuple] = None
+        for idx in candidate_idxs:
+            candidate_premise = windows[idx]
+            candidate_ctx = window_to_ctx[idx]
+            logger.debug(
+                "Assessing sentence (%d chars) against candidate premise (%d chars)",
+                len(sentence),
+                len(candidate_premise),
+            )
+            try:
+                result = await self.nli_model.check(premise=candidate_premise, hypothesis=sentence)
+            except Exception as e:
+                logger.warning("NLI check failed: %s", str(e), exc_info=True)
+                continue
+
+            if fallback is None:
+                fallback = (result, candidate_ctx, candidate_premise)
+
+            dominant_score = {
+                LABEL_ENTAILMENT: result.entailment_score,
+                LABEL_CONTRADICTION: result.contradiction_score,
+            }.get(result.label, 0.0)
+            if result.label != LABEL_NEUTRAL and dominant_score >= NLI_CONFIDENCE_THRESHOLD:
+                chosen_result, chosen_ctx, chosen_premise = result, candidate_ctx, candidate_premise
+                break
+        else:
+            if fallback is None:
+                return NLIResult(label=LABEL_NEUTRAL, entailment_score=0.5, contradiction_score=0.0)
+            chosen_result, chosen_ctx, chosen_premise = fallback
+
+        # NLIResult is frozen, use dataclasses.replace to attach metadata
+        return dataclasses.replace(
+            chosen_result,
+            source_title=chosen_ctx.source_title,
+            page=chosen_ctx.page,
+            doc_id=chosen_ctx.doc_id,
+            evidence_snippet=_sanitize_snippet(chosen_premise),
+        )

@@ -1,21 +1,21 @@
-"""CLI entry point for the combined multi-PDF visualization tool.
+"""CLI entry point for the RAG pipeline visualization tool.
 
-Ingests multiple PDFs into a single shared Qdrant collection, then runs
-multiple queries against that collection to show how documents interact
-during hybrid retrieval (dense + sparse + RRF fusion).
+Runs the full ingestion + retrieval pipeline against a temporary SQLite
+database and an ephemeral Qdrant collection, then generates a
+self-contained HTML report.
 
 Usage::
 
-    .venv/bin/python -m app.thesis.visualize.run_combined \\
-        --pdf-dir datasets/
+    .venv/bin/python -m tools.visualize.run \\
+        --pdf-path datasets/permenpanrb-no-5-tahun-2024.pdf
 
-    # With explicit PDFs and queries
-    .venv/bin/python -m app.thesis.visualize.run_combined \\
-        --pdf-paths datasets/doc1.pdf datasets/doc2.pdf \\
-        --queries "Apa itu zona integritas?" "Bagaimana evaluasi WBK?"
+    # With a custom query
+    .venv/bin/python -m tools.visualize.run \\
+        --pdf-path datasets/permenpanrb-no-5-tahun-2024.pdf \\
+        --query "Apa itu zona integritas?"
 
 Requires the real infrastructure services to be running:
-    - Unstructured API  (port 8001, or cloud with --unstructured-api-key)
+    - Unstructured API  (port 8001)
     - Infinity          (port 7997)
     - Qdrant           (port 6333)
 """
@@ -35,11 +35,13 @@ import httpx
 import structlog
 
 from app.thesis.vlm.interfaces import IVLMEnricher
+from app.thesis.chunking.models import ContentType
 
-from .capture import CombinedSnapshot
-from .combined_html import write_combined_html
-from .combined_json_export import serialize_combined_snapshot
-from .combined_viz import run_combined
+from .capture import ParentChunkSnapshot, PipelineSnapshot
+from .html_report import write_html
+from .ingestion_viz import run_ingestion
+from .json_export import serialize_snapshot
+from .retrieval_viz import run_retrieval
 from .temp_db import create_temp_engine, init_temp_db
 
 logger = structlog.get_logger(__name__)
@@ -47,39 +49,28 @@ logger = structlog.get_logger(__name__)
 _DEFAULT_OUTPUT_DIR = "viz_output"
 _DEFAULT_TOP_K = 10
 
-# Default ZI-themed queries (Bahasa Indonesia)
-_DEFAULT_QUERIES: List[str] = [
-    "Apa itu zona integritas?",
-    "Apa syarat pengusulan zona integritas?",
-    "Bagaimana evaluasi WBK/WBBM?",
-    "Apa saja program kerja zona integritas?",
-    "Siapa yang bertanggung jawab atas zona integritas?",
-]
-
 
 def main() -> None:
-    """Parse CLI arguments and run the combined visualization pipeline."""
+    """Parse CLI arguments and run the visualization pipeline."""
     parser = argparse.ArgumentParser(
-        description="Visualize multi-PDF cross-document retrieval.",
+        description="Visualize the RAG ingestion + retrieval pipelines.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
     parser.add_argument(
-        "--pdf-dir",
-        default=None,
-        help="Directory to scan for *.pdf files (e.g. datasets/).",
+        "--pdf-path",
+        required=True,
+        help="Absolute or relative path to the PDF file to ingest.",
     )
     parser.add_argument(
-        "--pdf-paths",
-        nargs="+",
+        "--pdf-title",
         default=None,
-        help="Explicit list of PDF paths (overrides --pdf-dir).",
+        help="Human-readable title for the document (defaults to filename).",
     )
     parser.add_argument(
-        "--queries",
-        nargs="+",
+        "--query",
         default=None,
-        help=f"List of queries (default: {len(_DEFAULT_QUERIES)} ZI-themed queries).",
+        help="Search query for retrieval (auto-extracted if omitted).",
     )
     parser.add_argument(
         "--unstructured-url",
@@ -89,7 +80,7 @@ def main() -> None:
     parser.add_argument(
         "--unstructured-api-key",
         default="",
-        help="API key for Unstructured Cloud. Empty for local self-hosted.",
+        help="API key for Unstructured Cloud (Bearer token). Empty for local self-hosted.",
     )
     parser.add_argument(
         "--infinity-url",
@@ -133,7 +124,7 @@ def main() -> None:
         dest="export_json",
         action="store_true",
         default=True,
-        help="Export raw JSON + CSV artifacts (default: True).",
+        help="Export raw JSON + CSV artifacts per pipeline stage (default: True).",
     )
     parser.add_argument(
         "--no-export-json",
@@ -153,40 +144,34 @@ def main() -> None:
 
 
 async def async_main(args: argparse.Namespace) -> None:
-    """Run the combined visualization pipeline asynchronously.
+    """Run the full visualization pipeline asynchronously.
 
     Args:
         args: Parsed CLI arguments.
     """
-    # Resolve PDF paths
-    pdf_paths = _resolve_pdf_paths(args)
-    if not pdf_paths:
-        print("Error: No PDF files found.", file=sys.stderr)
+    # Resolve paths
+    pdf_path = os.path.realpath(args.pdf_path)
+    if not os.path.isfile(pdf_path):
+        print(f"Error: PDF not found: {pdf_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Derive titles from filenames
-    pdf_titles = [_derive_title(p) for p in pdf_paths]
-
-    # Resolve queries
-    queries = args.queries if args.queries else list(_DEFAULT_QUERIES)
-
+    pdf_title = args.pdf_title or os.path.basename(pdf_path)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     run_id = uuid.uuid4().hex[:8]
-    sqlite_path = str(output_dir / f"viz_combined_{timestamp}_{run_id}.sqlite")
-    html_path = str(output_dir / f"viz_combined_{timestamp}_{run_id}.html")
-    qdrant_collection = f"vizcomb_{run_id}"
+    sqlite_path = str(output_dir / f"viz_{timestamp}_{run_id}.sqlite")
+    html_path = str(output_dir / f"viz_{timestamp}_{run_id}.html")
+    qdrant_collection = f"viz_{run_id}"
 
     # Pre-flight: check services
     await _preflight_check(args)
 
     print(f"\n{'=' * 60}")
-    print(f"  Combined Multi-PDF Retrieval Visualization")
+    print(f"  RAG Pipeline Visualization")
     print(f"{'=' * 60}")
-    print(f"  Documents:    {len(pdf_paths)} PDFs")
-    print(f"  Queries:      {len(queries)} queries")
+    print(f"  PDF:          {pdf_title}")
     print(f"  SQLite:       {sqlite_path}")
     print(f"  Qdrant:       {qdrant_collection}")
     print(f"  Output HTML:  {html_path}")
@@ -196,52 +181,72 @@ async def async_main(args: argparse.Namespace) -> None:
     engine = create_temp_engine(sqlite_path)
     session_maker = await init_temp_db(engine)
 
-    # Create VLM enricher if requested (use first PDF for fallback mode)
-    vlm_enricher = _create_vlm_enricher(args.vlm, pdf_paths[0] if pdf_paths else "")
+    # Create VLM enricher if requested
+    vlm_enricher = _create_vlm_enricher(args.vlm, pdf_path)
 
     try:
         async with session_maker() as session:
-            # ── Run combined pipeline ────────────────────────────────
-            print("📥 Ingesting all PDFs into shared collection...")
-            print("🔎 Running all queries against shared collection...")
-            snapshot = await run_combined(
-                pdf_paths=pdf_paths,
-                pdf_titles=pdf_titles,
-                queries=queries,
+            # ── Ingestion ──────────────────────────────────────────
+            print("📥 Running ingestion pipeline...")
+            ingestion = await run_ingestion(
+                pdf_path=pdf_path,
+                pdf_title=pdf_title,
                 session=session,
                 sqlite_path=sqlite_path,
                 qdrant_collection=qdrant_collection,
                 unstructured_url=args.unstructured_url,
+                infinity_url=args.infinity_url,
+                qdrant_host=args.qdrant_host,
+                qdrant_port=args.qdrant_port,
+                embedding_model=args.embedding_model,
                 unstructured_api_key=args.unstructured_api_key,
+                vlm_enricher=vlm_enricher,
+            )
+            print(
+                f"   ✓ {len(ingestion.elements)} elements → "
+                f"{len(ingestion.parents)} parents → "
+                f"{len(ingestion.children)} children → "
+                f"{ingestion.qdrant_point_count} Qdrant points"
+            )
+
+            # ── Determine query ────────────────────────────────────
+            query = args.query
+            if not query:
+                query = _extract_default_query(ingestion.parents)
+                print(f"   ℹ Auto-extracted query: \"{query}\"")
+
+            # ── Retrieval ──────────────────────────────────────────
+            print("🔎 Running retrieval pipeline...")
+            retrieval = await run_retrieval(
+                query=query,
+                ingestion=ingestion,
+                session=session,
                 infinity_url=args.infinity_url,
                 qdrant_host=args.qdrant_host,
                 qdrant_port=args.qdrant_port,
                 embedding_model=args.embedding_model,
                 top_k=args.top_k,
-                vlm_enricher=vlm_enricher,
+            )
+            print(
+                f"   ✓ Dense: {len(retrieval.dense_results)} | "
+                f"Sparse: {len(retrieval.sparse_results)} | "
+                f"Hybrid: {len(retrieval.hybrid_results)} results"
             )
 
-        # Set the real timestamp (run_combined uses a placeholder)
-        snapshot = CombinedSnapshot(
-            timestamp=timestamp,
-            qdrant_collection=snapshot.qdrant_collection,
-            sqlite_path=snapshot.sqlite_path,
-            ingestions=snapshot.ingestions,
-            retrievals=snapshot.retrievals,
-            doc_summaries=snapshot.doc_summaries,
-            query_summaries=snapshot.query_summaries,
-            queries=snapshot.queries,
-        )
-
         # ── Build HTML report ─────────────────────────────────────
-        print("\n📊 Generating combined HTML report...")
-        write_combined_html(snapshot, html_path)
+        print("📊 Generating HTML report...")
+        snapshot = PipelineSnapshot(
+            timestamp=timestamp,
+            ingestion=ingestion,
+            retrieval=retrieval,
+        )
+        write_html(snapshot, html_path)
 
         # ── Export raw JSON + CSV artifacts ──────────────────────────
         json_files: List[Path] = []
         if args.export_json:
             print("📄 Exporting raw JSON + CSV artifacts...")
-            json_files = serialize_combined_snapshot(snapshot, output_dir)
+            json_files = serialize_snapshot(snapshot, output_dir)
             print(f"   ✓ Wrote {len(json_files)} files to {output_dir}")
 
         print(f"\n{'=' * 60}")
@@ -261,66 +266,41 @@ async def async_main(args: argparse.Namespace) -> None:
         await engine.dispose()
 
 
-def _resolve_pdf_paths(args: argparse.Namespace) -> List[str]:
-    """Resolve the list of PDF paths from CLI args.
+def _extract_default_query(parents: List[ParentChunkSnapshot]) -> str:
+    """Extract a default query from the first TEXT parent chunk.
+
+    Takes the first sentence (>20 chars) from the first parent chunk
+    whose content_type is TEXT, to ensure the query returns results.
 
     Args:
-        args: Parsed CLI arguments.
+        parents: List of ParentChunkSnapshot objects.
 
     Returns:
-        List of absolute PDF file paths.
+        A query string, or a fallback if no suitable text is found.
     """
-    if args.pdf_paths:
-        paths = [os.path.realpath(p) for p in args.pdf_paths]
-    elif args.pdf_dir:
-        pdf_dir = os.path.realpath(args.pdf_dir)
-        if not os.path.isdir(pdf_dir):
-            print(f"Error: PDF directory not found: {pdf_dir}", file=sys.stderr)
-            sys.exit(1)
-        paths = sorted(
-            os.path.join(pdf_dir, f)
-            for f in os.listdir(pdf_dir)
-            if f.lower().endswith(".pdf")
-        )
-        paths = [os.path.realpath(p) for p in paths]
-    else:
-        print(
-            "Error: Either --pdf-dir or --pdf-paths must be specified.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    for pc in parents:
+        if pc.content_type != ContentType.TEXT.value:
+            continue
+        # Strip the [Context: ...] prefix if present
+        text = pc.text
+        if text.startswith("[Context:"):
+            newline_idx = text.find("\n\n")
+            if newline_idx != -1:
+                text = text[newline_idx + 2 :]
 
-    # Validate all paths exist
-    valid: List[str] = []
-    for p in paths:
-        if os.path.isfile(p):
-            valid.append(p)
-        else:
-            print(f"Warning: PDF not found, skipping: {p}", file=sys.stderr)
+        # Find first sentence
+        for sep in [". ", "? ", "! "]:
+            idx = text.find(sep)
+            if idx != -1:
+                sentence = str(text[: idx + 1].strip())
+                if len(sentence) > 20:
+                    return sentence
 
-    return valid
+        # No sentence boundary found — take first 100 chars
+        if len(text) > 20:
+            return str(text[:100].strip())
 
-
-def _derive_title(pdf_path: str) -> str:
-    """Derive a human-readable title from a PDF filename.
-
-    Strips the extension and replaces underscores/dashes with spaces.
-
-    Args:
-        pdf_path: Path to the PDF file.
-
-    Returns:
-        A cleaned-up title string.
-    """
-    name = os.path.basename(pdf_path)
-    # Remove .pdf extension
-    if name.lower().endswith(".pdf"):
-        name = name[:-4]
-    # Replace underscores and dashes with spaces
-    name = name.replace("_", " ").replace("-", " ")
-    # Collapse multiple spaces
-    name = " ".join(name.split())
-    return name
+    return "What is this document about?"
 
 
 def _create_vlm_enricher(
@@ -369,22 +349,23 @@ async def _preflight_check(args: argparse.Namespace) -> None:
     """Check that all required services are reachable.
 
     When ``--unstructured-api-key`` is set, the Unstructured Cloud API
-    is used and the preflight ping is skipped.
+    is used and the preflight ping is skipped (the cloud endpoint does
+    not respond to a bare GET).
 
     Args:
         args: Parsed CLI arguments with service URLs.
     """
-    services: List[tuple[str, str]] = []
+    services = []
     if not args.unstructured_api_key:
         services.append(("Unstructured API", args.unstructured_url))
     services.append(("Infinity", args.infinity_url))
     services.append(("Qdrant", f"http://{args.qdrant_host}:{args.qdrant_port}"))
-
     all_ok = True
     for name, url in services:
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(url)
+                # Qdrant returns 200 for root, others may return 404 — just check reachable
                 if resp.status_code < 500:
                     print(f"  ✓ {name} reachable at {url}")
                 else:
@@ -418,7 +399,7 @@ async def _cleanup_qdrant(host: str, port: int, collection: str) -> None:
         await client.delete_collection(collection_name=collection)
         print(f"   🗑 Deleted Qdrant collection: {collection}")
     except Exception as e:
-        logger.warning("viz.combined.cleanup.qdrant_failed", error=str(e))
+        logger.warning("viz.cleanup.qdrant_failed", error=str(e))
     finally:
         await client.close()
 

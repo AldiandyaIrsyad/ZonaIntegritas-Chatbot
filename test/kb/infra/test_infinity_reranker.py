@@ -101,6 +101,26 @@ async def test_rerank_passes_top_k(reranker: InfinityReranker) -> None:
 
 
 @pytest.mark.asyncio
+async def test_rerank_enforces_top_k_when_server_ignores_it(reranker: InfinityReranker) -> None:
+    """If the server returns more results than top_k asked for, the client must
+    still truncate — the deployed Infinity server has been observed to ignore
+    the top_k request parameter entirely and return all documents reranked."""
+    mock_data = {
+        "results": [
+            {"index": i, "relevance_score": 1.0 - i * 0.01} for i in range(5)
+        ]
+    }
+    reranker._client = MagicMock(spec=httpx.AsyncClient)
+    reranker._client.post = AsyncMock(return_value=_mock_response(mock_data))
+
+    results = await reranker.rerank("query", [f"doc {i}" for i in range(5)], top_k=2)
+
+    assert len(results) == 2
+    assert results[0].index == 0
+    assert results[1].index == 1
+
+
+@pytest.mark.asyncio
 async def test_rerank_handles_missing_score_field(reranker: InfinityReranker) -> None:
     """Reranker should handle missing 'relevance_score' by falling back to 'score'."""
     mock_data = {

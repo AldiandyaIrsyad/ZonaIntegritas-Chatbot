@@ -7,7 +7,7 @@ pipeline output for thesis presentation.
 
 Usage::
 
-    .venv/bin/python -m app.thesis.visualize.run \\
+    .venv/bin/python -m tools.visualize.run \\
         --pdf-path datasets/permenpanrb-no-5-tahun-2024.pdf
 
 Requires the real infrastructure services to be running:

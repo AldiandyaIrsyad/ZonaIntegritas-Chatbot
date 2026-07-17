@@ -127,8 +127,11 @@ class TestVLMEnrichmentStep:
 
         result = await worker._route_and_enrich_elements(elements, "/fake/path.pdf", "doc-1")
 
-        # VLM should have been called for the figure (per-element path, no page prompt)
-        mock_vlm_enricher.describe_image.assert_called_once_with("/tmp/page1.png")
+        # VLM should have been called for the figure with the per-image
+        # description prompt (per-element path, not the page-extraction prompt)
+        mock_vlm_enricher.describe_image.assert_called_once_with(
+            "/tmp/page1.png", prompt=worker.image_description_prompt
+        )
         # The figure's text should now be the VLM description
         assert result[0].text == "A flowchart showing 5 steps."
         # The narrative text should be unchanged
@@ -506,8 +509,10 @@ class TestVisualPageRouting:
         ):
             await worker._route_and_enrich_elements(elements, "/fake/path.pdf", "doc-1")
 
-        # Per-element path: no page-extraction prompt passed
-        mock_vlm_enricher.describe_image.assert_called_once_with("/tmp/page6.png")
+        # Per-element path: description prompt passed, not the page-extraction prompt
+        mock_vlm_enricher.describe_image.assert_called_once_with(
+            "/tmp/page6.png", prompt=worker.image_description_prompt
+        )
 
 
 class TestIngestWorkerConstruction:

@@ -606,6 +606,33 @@ def test_min_child_text_length_constant():
     assert MIN_CHILD_TEXT_LENGTH == 8
 
 
+def test_gibberish_filter_applies_under_active_breadcrumbs():
+    """Regression test: the breadcrumb context prefix (e.g.
+    "[Context: BAB I KETENTUAN UMUM > Pasal 1]\\n\\n") used to be prepended
+    to child text *before* the MIN_CHILD_TEXT_LENGTH check ran, so any short
+    or garbage body text under an active heading always passed — the prefix
+    alone is far longer than 8 chars. The filter must measure the body text
+    only, regardless of whether breadcrumbs are present.
+    """
+    from app.thesis.chunking.logic import MIN_CHILD_TEXT_LENGTH
+
+    parent = ParentChunkData(
+        id="p1",
+        doc_id="d1",
+        text="Ab. Cd.",  # 7-char body — below threshold on its own
+        chunk_index=0,
+        breadcrumbs=["BAB I KETENTUAN UMUM", "Pasal 1"],
+        content_type=ContentType.TEXT,
+    )
+
+    children = split_into_children(parent, max_chars=512, overlap_chars=5)
+
+    assert children == [], (
+        "Gibberish body text should still be filtered even when a breadcrumb "
+        "context prefix is prepended"
+    )
+
+
 def test_default_parent_max_chars_is_4096():
     """DEFAULT_PARENT_MAX_CHARS should be 4096 (updated from 2000)."""
     from app.thesis.chunking.logic import DEFAULT_PARENT_MAX_CHARS

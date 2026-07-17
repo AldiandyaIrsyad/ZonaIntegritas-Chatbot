@@ -44,11 +44,15 @@ services:
               capabilities: [gpu]
     environment:
       INFINITY_BATCH_SIZE: "2"
-      INFINITY_MODEL_WARMUP: "true;true;true;false"
+      # One fewer "true" than before — BAAI/bge-m3 no longer loaded here (see
+      # below): Infinity's own model list documents bge-m3 as "no sparse", so
+      # embeddings now come from an in-process BGEM3FlagModel adapter
+      # (app/kb/infra/bge_m3_embeddings.py) that actually computes sparse
+      # vectors. Infinity still serves reranker + prompt-guard + NLI.
+      INFINITY_MODEL_WARMUP: "true;true;false"
       HF_TOKEN: ${INFINITY_HF_API_KEY}
     command: >
       v2
-      --model-id ${INFINITY_EMBEDDING_MODEL}
       --model-id ${INFINITY_RERANKER_MODEL}
       --model-id ${INFINITY_PROMPT_GUARD_MODEL}
       --model-id ${INFINITY_NLI_MODEL}

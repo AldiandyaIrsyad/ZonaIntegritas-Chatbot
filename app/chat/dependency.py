@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.db import get_db_session
 from app.chat.config import get_chat_config
-from app.chat.infra import LLMConnection, PromptGuardClient, NLIClient, PostgresChatRepository, EmbeddingClient
+from app.chat.infra import LLMConnection, PromptGuardClient, NLIClient, PostgresChatRepository
 from app.chat.infra.hyde_expander import HyDEExpander
 from app.chat.application.chat_service import ChatService
 from app.kb.dependency import (
@@ -23,11 +23,15 @@ from app.kb.dependency import (
     get_text_embedder,
     get_reranker,
 )
-from app.kb.infra import PostgresKBRepository, QdrantStore, InfinityEmbeddings, InfinityReranker
+from app.kb.infra import PostgresKBRepository, QdrantStore, BGEM3Embeddings, InfinityReranker
 from app.kb.application.search_service import SearchService
 from app.kb.domain.interfaces import IQueryExpander
 
-from app.thesis.ivm.checkers import LLMJudgeRelevanceChecker
+from app.thesis.ivm.checkers import (
+    LLMJudgeRelevanceChecker,
+    NliEntailmentRelevanceChecker,
+    SimilarityThresholdRelevanceChecker,
+)
 from app.thesis.ivm.interfaces import IRelevanceChecker
 from app.thesis.ivm.judge import LLMJudge
 from app.thesis.ivm.relevance_service import RelevanceService
@@ -49,24 +53,39 @@ def get_nli_client() -> NLIClient:
     config = get_chat_config()
     return NLIClient(base_url=config.infinity_url, model=config.nli_model)
 
-def get_embedding_client() -> EmbeddingClient:
-    config = get_chat_config()
-    return EmbeddingClient(base_url=config.infinity_url, model="BAAI/bge-m3")
-
 def get_ivm_service(
     safety_client: PromptGuardClient = Depends(get_prompt_guard_client)
 ) -> IVMService:
     return IVMService(safety_model=safety_client)
 
-def get_relevance_checker() -> IRelevanceChecker:
+def get_relevance_checker(
+    nli_client: NLIClient = Depends(get_nli_client),
+) -> IRelevanceChecker:
     """Overrides ``app.kb.dependency.get_relevance_checker`` (registered via
     ``app.main``'s ``dependency_overrides``) since the LLM-as-judge relevance
     check needs a cloud LLM (``chat/infra``) that ``kb/`` is not allowed to
     import.
+
+    Branches on ``ChatConfig.ood_method`` to select the active
+    IRelevanceChecker backend (see app/thesis/ivm/checkers.py).
     """
     config = get_chat_config()
+
+    if config.ood_method == "similarity_threshold":
+        return SimilarityThresholdRelevanceChecker(threshold=config.ood_similarity_threshold)
+
+    if config.ood_method == "nli_entailment":
+        return NliEntailmentRelevanceChecker(
+            nli_model=nli_client,
+            threshold=config.ood_nli_entailment_threshold,
+        )
+
     judge_llm = LLMConnection(base_url=config.llm_base_url, api_key=config.llm_api_key)
-    judge = LLMJudge(llm_connection=judge_llm, model=config.llm_model)
+    judge = LLMJudge(
+        llm_connection=judge_llm,
+        model=config.llm_model,
+        system_prompt=config.relevance_judge_prompt,
+    )
     return LLMJudgeRelevanceChecker(judge=judge)
 
 def get_relevance_service(
@@ -90,6 +109,7 @@ def get_query_expander(
         llm=llm_conn,
         model=config.llm_model,
         prompt_template=config.hyde_prompt_template,
+        system_prompt=config.hyde_system_prompt,
         max_tokens=config.hyde_max_tokens,
         temperature=config.hyde_temperature,
     )
@@ -109,7 +129,7 @@ def get_ram_service(
 async def get_search_service(
     repo: PostgresKBRepository = Depends(get_kb_repo),
     vstore: QdrantStore = Depends(get_vector_store),
-    embedder: InfinityEmbeddings = Depends(get_text_embedder),
+    embedder: BGEM3Embeddings = Depends(get_text_embedder),
     reranker: Optional[InfinityReranker] = Depends(get_reranker),
     query_expander: Optional[IQueryExpander] = Depends(get_query_expander),
 ) -> SearchService:

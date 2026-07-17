@@ -3,6 +3,7 @@ Application service for KB administration workflows.
 """
 
 import os
+import re
 import shutil
 import uuid
 import structlog
@@ -16,6 +17,30 @@ from app.kb.domain.models import PDFDocument
 from app.kb.application.ingest_worker import IngestWorker
 
 logger = structlog.get_logger(__name__)
+
+# Cap on the on-disk filename's stem (before the UUID prefix/extension are
+# added). Two independent things break on long filenames, both discovered
+# empirically: (1) the local filesystem raises ENAMETOOLONG around 255 bytes
+# for the full path component, and (2) Unstructured Cloud's job API — which
+# receives this same filename, since IngestWorker/UnstructuredClient read it
+# back off disk — silently completes with output_node_files: None (no error
+# at all) once the filename gets long (reproduced at 240 chars; titles in
+# this app's real corpus routinely exceed that). The original filename and
+# title are preserved in PDFDocument.title/description, not lost — only the
+# on-disk/upstream-API-visible name is shortened.
+_MAX_FILENAME_STEM_LEN = 60
+
+
+def _safe_upload_filename(original_filename: str) -> str:
+    """Build a short, unique, filesystem- and Unstructured-Cloud-safe
+    filename for on-disk storage. Always UUID-prefixed for uniqueness
+    (previously only the batch path had a prefix, and even that was too
+    weak against long titles)."""
+    stem, ext = os.path.splitext(original_filename or "upload.pdf")
+    ext = ext or ".pdf"
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]", "_", stem)[:_MAX_FILENAME_STEM_LEN]
+    return f"{uuid.uuid4().hex[:12]}_{safe_stem}{ext}"
+
 
 class KBApplicationService:
     """Service handling administration of PDF documents and triggering ingestion."""
@@ -38,10 +63,12 @@ class KBApplicationService:
     async def list_pdfs(self) -> List[PDFDocument]:
         return await self.kb_repo.get_all_pdfs()
 
+    async def naive_title_search(self, query: str) -> List[PDFDocument]:
+        return await self.kb_repo.search_titles_naive(query)
+
     async def upload_pdf(self, title: str, description: str, file: UploadFile, bg_tasks: BackgroundTasks) -> PDFDocument:
-        safe_filename = file.filename or "upload.pdf"
-        file_path = os.path.join(self.upload_dir, f"{title}_{safe_filename}")
-        
+        file_path = os.path.join(self.upload_dir, _safe_upload_filename(file.filename))
+
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
             
@@ -58,11 +85,20 @@ class KBApplicationService:
         titles: List[str],
         descriptions: List[str],
         bg_tasks: BackgroundTasks,
-    ) -> List[PDFDocument]:
+    ) -> tuple[List[PDFDocument], List[dict[str, str]]]:
         """Upload multiple PDFs and trigger background ingestion for each.
 
-        Uses a UUID prefix on the saved filename to avoid collisions when
-        multiple files share the same original filename or title.
+        Saved filenames are UUID-prefixed and length-capped (see
+        _safe_upload_filename) to avoid both filesystem ENAMETOOLONG errors
+        and a silent Unstructured Cloud failure mode on long filenames.
+
+        Each file is isolated: on success its PDFDocument row is committed
+        immediately, so a later file's failure (disk full, bad filename,
+        DB error) can't roll back files that already succeeded — previously
+        the whole batch shared one uncommitted transaction, so any failure
+        anywhere in the loop discarded every already-processed file. On
+        failure, the session is rolled back (to clear its errored state) and
+        the loop continues with the next file instead of aborting.
 
         Args:
             files: List of uploaded PDF files.
@@ -71,28 +107,34 @@ class KBApplicationService:
             bg_tasks: FastAPI BackgroundTasks for async ingestion.
 
         Returns:
-            List of created PDFDocument objects (one per file).
+            Tuple of (successfully created PDFDocuments, [{"filename", "error"}, ...]).
         """
         results: List[PDFDocument] = []
+        failures: List[dict[str, str]] = []
+
         for file, title, description in zip(files, titles, descriptions):
             safe_filename = file.filename or "upload.pdf"
-            # UUID prefix prevents filename collisions across batch uploads
-            unique_prefix = str(uuid.uuid4())[:8]
-            file_path = os.path.join(self.upload_dir, f"{unique_prefix}_{title}_{safe_filename}")
+            try:
+                file_path = os.path.join(self.upload_dir, _safe_upload_filename(file.filename))
 
-            with open(file_path, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
+                with open(file_path, "wb") as buffer:
+                    shutil.copyfileobj(file.file, buffer)
 
-            pdf_doc = await self.kb_repo.create_pdf(
-                title=title,
-                description=description,
-                pdf_path=file_path,
-            )
-            bg_tasks.add_task(self.ingest_worker.ingest_document, doc_id=str(pdf_doc.id))
-            results.append(pdf_doc)
+                pdf_doc = await self.kb_repo.create_pdf(
+                    title=title,
+                    description=description,
+                    pdf_path=file_path,
+                )
+                bg_tasks.add_task(self.ingest_worker.ingest_document, doc_id=str(pdf_doc.id))
+                await self.kb_repo.commit()
+                results.append(pdf_doc)
+            except Exception as exc:
+                logger.error("kb.upload.file_failed", filename=safe_filename, error=str(exc))
+                await self.kb_repo.rollback()
+                failures.append({"filename": safe_filename, "error": str(exc)})
 
-        logger.info("kb.upload.batch_complete", count=len(results))
-        return results
+        logger.info("kb.upload.batch_complete", succeeded=len(results), failed=len(failures))
+        return results, failures
 
     async def update_pdf_status(self, pdf_id: str, active: bool) -> Optional[PDFDocument]:
         doc = await self.kb_repo.update_pdf_active_status(pdf_id, active)

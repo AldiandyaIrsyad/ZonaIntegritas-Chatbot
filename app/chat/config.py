@@ -1,8 +1,10 @@
 from functools import lru_cache
+from typing import Literal
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.thesis.prompts import DEFAULT_SYSTEM_PROMPT_ID
+from app.thesis.ivm.judge import DEFAULT_RELEVANCE_JUDGE_PROMPT
 
 class ChatConfig(BaseSettings):
     """Configuration for the Chat module.
@@ -45,23 +47,70 @@ class ChatConfig(BaseSettings):
     prompt_guard_model: str = Field(default="meta-llama/Llama-Prompt-Guard-2-86M", validation_alias="INFINITY_PROMPT_GUARD_MODEL")
     nli_model: str = Field(default="StevenLimcorn/indo-roberta-indonli", validation_alias="INFINITY_NLI_MODEL")
     security_threshold: float = Field(default=0.75, description="Threshold for prompt injection detection")
+    relevance_judge_prompt: str = Field(
+        default=DEFAULT_RELEVANCE_JUDGE_PROMPT,
+        description="System prompt for the IVM LLM-as-judge relevance checker",
+        validation_alias="CHAT_RELEVANCE_JUDGE_PROMPT",
+    )
+    ood_method: Literal["llm_judge", "similarity_threshold", "nli_entailment"] = Field(
+        default="llm_judge",
+        description="IVM relevance/OOD backend (see app/thesis/ivm/checkers.py)",
+        validation_alias="CHAT_OOD_METHOD",
+    )
+    ood_similarity_threshold: float = Field(
+        default=0.02,
+        description=(
+            "Min top-1 retrieval (RRF fusion) score for the 'similarity_threshold' "
+            "OOD method — placeholder, calibrate empirically against this KB's own "
+            "score distribution"
+        ),
+        validation_alias="CHAT_OOD_SIMILARITY_THRESHOLD",
+    )
+    ood_nli_entailment_threshold: float = Field(
+        default=0.5,
+        description="Min NLI entailment_score for the 'nli_entailment' OOD method",
+        validation_alias="CHAT_OOD_NLI_THRESHOLD",
+    )
 
     # HyDE (Hypothetical Document Embeddings) Settings
     hyde_enabled: bool = Field(
         default=True,
         description="Enable HyDE: generate a hypothetical answer doc and embed that instead of the raw query",
+        validation_alias="CHAT_HYDE_ENABLED",
     )
     hyde_max_tokens: int = Field(
         default=256,
         description="Max tokens for the hypothetical document generation",
+        validation_alias="CHAT_HYDE_MAX_TOKENS",
     )
     hyde_temperature: float = Field(
         default=0.0,
         description="Temperature for HyDE generation (0.0 = deterministic)",
+        validation_alias="CHAT_HYDE_TEMPERATURE",
+    )
+    hyde_system_prompt: str = Field(
+        default=(
+            "Anda menghasilkan draf jawaban hipotetis untuk mendukung pencarian "
+            "semantik pada basis pengetahuan dokumen resmi institusi berbahasa "
+            "Indonesia (SOP, peraturan, kontrak, keputusan) yang terstruktur "
+            "dalam BAB, Pasal, dan Ayat. Tulis paragraf singkat yang meniru gaya "
+            "dan istilah dokumen resmi tersebut — walau pertanyaannya singkat, "
+            "tidak lazim, atau tampak di luar topik, anggaplah pertanyaan itu "
+            "mungkin merujuk pada pihak, entitas, atau ketentuan yang disebutkan "
+            "di salah satu dokumen. Jangan khawatir soal akurasi faktual; "
+            "tujuannya murni kecocokan semantik untuk pencarian."
+        ),
+        description="System prompt for HyDE hypothetical document generation — sets the domain/register the model should imitate.",
+        validation_alias="CHAT_HYDE_SYSTEM_PROMPT",
     )
     hyde_prompt_template: str = Field(
-        default="Write a short paragraph answering this question. Do not worry about factual accuracy or hallucinations — you are generating a semantic template to capture the right keywords and structure: {query}",
-        description="Prompt template for HyDE hypothetical document generation. {query} is replaced with the user query.",
+        default=(
+            "Pertanyaan: {query}\n\n"
+            "Tulis draf jawaban hipotetis (2-4 kalimat) dengan gaya dokumen "
+            "resmi seperti dijelaskan di atas."
+        ),
+        description="User-turn template for HyDE hypothetical document generation. {query} is replaced with the user query.",
+        validation_alias="CHAT_HYDE_PROMPT_TEMPLATE",
     )
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)

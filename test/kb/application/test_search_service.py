@@ -355,6 +355,46 @@ class TestSearchPipeline:
         assert result[0].breadcrumbs == []
 
     @pytest.mark.asyncio
+    async def test_reranker_success_path_truncates_to_rerank_top_k(self) -> None:
+        """Even when the reranker returns more results than RERANK_TOP_K (the
+        deployed Infinity server has been observed to ignore top_k and return
+        every candidate reranked), the success path must still cap the pool
+        at RERANK_TOP_K before sibling/cross-ref hydration."""
+        from app.kb.application.search_service import RERANK_TOP_K
+
+        n = RERANK_TOP_K + 5
+        search_results = [
+            SearchResult(chunk_id=f"c{i}", parent_chunk_id=f"p{i}", doc_id="doc1", score=0.9 - i * 0.01)
+            for i in range(n)
+        ]
+        children = [
+            _make_child(cid=f"c{i}", parent_id=f"p{i}", text=f"Child {i}")
+            for i in range(n)
+        ]
+        parents = [_make_parent(pid=f"p{i}", text=f"Parent {i}") for i in range(n)]
+        pdfs = [_make_pdf()]
+
+        # Reranker "ignores" top_k and returns all n results reranked.
+        reranker = _make_reranker([
+            RerankResult(index=i, score=1.0 - i * 0.01) for i in range(n)
+        ])
+
+        svc = SearchService(
+            text_embedder=_make_embedder(),
+            vector_store=_make_vector_store(search_results),
+            kb_repo=_make_kb_repo(
+                child_chunks=children,
+                parent_chunks=parents,
+                pdf_docs=pdfs,
+            ),
+            reranker=reranker,
+        )
+
+        result = await svc.search("query", top_k=n)
+        # Primary contexts must be capped at RERANK_TOP_K, not the full candidate pool.
+        assert len(result) <= RERANK_TOP_K
+
+    @pytest.mark.asyncio
     async def test_pipeline_without_reranker(self) -> None:
         """Pipeline works without reranker — truncates to RERANK_TOP_K."""
         search_results = [

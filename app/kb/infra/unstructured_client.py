@@ -9,6 +9,7 @@ import structlog
 from typing import List
 
 from app.kb.domain.interfaces import IDocumentParser
+from app.shared.retry import external_api_retry
 from app.thesis.chunking.models import ParsedElement
 
 logger = structlog.get_logger(__name__)
@@ -137,13 +138,24 @@ class UnstructuredClient(IDocumentParser):
             form_data["extract_image_block_to_payload"] = "false"
 
         with open(resolved, "rb") as fh:
-            response = await self._client.post(
-                "/general/v0/general",
-                files={"files": (filename, fh, "application/pdf")},
-                data=form_data,
-            )
-        response.raise_for_status()
+            file_bytes = fh.read()
+        response = await self._post_local_general(filename, file_bytes, form_data)
         return response.json()
+
+    @external_api_retry
+    async def _post_local_general(self, filename: str, file_bytes: bytes, form_data: dict[str, str]):
+        # file_bytes (not a file handle) so a retry re-sends the same body —
+        # a handle would already be at EOF after the first attempt.
+        # raise_for_status() must happen inside the retried function so a
+        # 429/5xx actually triggers a retry (httpx.HTTPStatusError is what
+        # the retry policy watches for).
+        response = await self._client.post(
+            "/general/v0/general",
+            files={"files": (filename, file_bytes, "application/pdf")},
+            data=form_data,
+        )
+        response.raise_for_status()
+        return response
 
     async def _parse_pdf_cloud(
         self, resolved: str, filename: str, log: structlog.BoundLogger
@@ -181,12 +193,8 @@ class UnstructuredClient(IDocumentParser):
         })
 
         with open(resolved, "rb") as fh:
-            response = await self._client.post(
-                "/jobs/",
-                data={"request_data": request_data},
-                files={"input_files": (filename, fh, "application/pdf")},
-            )
-        response.raise_for_status()
+            file_bytes = fh.read()
+        response = await self._create_job(filename, file_bytes, request_data)
         job_data = response.json()
         job_id = job_data["id"]
         log.info("unstructured.job.created", job_id=job_id)
@@ -196,8 +204,7 @@ class UnstructuredClient(IDocumentParser):
         max_wait = 900.0  # 15 minutes
         elapsed = 0.0
         while True:
-            response = await self._client.get(f"/jobs/{job_id}")
-            response.raise_for_status()
+            response = await self._poll_job(job_id)
             job_data = response.json()
             status = job_data.get("status", "")
             log.info(
@@ -229,11 +236,7 @@ class UnstructuredClient(IDocumentParser):
         all_elements: list = []
         for file_info in output_files:
             file_id = file_info["file_id"]
-            response = await self._client.get(
-                f"/jobs/{job_id}/download",
-                params={"file_id": file_id},
-            )
-            response.raise_for_status()
+            response = await self._download_job_file(job_id, file_id)
             downloaded = response.json()
             if isinstance(downloaded, list):
                 all_elements.extend(downloaded)
@@ -247,6 +250,33 @@ class UnstructuredClient(IDocumentParser):
             total_elements=len(all_elements),
         )
         return all_elements
+
+    @external_api_retry
+    async def _create_job(self, filename: str, file_bytes: bytes, request_data: str):
+        # file_bytes (not a file handle) so a retry re-sends the same body —
+        # a handle would already be at EOF after the first attempt.
+        response = await self._client.post(
+            "/jobs/",
+            data={"request_data": request_data},
+            files={"input_files": (filename, file_bytes, "application/pdf")},
+        )
+        response.raise_for_status()
+        return response
+
+    @external_api_retry
+    async def _poll_job(self, job_id: str):
+        response = await self._client.get(f"/jobs/{job_id}")
+        response.raise_for_status()
+        return response
+
+    @external_api_retry
+    async def _download_job_file(self, job_id: str, file_id: str):
+        response = await self._client.get(
+            f"/jobs/{job_id}/download",
+            params={"file_id": file_id},
+        )
+        response.raise_for_status()
+        return response
 
     async def close(self) -> None:
         await self._client.aclose()

@@ -300,10 +300,15 @@ endblock %} {% block layout %} {% include "components/sidebar.html" %}
 
           if (res.ok) {
             const data = await res.json();
+            const failed = data.failed_count || 0;
+            const message = failed > 0
+              ? `Uploaded ${data.count} document${data.count === 1 ? "" : "s"}, ${failed} failed: ` +
+                (data.failures || []).map((f) => `${f.filename} (${f.error})`).join("; ")
+              : `Successfully uploaded ${data.count} document${data.count === 1 ? "" : "s"}!`;
             this.uploadStatus = {
               show: true,
-              message: `Successfully uploaded ${data.count} document${data.count === 1 ? "" : "s"}!`,
-              isError: false,
+              message,
+              isError: failed > 0,
             };
             this.batchFiles = [];
             await this.loadPDFs();
@@ -326,7 +331,7 @@ endblock %} {% block layout %} {% include "components/sidebar.html" %}
           this.uploading = false;
           setTimeout(() => {
             this.uploadStatus.show = false;
-          }, 3000);
+          }, this.uploadStatus.isError ? 10000 : 3000);
         }
       },
     };

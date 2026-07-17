@@ -2,6 +2,9 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 
+from app.thesis.chunking.page_classifier import VLM_PAGE_EXTRACTION_PROMPT
+from app.thesis.vlm.client import DEFAULT_VLM_PROMPT
+
 class QdrantSettings(BaseSettings):
     host: str = Field(default="127.0.0.1")
     port: int = Field(default=6333)
@@ -50,6 +53,32 @@ class KBInfinitySettings(BaseSettings):
 
 @lru_cache
 def get_infinity_settings() -> KBInfinitySettings: return KBInfinitySettings()
+
+
+class BGEM3Settings(BaseSettings):
+    """Configuration for the in-process BGE-M3 dense+sparse embedder.
+
+    Replaces Infinity for embeddings specifically — Infinity's own model
+    list documents BAAI/bge-m3 as dense-only ("no sparse"), so this uses
+    BAAI's own FlagEmbedding.BGEM3FlagModel instead, which actually computes
+    sparse (lexical-weight) vectors alongside dense ones.
+    """
+
+    model: str = Field(default="BAAI/bge-m3")
+    device: str = Field(
+        default="cuda",
+        description="'cuda' or 'cpu'. Fall back to 'cpu' if the GPU doesn't "
+        "have enough free VRAM alongside Infinity's other loaded models — "
+        "ingestion throughput is bottlenecked by external API calls "
+        "(Unstructured Cloud parsing, VLM), not embedding, so CPU is a "
+        "reasonable fallback.",
+    )
+    use_fp16: bool = Field(default=True)
+    batch_size: int = Field(default=12)
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="BGE_M3_", extra="ignore")
+
+@lru_cache
+def get_bge_m3_settings() -> BGEM3Settings: return BGEM3Settings()
 
 
 class VLMSettings(BaseSettings):
@@ -105,6 +134,14 @@ class VLMSettings(BaseSettings):
     page_garbage_ratio_threshold: float = Field(
         default=0.7,
         description="Min fraction of a page's image elements with garbage (<=3 char) OCR text for VISUAL classification.",
+    )
+    image_description_prompt: str = Field(
+        default=DEFAULT_VLM_PROMPT,
+        description="Prompt used for single-figure/image enrichment description.",
+    )
+    page_extraction_prompt: str = Field(
+        default=VLM_PAGE_EXTRACTION_PROMPT,
+        description="Prompt used for full-page VLM extraction on VISUAL-classified pages.",
     )
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="VLM_", extra="ignore")

@@ -23,7 +23,7 @@ This module is pure Python with one allowed external dependency:
 from __future__ import annotations
 
 import structlog
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from bs4 import BeautifulSoup, Tag
 
@@ -248,3 +248,47 @@ def _render_row(cells: List[str]) -> str:
         Markdown table row string, e.g. ``"| Col A | Col B |"``.
     """
     return "| " + " | ".join(cells) + " |"
+
+
+def is_markdown_table(text: str) -> bool:
+    """Return True if the text looks like a GFM Markdown table.
+
+    A Markdown table always starts with a pipe (``|``) character and
+    has a separator row containing only ``|``, ``-``, ``:``, and spaces.
+
+    Args:
+        text: Raw table text (with any surrounding context prefix already
+            stripped).
+
+    Returns:
+        True if the text is a Markdown table, False otherwise.
+    """
+    stripped = text.strip()
+    if not stripped.startswith("|"):
+        return False
+    lines = stripped.splitlines()
+    # Look for a separator row in the first 3 lines (header + separator)
+    for line in lines[:3]:
+        if line.strip().startswith("|") and all(
+            c in "|:- " for c in line.strip()
+        ):
+            return True
+    return False
+
+
+def split_markdown_table_lines(text: str) -> Optional[Tuple[str, str, List[str]]]:
+    """Parse a Markdown table string into (header, separator, data_lines).
+
+    Args:
+        text: Raw Markdown table text (context prefix already stripped).
+
+    Returns:
+        ``(header_line, separator_line, data_lines)`` where ``data_lines``
+        is every remaining non-empty line, or ``None`` if ``text`` has
+        fewer than 3 non-empty lines (i.e. isn't a parseable
+        header+separator+data-row table).
+    """
+    lines = text.strip().splitlines()
+    if len(lines) < 3:
+        return None
+    return lines[0], lines[1], lines[2:]

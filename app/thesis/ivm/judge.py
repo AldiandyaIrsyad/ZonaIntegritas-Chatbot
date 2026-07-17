@@ -1,28 +1,37 @@
 """
 LLM-based Judge implementation for relevance checking.
 """
+from typing import Optional
+
 import structlog
 from app.thesis.ivm.interfaces import IJudge, ILLMJudgeConnection
 
 logger = structlog.get_logger(__name__)
 
+DEFAULT_RELEVANCE_JUDGE_PROMPT = (
+    "You are a relevance judge for a retrieval-augmented QA system. Your "
+    "task is to determine if a given query is on the same topic or domain "
+    "as the provided context, even if the context does not fully or "
+    "directly answer it. "
+    "Reply with exactly 'YES' if the query relates to the same subject "
+    "matter as the context. "
+    "Reply with exactly 'NO' only if the query is about a clearly "
+    "unrelated topic, or is malicious/nonsensical."
+)
+
 
 class LLMJudge(IJudge):
     """Judge that uses an LLM to evaluate relevance."""
 
-    def __init__(self, llm_connection: ILLMJudgeConnection, model: str = "llama3-70b-8192") -> None:
+    def __init__(
+        self,
+        llm_connection: ILLMJudgeConnection,
+        model: str = "llama3-70b-8192",
+        system_prompt: Optional[str] = None,
+    ) -> None:
         self.llm_connection = llm_connection
         self.model = model
-        self.system_prompt = (
-            "You are a relevance judge for a retrieval-augmented QA system. Your "
-            "task is to determine if a given query is on the same topic or domain "
-            "as the provided context, even if the context does not fully or "
-            "directly answer it. "
-            "Reply with exactly 'YES' if the query relates to the same subject "
-            "matter as the context. "
-            "Reply with exactly 'NO' only if the query is about a clearly "
-            "unrelated topic, or is malicious/nonsensical."
-        )
+        self.system_prompt = system_prompt or DEFAULT_RELEVANCE_JUDGE_PROMPT
 
     async def evaluate_relevance(self, query: str, context: str) -> bool:
         """Evaluate relevance using the core LLM connection."""

@@ -139,7 +139,7 @@ class SearchService:
                 candidates = [
                     candidates[r.index] for r in rerank_results
                     if 0 <= r.index < len(candidates)
-                ]
+                ][:RERANK_TOP_K]
                 logger.info("kb.search.rerank_done", kept=len(candidates))
             except Exception as exc:
                 logger.warning("kb.search.rerank_failed", error=str(exc))

@@ -34,6 +34,7 @@ class HyDEExpander(IQueryExpander):
         llm: ILLMConnection,
         model: str,
         prompt_template: str,
+        system_prompt: str,
         max_tokens: int = 256,
         temperature: float = 0.0,
     ) -> None:
@@ -43,12 +44,15 @@ class HyDEExpander(IQueryExpander):
             llm: An LLM connection supporting non-streaming ``generate()``.
             model: Model identifier to use for generation.
             prompt_template: Prompt template containing ``{query}`` placeholder.
+            system_prompt: System message setting the domain/register the
+                generated hypothetical document should imitate.
             max_tokens: Max tokens for the hypothetical document.
             temperature: Sampling temperature (0.0 = deterministic).
         """
         self._llm = llm
         self._model = model
         self._prompt_template = prompt_template
+        self._system_prompt = system_prompt
         self._max_tokens = max_tokens
         self._temperature = temperature
 
@@ -66,13 +70,7 @@ class HyDEExpander(IQueryExpander):
 
         user_prompt = self._prompt_template.replace("{query}", query)
         messages: List[Dict[str, str]] = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a helpful assistant generating a hypothetical "
-                    "document for retrieval. Answer concisely."
-                ),
-            },
+            {"role": "system", "content": self._system_prompt},
             {"role": "user", "content": user_prompt},
         ]
 
