@@ -8,8 +8,10 @@ import pytest
 
 from app.thesis.ram.interfaces import NLIResult, RerankResult, RetrievedContext
 from app.thesis.ram.service import (
+    LABEL_CONTRADICTION,
     LABEL_ENTAILMENT,
     LABEL_NEUTRAL,
+    NLI_CONTRADICTION_THRESHOLD,
     RAMService,
     _sanitize_snippet,
     EVIDENCE_SNIPPET_MAX_CHARS,
@@ -124,6 +126,82 @@ class TestAssessSentence:
         assert result.label == LABEL_NEUTRAL
         # Fallback carries metadata from the first candidate, not a bare drop.
         assert result.source_title == "Doc A"
+
+    @pytest.mark.asyncio
+    async def test_confident_contradiction_does_not_preempt_later_entailment(self) -> None:
+        # Regression test: a spurious confident contradiction from one
+        # window (e.g. an exception clause) must not short-circuit before a
+        # later, valid entailment from another window (e.g. the general
+        # rule it qualifies) gets a chance to be checked.
+        ctx = _make_table_context(5)  # 5 rows -> >1 window at rows_per_window=3/step=2
+        reranker = AsyncMock()
+        reranker.rerank = AsyncMock(
+            return_value=[RerankResult(index=0, score=0.9), RerankResult(index=1, score=0.5)]
+        )
+        nli = AsyncMock()
+        nli.check = AsyncMock(
+            side_effect=[
+                NLIResult(label=LABEL_CONTRADICTION, entailment_score=0.0, contradiction_score=0.9),
+                NLIResult(label=LABEL_ENTAILMENT, entailment_score=0.85, contradiction_score=0.0),
+            ]
+        )
+        service = RAMService(nli_model=nli, reranker_model=reranker)
+
+        result = await service.assess_sentence("Baris1 bernilai 1.", premise="", contexts=[ctx])
+
+        assert nli.check.await_count == 2
+        assert result.label == LABEL_ENTAILMENT
+
+    @pytest.mark.asyncio
+    async def test_moderate_confidence_contradiction_below_raised_threshold_is_suppressed(self) -> None:
+        ctx = _make_table_context(5)
+        reranker = AsyncMock()
+        reranker.rerank = AsyncMock(
+            return_value=[RerankResult(index=0, score=0.9), RerankResult(index=1, score=0.5)]
+        )
+        moderate_score = NLI_CONTRADICTION_THRESHOLD - 0.1
+        nli = AsyncMock()
+        nli.check = AsyncMock(
+            return_value=NLIResult(
+                label=LABEL_CONTRADICTION, entailment_score=0.1, contradiction_score=moderate_score
+            )
+        )
+        service = RAMService(nli_model=nli, reranker_model=reranker)
+
+        result = await service.assess_sentence("Baris1 bernilai 1.", premise="", contexts=[ctx])
+
+        # Below NLI_CONTRADICTION_THRESHOLD, so the raw "contradiction"
+        # label from the model is downgraded to neutral rather than
+        # surfaced as a citation badge (ChatService._format_citation
+        # renders any "contradiction" label unconditionally, so filtering
+        # must happen here, not at display time).
+        assert result.label == LABEL_NEUTRAL
+
+    @pytest.mark.asyncio
+    async def test_high_confidence_contradiction_still_surfaced_when_no_entailment_found(self) -> None:
+        ctx = _make_table_context(5)
+        reranker = AsyncMock()
+        reranker.rerank = AsyncMock(
+            return_value=[RerankResult(index=0, score=0.9), RerankResult(index=1, score=0.5)]
+        )
+        nli = AsyncMock()
+        nli.check = AsyncMock(
+            side_effect=[
+                NLIResult(
+                    label=LABEL_CONTRADICTION,
+                    entailment_score=0.0,
+                    contradiction_score=NLI_CONTRADICTION_THRESHOLD + 0.1,
+                ),
+                NLIResult(label=LABEL_NEUTRAL, entailment_score=0.3, contradiction_score=0.2),
+            ]
+        )
+        service = RAMService(nli_model=nli, reranker_model=reranker)
+
+        result = await service.assess_sentence("Baris1 bernilai 1.", premise="", contexts=[ctx])
+
+        assert nli.check.await_count == 2
+        assert result.label == LABEL_CONTRADICTION
+        assert result.contradiction_score == NLI_CONTRADICTION_THRESHOLD + 0.1
 
     @pytest.mark.asyncio
     async def test_non_markdown_table_content_degrades_to_prose_path(self) -> None:

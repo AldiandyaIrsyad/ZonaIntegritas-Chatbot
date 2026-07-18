@@ -3,6 +3,7 @@ from app.thesis.chunking.logic import (
     create_parent_chunks,
     split_into_children,
     infer_heading_depth,
+    _build_breadcrumb_tag,
     _slug,
 )
 from app.thesis.chunking.models import ParsedElement, ParentChunkData, ContentType
@@ -123,19 +124,80 @@ def test_heading_stack_and_breadcrumbs():
     
     # 1. Chapter 1
     assert parents[0].breadcrumbs == ["Chapter 1"]
-    assert "[Context: Chapter 1]" in parents[0].text
-    
+    assert "[Context:" not in parents[0].text
+
     # 2. Section 1.1
     assert parents[1].breadcrumbs == ["Chapter 1", "Section 1.1"]
-    assert "[Context: Chapter 1 > Section 1.1]" in parents[1].text
-    
+    assert "[Context:" not in parents[1].text
+
     # 3. Article 1.1.1
     assert parents[2].breadcrumbs == ["Chapter 1", "Section 1.1", "Article 1.1.1"]
-    assert "[Context: Chapter 1 > Section 1.1 > Article 1.1.1]" in parents[2].text
-    
+    assert "[Context:" not in parents[2].text
+
     # 4. Section 1.2
     assert parents[3].breadcrumbs == ["Chapter 1", "Section 1.2"]
-    assert "[Context: Chapter 1 > Section 1.2]" in parents[3].text
+    assert "[Context:" not in parents[3].text
+
+
+def test_build_breadcrumb_tag_has_no_bracket_boilerplate():
+    """The child-chunk breadcrumb tag is a plain breadcrumb path — no
+    "[Context: ...]" brackets or label, since that boilerplate is constant
+    across nearly every chunk and would dilute embeddings without adding
+    discriminative signal.
+    """
+    assert _build_breadcrumb_tag([]) == ""
+    assert _build_breadcrumb_tag(["BAB II", "Pasal 5"]) == "BAB II > Pasal 5\n\n"
+
+
+def test_parent_text_never_carries_inline_breadcrumb_tag():
+    """Parent chunk text must stay pure body text even with deep
+    breadcrumbs — the LLM prompt and frontend already build their own
+    breadcrumb header from the structured ``breadcrumbs`` field, and RAM's
+    sentence-splitter would otherwise chop an inline tag into its own
+    pseudo-"sentence", polluting NLI premise windows.
+    """
+    elements = [
+        ParsedElement(element_type="Title", text="BAB II", metadata={"category_depth": 0}),
+        ParsedElement(element_type="Title", text="Pasal 5", metadata={"category_depth": 1}),
+        ParsedElement(element_type="NarrativeText", text="Isi pasal lima."),
+    ]
+
+    parents = create_parent_chunks(elements, doc_id="doc1", max_chars=1000)
+
+    assert len(parents) == 1
+    assert parents[0].breadcrumbs == ["BAB II", "Pasal 5"]
+    assert parents[0].text == "BAB II\n\nPasal 5\n\nIsi pasal lima."
+    assert "[Context:" not in parents[0].text
+    assert "Isi pasal lima" in parents[0].text
+
+
+def test_ayat_marker_mistagged_as_title_does_not_split_pasal():
+    """A parenthesized ayat marker like "(1)" must never act as a section
+    boundary, even if the unstructured parser mistags it as a Title element
+    (a known hi_res layout-detection false positive for short numbered
+    lines). Otherwise infer_heading_depth falls through to the default
+    depth 0, which pops the whole heading stack (including the current
+    Pasal) and splits complementary ayat clauses of one article into
+    unrelated parent chunks.
+    """
+    elements = [
+        ParsedElement(element_type="Title", text="Pasal 5", metadata={"category_depth": 1}),
+        ParsedElement(
+            element_type="Title",
+            text="(1) Pengelola tidak bertanggung jawab atas kehilangan kendaraan yang tidak berbayar.",
+        ),
+        ParsedElement(
+            element_type="Title",
+            text="(2) Pengelola hanya bertanggung jawab atas kehilangan kendaraan yang berbayar atau berlangganan.",
+        ),
+    ]
+
+    parents = create_parent_chunks(elements, doc_id="doc1", max_chars=1000)
+
+    assert len(parents) == 1
+    assert parents[0].breadcrumbs == ["Pasal 5"]
+    assert "(1) Pengelola tidak bertanggung jawab" in parents[0].text
+    assert "(2) Pengelola hanya bertanggung jawab" in parents[0].text
 
 
 def test_parent_chunks_have_ltree_paths():
@@ -319,17 +381,20 @@ def test_split_into_children_retains_context():
     parent = ParentChunkData(
         id="p1",
         doc_id="d1",
-        text="[Context: Chapter 1 > Section 1.1]\n\nSentence one. Sentence two. Sentence three. Sentence four. Sentence five.",
+        text="Sentence one. Sentence two. Sentence three. Sentence four. Sentence five.",
         chunk_index=0,
         breadcrumbs=["Chapter 1", "Section 1.1"]
     )
-    
-    # Set max chars small enough to force a split
-    children = split_into_children(parent, max_chars=80, overlap_chars=5)
-    
+
+    # Set max chars small enough to force a split (no prefix budget is
+    # reserved anymore — the tag is added post-split — so this must be
+    # smaller than the body text itself, not the old prefix+body sum).
+    children = split_into_children(parent, max_chars=40, overlap_chars=5)
+
     assert len(children) > 1
     for child in children:
-        assert "[Context: Chapter 1 > Section 1.1]" in child.text
+        assert child.text.startswith("Chapter 1 > Section 1.1\n\n")
+        assert "[Context:" not in child.text
         assert child.breadcrumbs == ["Chapter 1", "Section 1.1"]
 
 
@@ -369,7 +434,7 @@ def test_table_not_split_into_multiple_children():
     parent = ParentChunkData(
         id="p1",
         doc_id="d1",
-        text=f"[Context: Section A]\n\n{table_html}",
+        text=table_html,
         chunk_index=0,
         breadcrumbs=["Section A"],
         content_type=ContentType.TABLE,
@@ -425,7 +490,7 @@ def test_table_preserves_breadcrumbs():
     table_parents = [p for p in parents if p.content_type == ContentType.TABLE]
     assert len(table_parents) == 1
     assert table_parents[0].breadcrumbs == ["Chapter 1"]
-    assert "[Context: Chapter 1]" in table_parents[0].text
+    assert "[Context:" not in table_parents[0].text
 
 
 def test_consecutive_tables_become_separate_parents():
@@ -607,12 +672,12 @@ def test_min_child_text_length_constant():
 
 
 def test_gibberish_filter_applies_under_active_breadcrumbs():
-    """Regression test: the breadcrumb context prefix (e.g.
-    "[Context: BAB I KETENTUAN UMUM > Pasal 1]\\n\\n") used to be prepended
-    to child text *before* the MIN_CHILD_TEXT_LENGTH check ran, so any short
-    or garbage body text under an active heading always passed — the prefix
-    alone is far longer than 8 chars. The filter must measure the body text
-    only, regardless of whether breadcrumbs are present.
+    """Regression test: the breadcrumb tag (e.g.
+    "BAB I KETENTUAN UMUM > Pasal 1\\n\\n") prepended to every child chunk
+    could mask a short/garbage body from the MIN_CHILD_TEXT_LENGTH check if
+    the check measured the whole child text — the tag alone is far longer
+    than 8 chars. The filter must measure the body text only, regardless of
+    whether breadcrumbs are present.
     """
     from app.thesis.chunking.logic import MIN_CHILD_TEXT_LENGTH
 

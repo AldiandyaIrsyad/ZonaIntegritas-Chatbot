@@ -21,8 +21,9 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.kb.application.ingest_worker import IngestWorker
+from app.kb.config import get_bge_m3_settings
 from app.kb.domain.interfaces import ChunkVector
-from app.kb.infra.infinity_embeddings import InfinityEmbeddings
+from app.kb.infra.bge_m3_embeddings import BGEM3Embeddings
 from app.kb.infra.postgres_repo import PostgresKBRepository
 from app.kb.infra.qdrant_store import QdrantStore
 from app.kb.infra.unstructured_client import UnstructuredClient
@@ -69,10 +70,15 @@ async def run_production_ingestion(
         session: Async SQLAlchemy session bound to the isolated Postgres DB.
         qdrant_collection: The isolated Qdrant collection name.
         unstructured_url: Base URL of the (self-hosted) Unstructured API.
-        infinity_url: Base URL of the Infinity embedding/VLM server.
+        infinity_url: Base URL of the Infinity server — no longer used for
+            embedding (see ``text_embedder`` below), kept for signature
+            compatibility with callers; still relevant if a reranker is
+            added to this capture path in the future.
         qdrant_host: Qdrant host.
         qdrant_port: Qdrant HTTP port.
-        embedding_model: BGE-M3 model identifier for Infinity.
+        embedding_model: Unused now that embedding runs in-process via
+            ``BGEM3Embeddings``/``get_bge_m3_settings()``; kept for
+            signature compatibility.
         unstructured_api_key: Bearer token, empty for local self-hosted.
         vlm_enricher: Real VLM enricher (e.g. ``OpenRouterVLMClient``) — pass
             the same instance ``app.kb.dependency.get_vlm_enricher()``
@@ -86,7 +92,13 @@ async def run_production_ingestion(
     document_parser = UnstructuredClient(
         base_url=unstructured_url, extract_images=True, api_key=unstructured_api_key
     )
-    text_embedder = InfinityEmbeddings(base_url=infinity_url, model=embedding_model, batch_size=8)
+    bge_m3_cfg = get_bge_m3_settings()
+    text_embedder = BGEM3Embeddings(
+        model_name=bge_m3_cfg.model,
+        device=bge_m3_cfg.device,
+        use_fp16=bge_m3_cfg.use_fp16,
+        batch_size=bge_m3_cfg.batch_size,
+    )
     vector_store = QdrantStore(host=qdrant_host, port=qdrant_port, collection_name=qdrant_collection)
     kb_repo = PostgresKBRepository(session)
 

@@ -85,6 +85,7 @@ def get_relevance_checker(
         llm_connection=judge_llm,
         model=config.llm_model,
         system_prompt=config.relevance_judge_prompt,
+        user_template=config.relevance_judge_user_template,
     )
     return LLMJudgeRelevanceChecker(judge=judge)
 
@@ -95,6 +96,7 @@ def get_relevance_service(
 
 def get_query_expander(
     llm_conn: LLMConnection = Depends(get_llm_connection),
+    repo: PostgresKBRepository = Depends(get_kb_repo),
 ) -> Optional[IQueryExpander]:
     """Build a HyDEExpander if HyDE is enabled in ChatConfig.
 
@@ -112,6 +114,9 @@ def get_query_expander(
         system_prompt=config.hyde_system_prompt,
         max_tokens=config.hyde_max_tokens,
         temperature=config.hyde_temperature,
+        kb_repo=repo if config.hyde_context_enabled else None,
+        context_max_docs=config.hyde_context_max_docs,
+        context_refresh_seconds=config.hyde_context_refresh_seconds,
     )
 
 def get_ram_service(

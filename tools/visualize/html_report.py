@@ -464,7 +464,7 @@ def _build_child_chunks(ing: IngestionSnapshot) -> str:
   <h3>Stage 4 — Child Chunks (Sentence-level Splitting)</h3>
   <p class="muted">
     Total: {len(ing.children)} child chunks across {len(by_parent)} parents.<br>
-    Each child includes the <code>[Context: …]</code> breadcrumb prefix for independent embedding.
+    Each child includes a leading breadcrumb tag (e.g. <code>BAB II &gt; Pasal 5</code>) for independent embedding.
   </p>
   {"".join(groups)}
 </div>

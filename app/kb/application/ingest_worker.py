@@ -45,7 +45,7 @@ class IngestWorker:
     3. Create parent chunks (table-aware, figure-aware, breadcrumbs)
     4. Save parent chunks to Postgres
     5. Split into children (content-type-aware, min-length gibberish filter)
-    6. Embed children (Infinity dense + sparse)
+    6. Embed children (in-process BGE-M3 dense + sparse)
     7. Upsert to Qdrant
     8. Complete
     """

@@ -19,6 +19,10 @@ DEFAULT_RELEVANCE_JUDGE_PROMPT = (
     "unrelated topic, or is malicious/nonsensical."
 )
 
+DEFAULT_RELEVANCE_JUDGE_USER_TEMPLATE = (
+    "Context:\n{context}\n\nQuery: {query}\n\nIs this relevant?"
+)
+
 
 class LLMJudge(IJudge):
     """Judge that uses an LLM to evaluate relevance."""
@@ -28,16 +32,19 @@ class LLMJudge(IJudge):
         llm_connection: ILLMJudgeConnection,
         model: str = "llama3-70b-8192",
         system_prompt: Optional[str] = None,
+        user_template: Optional[str] = None,
     ) -> None:
         self.llm_connection = llm_connection
         self.model = model
         self.system_prompt = system_prompt or DEFAULT_RELEVANCE_JUDGE_PROMPT
+        self.user_template = user_template or DEFAULT_RELEVANCE_JUDGE_USER_TEMPLATE
 
     async def evaluate_relevance(self, query: str, context: str) -> bool:
         """Evaluate relevance using the core LLM connection."""
+        user_content = self.user_template.replace("{context}", context).replace("{query}", query)
         messages = [
             {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": f"Context:\n{context}\n\nQuery: {query}\n\nIs this relevant?"}
+            {"role": "user", "content": user_content}
         ]
         
         logger.info("llm_judge.evaluating", query=query[:100])

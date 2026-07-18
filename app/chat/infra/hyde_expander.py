@@ -10,14 +10,22 @@ Dependency rule compliance:
     - It does NOT import ``kb/application`` or ``kb/infra``.
 """
 
-from typing import Dict, List
+import asyncio
+import time
+from typing import Dict, List, Optional
 
 import structlog
 
 from app.chat.domain.interfaces import ILLMConnection
-from app.kb.domain.interfaces import IQueryExpander
+from app.kb.domain.interfaces import IKBRepository, IQueryExpander
 
 logger = structlog.get_logger(__name__)
+
+# Module-level (not per-instance) TTL cache for the KB grounding context —
+# ``get_query_expander`` builds a fresh HyDEExpander per request, so an
+# instance-level cache would never survive between requests.
+_kb_context_cache: Dict[str, object] = {"text": "", "expires_at": 0.0}
+_kb_context_lock = asyncio.Lock()
 
 
 class HyDEExpander(IQueryExpander):
@@ -37,6 +45,9 @@ class HyDEExpander(IQueryExpander):
         system_prompt: str,
         max_tokens: int = 256,
         temperature: float = 0.0,
+        kb_repo: Optional[IKBRepository] = None,
+        context_max_docs: int = 20,
+        context_refresh_seconds: int = 300,
     ) -> None:
         """Initialize the HyDE expander.
 
@@ -45,9 +56,18 @@ class HyDEExpander(IQueryExpander):
             model: Model identifier to use for generation.
             prompt_template: Prompt template containing ``{query}`` placeholder.
             system_prompt: System message setting the domain/register the
-                generated hypothetical document should imitate.
+                generated hypothetical document should imitate. May contain
+                a ``{kb_context}`` placeholder (see ``kb_repo``).
             max_tokens: Max tokens for the hypothetical document.
             temperature: Sampling temperature (0.0 = deterministic).
+            kb_repo: Optional KB repository used to ground the prompt with
+                the actual document titles/descriptions in this KB (fills
+                the ``{kb_context}`` placeholder). If ``None``, the
+                placeholder resolves to an empty string.
+            context_max_docs: Max number of active documents to list in the
+                grounding context.
+            context_refresh_seconds: TTL for the module-level grounding
+                context cache.
         """
         self._llm = llm
         self._model = model
@@ -55,6 +75,35 @@ class HyDEExpander(IQueryExpander):
         self._system_prompt = system_prompt
         self._max_tokens = max_tokens
         self._temperature = temperature
+        self._kb_repo = kb_repo
+        self._context_max_docs = context_max_docs
+        self._context_refresh_seconds = context_refresh_seconds
+
+    async def _get_kb_context(self) -> str:
+        """Return a cached, TTL-refreshed grounding block of active KB docs."""
+        if self._kb_repo is None:
+            return ""
+
+        if time.monotonic() < _kb_context_cache["expires_at"]:
+            return _kb_context_cache["text"]
+
+        async with _kb_context_lock:
+            # Re-check after acquiring the lock — another request may have
+            # already refreshed it while we were waiting.
+            if time.monotonic() < _kb_context_cache["expires_at"]:
+                return _kb_context_cache["text"]
+
+            docs = await self._kb_repo.get_all_pdfs()
+            active_docs = [d for d in docs if d.active][: self._context_max_docs]
+            lines = [
+                f"- {doc.title}: {(doc.description or '')[:150]}"
+                for doc in active_docs
+            ]
+            text = "\n".join(lines)
+
+            _kb_context_cache["text"] = text
+            _kb_context_cache["expires_at"] = time.monotonic() + self._context_refresh_seconds
+            return text
 
     async def expand(self, query: str) -> str:
         """Generate a hypothetical answer document for the query.
@@ -68,9 +117,11 @@ class HyDEExpander(IQueryExpander):
         if not query.strip():
             return ""
 
-        user_prompt = self._prompt_template.replace("{query}", query)
+        kb_context = await self._get_kb_context()
+        system_prompt = self._system_prompt.replace("{kb_context}", kb_context)
+        user_prompt = self._prompt_template.replace("{query}", query).replace("{kb_context}", kb_context)
         messages: List[Dict[str, str]] = [
-            {"role": "system", "content": self._system_prompt},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
 

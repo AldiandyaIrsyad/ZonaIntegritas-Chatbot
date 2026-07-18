@@ -24,9 +24,10 @@ from typing import Dict, List, Optional
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.kb.config import get_bge_m3_settings
 from app.kb.domain.interfaces import IQueryExpander, SearchResult
 from app.kb.domain.models import ParentChunk, RetrievedContext
-from app.kb.infra.infinity_embeddings import InfinityEmbeddings
+from app.kb.infra.bge_m3_embeddings import BGEM3Embeddings
 from app.kb.infra.infinity_reranker import InfinityReranker
 from app.kb.infra.postgres_repo import PostgresKBRepository
 from app.kb.infra.qdrant_store import QdrantStore
@@ -84,10 +85,13 @@ async def run_production_retrieval(
         query: The search query text.
         session: Async SQLAlchemy session bound to the isolated Postgres DB.
         qdrant_collection: The isolated Qdrant collection name.
-        infinity_url: Base URL of the Infinity embedding/reranker server.
+        infinity_url: Base URL of the Infinity reranker server (embedding no
+            longer runs through Infinity — see ``text_embedder`` below).
         qdrant_host: Qdrant host.
         qdrant_port: Qdrant HTTP port.
-        embedding_model: BGE-M3 model identifier.
+        embedding_model: Unused now that embedding runs in-process via
+            ``BGEM3Embeddings``/``get_bge_m3_settings()``; kept for
+            signature compatibility.
         reranker_model: Cross-encoder reranker model identifier.
         top_k: Final result count (production chat uses 15).
         query_expander: Real ``HyDEExpander`` to match production behavior,
@@ -97,7 +101,13 @@ async def run_production_retrieval(
         A :class:`RetrievalSnapshot` with dense/sparse/hybrid comparison,
         the final reranked+hydrated results, and real provenance tags.
     """
-    text_embedder = InfinityEmbeddings(base_url=infinity_url, model=embedding_model, batch_size=8)
+    bge_m3_cfg = get_bge_m3_settings()
+    text_embedder = BGEM3Embeddings(
+        model_name=bge_m3_cfg.model,
+        device=bge_m3_cfg.device,
+        use_fp16=bge_m3_cfg.use_fp16,
+        batch_size=bge_m3_cfg.batch_size,
+    )
     vector_store = QdrantStore(host=qdrant_host, port=qdrant_port, collection_name=qdrant_collection)
     real_kb_repo = PostgresKBRepository(session)
     capturing_repo = _ProvenanceCapturingKBRepo(real_kb_repo)

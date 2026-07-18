@@ -49,8 +49,22 @@ EVIDENCE_SNIPPET_MAX_CHARS = 140
 NLI_CANDIDATE_WINDOWS = 2
 
 # Minimum dominant-label score for a candidate window's NLI result to
-# short-circuit the search (skip trying further candidate windows).
+# short-circuit the search (skip trying further candidate windows). Only
+# gates ENTAILMENT short-circuiting — see NLI_CONTRADICTION_THRESHOLD for
+# the (higher) bar CONTRADICTION must clear before it can be surfaced.
 NLI_CONFIDENCE_THRESHOLD = 0.5
+
+# Minimum contradiction_score for a candidate window's NLI result to be
+# surfaced as a "Contradiction" citation badge. Set higher than
+# NLI_CONFIDENCE_THRESHOLD deliberately: a false "Contradiction" badge shown
+# to the end user is far more costly to trust than a missed "Supported"
+# badge, and general-purpose NLI models (e.g. indo-roberta-indonli) are
+# prone to flagging negation/conditional lexical cues as contradictions
+# even when the two statements are logically consistent (e.g. an "only
+# responsible if paid" clause vs. a "not responsible if unpaid" clause of
+# the same legal article — complementary framings of one rule, not a
+# contradiction). Recalibrate against real logged scores once available.
+NLI_CONTRADICTION_THRESHOLD = 0.7
 
 
 def _sanitize_snippet(text: str, max_len: int = EVIDENCE_SNIPPET_MAX_CHARS) -> str:
@@ -211,11 +225,17 @@ class RAMService:
         if not candidate_idxs:
             return NLIResult(label=LABEL_NEUTRAL, entailment_score=0.5, contradiction_score=0.0)
 
-        # Try each candidate window in rerank order, short-circuiting on the
-        # first confident non-neutral verdict. If none qualify, fall back to
-        # the top-ranked candidate's result rather than dropping the
-        # citation entirely.
+        # Try each candidate window in rerank order. A confident ENTAILMENT
+        # short-circuits immediately (a single supporting window is enough).
+        # A confident CONTRADICTION does NOT short-circuit — it's held while
+        # the remaining candidates are checked, so a spurious contradiction
+        # from one window (e.g. an exception clause) can't pre-empt a valid
+        # entailment from another window (e.g. the general rule it qualifies)
+        # that simply reranked lower. If no candidate entails and no held
+        # contradiction clears NLI_CONTRADICTION_THRESHOLD, falls back to the
+        # top-ranked candidate's raw result rather than dropping the citation.
         fallback: Optional[tuple] = None
+        best_contradiction: Optional[tuple] = None
         for idx in candidate_idxs:
             candidate_premise = windows[idx]
             candidate_ctx = window_to_ctx[idx]
@@ -230,20 +250,45 @@ class RAMService:
                 logger.warning("NLI check failed: %s", str(e), exc_info=True)
                 continue
 
+            logger.debug(
+                "Candidate NLI result: label=%s entailment=%.3f contradiction=%.3f",
+                result.label,
+                result.entailment_score,
+                result.contradiction_score,
+            )
+
             if fallback is None:
                 fallback = (result, candidate_ctx, candidate_premise)
 
-            dominant_score = {
-                LABEL_ENTAILMENT: result.entailment_score,
-                LABEL_CONTRADICTION: result.contradiction_score,
-            }.get(result.label, 0.0)
-            if result.label != LABEL_NEUTRAL and dominant_score >= NLI_CONFIDENCE_THRESHOLD:
+            if result.label == LABEL_ENTAILMENT and result.entailment_score >= NLI_CONFIDENCE_THRESHOLD:
                 chosen_result, chosen_ctx, chosen_premise = result, candidate_ctx, candidate_premise
                 break
+
+            if (
+                best_contradiction is None
+                and result.label == LABEL_CONTRADICTION
+                and result.contradiction_score >= NLI_CONTRADICTION_THRESHOLD
+            ):
+                best_contradiction = (result, candidate_ctx, candidate_premise)
         else:
-            if fallback is None:
+            if best_contradiction is not None:
+                chosen_result, chosen_ctx, chosen_premise = best_contradiction
+            elif fallback is not None:
+                chosen_result, chosen_ctx, chosen_premise = fallback
+            else:
                 return NLIResult(label=LABEL_NEUTRAL, entailment_score=0.5, contradiction_score=0.0)
-            chosen_result, chosen_ctx, chosen_premise = fallback
+
+        # The fallback branch above can carry through a raw CONTRADICTION
+        # label that never cleared NLI_CONTRADICTION_THRESHOLD (only
+        # best_contradiction is pre-gated by it) — _format_citation renders
+        # whatever label reaches it without re-checking the score, so
+        # downgrade a sub-threshold contradiction to neutral here rather
+        # than surfacing a low-confidence "Contradiction" badge to the user.
+        if (
+            chosen_result.label == LABEL_CONTRADICTION
+            and chosen_result.contradiction_score < NLI_CONTRADICTION_THRESHOLD
+        ):
+            chosen_result = dataclasses.replace(chosen_result, label=LABEL_NEUTRAL)
 
         # NLIResult is frozen, use dataclasses.replace to attach metadata
         return dataclasses.replace(

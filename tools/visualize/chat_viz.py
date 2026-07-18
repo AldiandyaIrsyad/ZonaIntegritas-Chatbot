@@ -40,8 +40,9 @@ from app.chat.infra.postgres_chat_repo import PostgresChatRepository
 from app.chat.infra.prompt_guard_client import PromptGuardClient
 from app.chat.infra.hyde_expander import HyDEExpander
 from app.kb.application.search_service import SearchService
+from app.kb.config import get_bge_m3_settings
 from app.kb.domain.interfaces import IQueryExpander
-from app.kb.infra.infinity_embeddings import InfinityEmbeddings
+from app.kb.infra.bge_m3_embeddings import BGEM3Embeddings
 from app.kb.infra.infinity_reranker import InfinityReranker
 from app.kb.infra.postgres_repo import PostgresKBRepository
 from app.kb.infra.qdrant_store import QdrantStore
@@ -157,6 +158,7 @@ class ChatRealAdapters:
     hyde_max_tokens: int
     hyde_temperature: float
     hyde_prompt_template: str
+    hyde_system_prompt: str
 
 
 async def run_chat_capture(*, query: str, adapters: ChatRealAdapters) -> ChatCaptureSnapshot:
@@ -167,7 +169,13 @@ async def run_chat_capture(*, query: str, adapters: ChatRealAdapters) -> ChatCap
     caller's real HTTP-client-backed adapters — cheap to construct, safe to
     call once per query without cross-query bleed in the capture logs.
     """
-    text_embedder = InfinityEmbeddings(base_url=adapters.infinity_url, model=adapters.embedding_model, batch_size=8)
+    bge_m3_cfg = get_bge_m3_settings()
+    text_embedder = BGEM3Embeddings(
+        model_name=bge_m3_cfg.model,
+        device=bge_m3_cfg.device,
+        use_fp16=bge_m3_cfg.use_fp16,
+        batch_size=bge_m3_cfg.batch_size,
+    )
     vector_store = QdrantStore(host=adapters.qdrant_host, port=adapters.qdrant_port, collection_name=adapters.qdrant_collection)
     reranker = InfinityReranker(base_url=adapters.infinity_url, model=adapters.reranker_model)
     kb_repo = PostgresKBRepository(adapters.session)
@@ -178,6 +186,7 @@ async def run_chat_capture(*, query: str, adapters: ChatRealAdapters) -> ChatCap
         query_expander = HyDEExpander(
             llm=main_llm_conn, model=adapters.llm_model,
             prompt_template=adapters.hyde_prompt_template,
+            system_prompt=adapters.hyde_system_prompt,
             max_tokens=adapters.hyde_max_tokens, temperature=adapters.hyde_temperature,
         )
 

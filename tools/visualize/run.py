@@ -281,12 +281,9 @@ def _extract_default_query(parents: List[ParentChunkSnapshot]) -> str:
     for pc in parents:
         if pc.content_type != ContentType.TEXT.value:
             continue
-        # Strip the [Context: ...] prefix if present
+        # Parent chunk text carries no breadcrumb prefix (only child chunks
+        # do), so it's already body-only.
         text = pc.text
-        if text.startswith("[Context:"):
-            newline_idx = text.find("\n\n")
-            if newline_idx != -1:
-                text = text[newline_idx + 2 :]
 
         # Find first sentence
         for sep in [". ", "? ", "! "]:

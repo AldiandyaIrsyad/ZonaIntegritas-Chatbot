@@ -24,6 +24,7 @@ def _fake_config(**overrides):
         llm_api_key=SecretStr("k"),
         llm_model="m",
         relevance_judge_prompt="p",
+        relevance_judge_user_template="Context:\n{context}\n\nQuery: {query}\n\nIs this relevant?",
     )
     base.update(overrides)
     return SimpleNamespace(**base)

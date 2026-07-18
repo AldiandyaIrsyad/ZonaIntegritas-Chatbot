@@ -41,6 +41,14 @@ DEFAULT_CHILD_OVERLAP_CHARS = 50
 # gibberish (no meaningful context) and dropped before embedding/upsert.
 MIN_CHILD_TEXT_LENGTH = 8
 
+# Matches Indonesian legal "ayat" markers like "(1)", "(2)". The unstructured
+# hi_res layout model occasionally misclassifies these short, numbered lines
+# as "Title" elements; without this guard that would be treated as a section
+# boundary, resetting the heading stack (see infer_heading_depth — it has no
+# pattern for a leading "(", only unparenthesized "1)") and splitting ayat
+# clauses of the same Pasal into unrelated parent chunks.
+_AYAT_MARKER_RE = re.compile(r"^\(\d+\)\s")
+
 
 def infer_heading_depth(text: str, metadata: Dict[str, Any]) -> int:
     """Infer the hierarchical depth of a heading element.
@@ -169,12 +177,7 @@ def create_parent_chunks(
             return
             
         combined_text = "\n\n".join(current_texts).strip()
-        
-        # Prepend breadcrumbs to the parent text so the LLM gets the context
-        if current_breadcrumbs and combined_text:
-            context_header = f"[Context: {' > '.join(current_breadcrumbs)}]\n\n"
-            combined_text = context_header + combined_text
-            
+
         if combined_text:
             _parent_id = heading_stack[-2][4] if len(heading_stack) >= 2 else None
             _path = heading_stack[-1][3] if heading_stack else doc_id
@@ -212,11 +215,6 @@ def create_parent_chunks(
         if not text:
             return
 
-        # Prepend breadcrumbs for context
-        if current_breadcrumbs:
-            context_header = f"[Context: {' > '.join(current_breadcrumbs)}]\n\n"
-            text = context_header + text
-
         _parent_id = heading_stack[-2][4] if len(heading_stack) >= 2 else None
         _path = heading_stack[-1][3] if heading_stack else doc_id
         _depth = heading_stack[-1][0] if heading_stack else 0
@@ -247,10 +245,6 @@ def create_parent_chunks(
         text = element.text.strip()
         if not text:
             return
-
-        if current_breadcrumbs:
-            context_header = f"[Context: {' > '.join(current_breadcrumbs)}]\n\n"
-            text = context_header + text
 
         _parent_id = heading_stack[-2][4] if len(heading_stack) >= 2 else None
         _path = heading_stack[-1][3] if heading_stack else doc_id
@@ -298,8 +292,14 @@ def create_parent_chunks(
             continue
 
         # Treat as boundary only if it's a Title and has substantial text
-        # (filters out 1-letter artifacts like bullets misclassified as Titles)
-        is_boundary = element.element_type in SECTION_BOUNDARY_TYPES and len(text) > 3
+        # (filters out 1-letter artifacts like bullets misclassified as Titles).
+        # Ayat markers are excluded even if mistagged as Title — they are
+        # never legitimate section boundaries (see _AYAT_MARKER_RE).
+        is_boundary = (
+            element.element_type in SECTION_BOUNDARY_TYPES
+            and len(text) > 3
+            and not _AYAT_MARKER_RE.match(text)
+        )
 
         if is_boundary:
             # Start a new parent chunk at section boundaries, but only if we already
@@ -401,17 +401,16 @@ def split_into_children(
         # TEXT and HYBRID both use the standard text splitter
         children = _split_text_children(parent, max_chars, overlap_chars)
 
-    # Drop gibberish children — chunks whose stripped *body* text (excluding
-    # the breadcrumb context prefix, which every child under a heading
-    # carries and would otherwise mask a short/garbage body from this check)
-    # is shorter than the minimum threshold carry no meaningful context for
-    # retrieval. This filters out micro-fragments (e.g. lone punctuation,
-    # single letters, OCR noise) before they reach the embedding model and
-    # vector store.
+    # Drop gibberish children — chunks whose *body* text (excluding the
+    # breadcrumb tag, which every child under a heading carries and would
+    # otherwise mask a short/garbage body from this check) is shorter than
+    # the minimum threshold carry no meaningful context for retrieval. This
+    # filters out micro-fragments (e.g. lone punctuation, single letters,
+    # OCR noise) before they reach the embedding model and vector store.
     original_count = len(children)
     children = [
         child for child in children
-        if len(_strip_context_prefix(child.text, parent.breadcrumbs)[0].strip()) >= MIN_CHILD_TEXT_LENGTH
+        if len(_strip_breadcrumb_tag(child.text, parent.breadcrumbs).strip()) >= MIN_CHILD_TEXT_LENGTH
     ]
     dropped = original_count - len(children)
     if dropped > 0:
@@ -437,34 +436,44 @@ def split_into_children(
     return children
 
 
-def _build_context_prefix(breadcrumbs: List[str]) -> str:
-    """Build the context header string from breadcrumbs.
+def _build_breadcrumb_tag(breadcrumbs: List[str]) -> str:
+    """Build the breadcrumb tag prepended to every child chunk's text.
+
+    Deliberately lighter than a bracketed "[Context: ...]" header: parent
+    chunks (what the LLM prompt and frontend actually display, and what
+    RAM's sentence-splitter windows) no longer carry any inline breadcrumb
+    text at all — ``ParentChunkData.breadcrumbs`` already gives every
+    downstream consumer that data structurally. This tag exists only for
+    child chunks, which are embedding-only, so a plain, boilerplate-free
+    rendering (no brackets, no "Context:" label) keeps the discriminative
+    part of the signal (e.g. "Pasal 5") without diluting the embedding
+    with a constant string repeated across nearly every chunk.
 
     Args:
         breadcrumbs: Hierarchical section path.
 
     Returns:
-        Context header string (empty if no breadcrumbs).
+        Breadcrumb tag string (empty if no breadcrumbs).
     """
     if not breadcrumbs:
         return ""
-    return f"[Context: {' > '.join(breadcrumbs)}]\n\n"
+    return f"{' > '.join(breadcrumbs)}\n\n"
 
 
-def _strip_context_prefix(text: str, breadcrumbs: List[str]) -> tuple[str, str]:
-    """Separate the context prefix from the body text.
+def _strip_breadcrumb_tag(text: str, breadcrumbs: List[str]) -> str:
+    """Return a child chunk's body text with its breadcrumb tag removed.
 
     Args:
-        text: The parent text (may start with a context header).
-        breadcrumbs: Breadcrumbs used to build the context header.
+        text: The child text (may start with a breadcrumb tag).
+        breadcrumbs: Breadcrumbs used to build the tag.
 
     Returns:
-        Tuple of (body_text, context_prefix).
+        The body text with the tag stripped, if present.
     """
-    context_prefix = _build_context_prefix(breadcrumbs)
-    if context_prefix and text.startswith(context_prefix):
-        return text[len(context_prefix):], context_prefix
-    return text, context_prefix
+    tag = _build_breadcrumb_tag(breadcrumbs)
+    if tag and text.startswith(tag):
+        return text[len(tag):]
+    return text
 
 
 def _split_text_children(
@@ -474,8 +483,9 @@ def _split_text_children(
 ) -> List[ChildChunkData]:
     """Split narrative text into child chunks using RecursiveCharacterTextSplitter.
 
-    Respects sentence and word boundaries. Re-injects the breadcrumb context
-    prefix into every child so vector search always has hierarchical context.
+    Respects sentence and word boundaries. Prepends a breadcrumb tag to
+    every child so vector search always has hierarchical context (parent
+    text itself carries no such tag — see ``_build_breadcrumb_tag``).
 
     Args:
         parent: The parent chunk to split.
@@ -485,21 +495,16 @@ def _split_text_children(
     Returns:
         List of child chunks.
     """
-    text_to_split, context_prefix = _strip_context_prefix(parent.text, parent.breadcrumbs)
-
-    # Adjust max_chars to account for the context prefix that we will add to every child
-    # Use at least max_chars // 4 for body text to avoid thousands of micro-children
-    min_body_chars = max(10, max_chars // 4)
-    effective_max_chars = max(min_body_chars, max_chars - len(context_prefix))
+    breadcrumb_tag = _build_breadcrumb_tag(parent.breadcrumbs)
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=effective_max_chars,
+        chunk_size=max_chars,
         chunk_overlap=overlap_chars,
         separators=["\n\n", "\n", ". ", "? ", "! ", "; ", ", ", " ", ""],
         length_function=len,
     )
 
-    child_texts = splitter.split_text(text_to_split)
+    child_texts = splitter.split_text(parent.text)
 
     children: List[ChildChunkData] = []
     for child_text in child_texts:
@@ -507,7 +512,7 @@ def _split_text_children(
         if not child_text:
             continue
 
-        final_child_text = context_prefix + child_text
+        final_child_text = breadcrumb_tag + child_text
 
         children.append(
             ChildChunkData(
@@ -560,25 +565,22 @@ def _split_table_children(
         group). May include additional row-group children for large
         Markdown tables, and a final summary child if available.
     """
-    context_prefix = _build_context_prefix(parent.breadcrumbs)
+    breadcrumb_tag = _build_breadcrumb_tag(parent.breadcrumbs)
     children: List[ChildChunkData] = []
 
     table_text = parent.text
     if not table_text.strip():
         return children
 
-    # Separate context prefix from the raw table text
-    raw_table_text, _ = _strip_context_prefix(table_text, parent.breadcrumbs)
-
     # --- Detect whether this is a Markdown or HTML table ---
-    is_markdown = _is_markdown_table(raw_table_text)
+    is_markdown = _is_markdown_table(table_text)
 
     if is_markdown and len(table_text) > max_chars:
         # Large Markdown table → row-group splitting
         row_group_children = _split_markdown_table_rows(
             parent=parent,
-            raw_table=raw_table_text,
-            context_prefix=context_prefix,
+            raw_table=table_text,
+            breadcrumb_tag=breadcrumb_tag,
             max_chars=max_chars,
         )
         children.extend(row_group_children)
@@ -589,7 +591,7 @@ def _split_table_children(
                 id=str(uuid.uuid4()),
                 parent_chunk_id=parent.id,
                 doc_id=parent.doc_id,
-                text=table_text,
+                text=breadcrumb_tag + table_text,
                 page=parent.page,
                 breadcrumbs=parent.breadcrumbs,
                 content_type=ContentType.TABLE,
@@ -599,7 +601,7 @@ def _split_table_children(
     # Always append the table summary child if available
     table_summary = parent.element_metadata.get("table_summary")
     if table_summary and isinstance(table_summary, str) and table_summary.strip():
-        summary_text = context_prefix + table_summary.strip()
+        summary_text = breadcrumb_tag + table_summary.strip()
         children.append(
             ChildChunkData(
                 id=str(uuid.uuid4()),
@@ -623,7 +625,7 @@ _is_markdown_table = is_markdown_table
 def _split_markdown_table_rows(
     parent: ParentChunkData,
     raw_table: str,
-    context_prefix: str,
+    breadcrumb_tag: str,
     max_chars: int,
 ) -> List[ChildChunkData]:
     """Split a large Markdown table into row-group child chunks.
@@ -638,8 +640,8 @@ def _split_markdown_table_rows(
 
     Args:
         parent: The table parent chunk.
-        raw_table: Raw Markdown table text (context prefix already stripped).
-        context_prefix: Context prefix to prepend to each child chunk.
+        raw_table: Raw Markdown table text.
+        breadcrumb_tag: Breadcrumb tag to prepend to each child chunk.
         max_chars: Maximum characters per child chunk.
 
     Returns:
@@ -653,7 +655,7 @@ def _split_markdown_table_rows(
                 id=str(uuid.uuid4()),
                 parent_chunk_id=parent.id,
                 doc_id=parent.doc_id,
-                text=context_prefix + raw_table,
+                text=breadcrumb_tag + raw_table,
                 page=parent.page,
                 breadcrumbs=parent.breadcrumbs,
                 content_type=ContentType.TABLE,
@@ -662,8 +664,8 @@ def _split_markdown_table_rows(
 
     header_line, separator_line, data_lines = parsed  # | Col A | Col B | / | --- | --- | / remaining rows
 
-    # Base overhead: context_prefix + header + separator + two newlines
-    base_overhead = len(context_prefix) + len(header_line) + len(separator_line) + 2
+    # Base overhead: breadcrumb tag + header + separator + two newlines
+    base_overhead = len(breadcrumb_tag) + len(header_line) + len(separator_line) + 2
 
     children: List[ChildChunkData] = []
     current_rows: List[str] = []
@@ -672,7 +674,7 @@ def _split_markdown_table_rows(
     def _flush_group(rows: List[str]) -> None:
         if not rows:
             return
-        group_text = context_prefix + "\n".join(
+        group_text = breadcrumb_tag + "\n".join(
             [header_line, separator_line] + rows
         )
         children.append(
@@ -707,7 +709,7 @@ def _split_markdown_table_rows(
                 id=str(uuid.uuid4()),
                 parent_chunk_id=parent.id,
                 doc_id=parent.doc_id,
-                text=context_prefix + raw_table,
+                text=breadcrumb_tag + raw_table,
                 page=parent.page,
                 breadcrumbs=parent.breadcrumbs,
                 content_type=ContentType.TABLE,
@@ -738,17 +740,16 @@ def _split_figure_children(
     Returns:
         List of child chunks.
     """
-    text_to_split, context_prefix = _strip_context_prefix(parent.text, parent.breadcrumbs)
-
     # If the description fits in a single child, don't split — preserve
     # the full VLM description as one retrievable unit
-    if len(text_to_split) <= max_chars:
+    if len(parent.text) <= max_chars:
+        breadcrumb_tag = _build_breadcrumb_tag(parent.breadcrumbs)
         return [
             ChildChunkData(
                 id=str(uuid.uuid4()),
                 parent_chunk_id=parent.id,
                 doc_id=parent.doc_id,
-                text=parent.text,
+                text=breadcrumb_tag + parent.text,
                 page=parent.page,
                 breadcrumbs=parent.breadcrumbs,
                 content_type=ContentType.FIGURE,

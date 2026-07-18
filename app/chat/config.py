@@ -4,7 +4,10 @@ from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.thesis.prompts import DEFAULT_SYSTEM_PROMPT_ID
-from app.thesis.ivm.judge import DEFAULT_RELEVANCE_JUDGE_PROMPT
+from app.thesis.ivm.judge import (
+    DEFAULT_RELEVANCE_JUDGE_PROMPT,
+    DEFAULT_RELEVANCE_JUDGE_USER_TEMPLATE,
+)
 
 class ChatConfig(BaseSettings):
     """Configuration for the Chat module.
@@ -52,6 +55,11 @@ class ChatConfig(BaseSettings):
         description="System prompt for the IVM LLM-as-judge relevance checker",
         validation_alias="CHAT_RELEVANCE_JUDGE_PROMPT",
     )
+    relevance_judge_user_template: str = Field(
+        default=DEFAULT_RELEVANCE_JUDGE_USER_TEMPLATE,
+        description="User-turn template for the IVM LLM-as-judge relevance checker. {context} and {query} are replaced.",
+        validation_alias="CHAT_RELEVANCE_JUDGE_USER_TEMPLATE",
+    )
     ood_method: Literal["llm_judge", "similarity_threshold", "nli_entailment"] = Field(
         default="llm_judge",
         description="IVM relevance/OOD backend (see app/thesis/ivm/checkers.py)",
@@ -93,14 +101,19 @@ class ChatConfig(BaseSettings):
             "Anda menghasilkan draf jawaban hipotetis untuk mendukung pencarian "
             "semantik pada basis pengetahuan dokumen resmi institusi berbahasa "
             "Indonesia (SOP, peraturan, kontrak, keputusan) yang terstruktur "
-            "dalam BAB, Pasal, dan Ayat. Tulis paragraf singkat yang meniru gaya "
-            "dan istilah dokumen resmi tersebut — walau pertanyaannya singkat, "
-            "tidak lazim, atau tampak di luar topik, anggaplah pertanyaan itu "
-            "mungkin merujuk pada pihak, entitas, atau ketentuan yang disebutkan "
-            "di salah satu dokumen. Jangan khawatir soal akurasi faktual; "
-            "tujuannya murni kecocokan semantik untuk pencarian."
+            "dalam BAB, Pasal, dan Ayat. Berikut daftar dokumen yang tersedia "
+            "dalam basis pengetahuan ini:\n{kb_context}\n\n"
+            "Tulis paragraf singkat yang meniru gaya dan istilah dokumen resmi "
+            "tersebut, dengan mengacu pada dokumen-dokumen di atas jika relevan "
+            "— walau pertanyaannya singkat atau tidak lazim, anggaplah "
+            "pertanyaan itu mungkin merujuk pada pihak, entitas, atau ketentuan "
+            "yang disebutkan di salah satu dokumen di atas. Namun, jika "
+            "pertanyaan jelas tidak berkaitan dengan topik dokumen manapun di "
+            "atas, balas HANYA dengan string kosong — jangan mengarang jawaban. "
+            "Jangan khawatir soal akurasi faktual untuk jawaban yang tetap "
+            "ditulis; tujuannya murni kecocokan semantik untuk pencarian."
         ),
-        description="System prompt for HyDE hypothetical document generation — sets the domain/register the model should imitate.",
+        description="System prompt for HyDE hypothetical document generation — sets the domain/register the model should imitate. May contain a {kb_context} placeholder, filled with the active KB document titles/descriptions.",
         validation_alias="CHAT_HYDE_SYSTEM_PROMPT",
     )
     hyde_prompt_template: str = Field(
@@ -111,6 +124,21 @@ class ChatConfig(BaseSettings):
         ),
         description="User-turn template for HyDE hypothetical document generation. {query} is replaced with the user query.",
         validation_alias="CHAT_HYDE_PROMPT_TEMPLATE",
+    )
+    hyde_context_enabled: bool = Field(
+        default=True,
+        description="Ground HyDE with the KB's actual active document titles/descriptions ({kb_context} in hyde_system_prompt), so short/OOD queries don't get a fabricated hypothetical document.",
+        validation_alias="CHAT_HYDE_CONTEXT_ENABLED",
+    )
+    hyde_context_max_docs: int = Field(
+        default=20,
+        description="Max number of active KB documents listed in the {kb_context} grounding block.",
+        validation_alias="CHAT_HYDE_CONTEXT_MAX_DOCS",
+    )
+    hyde_context_refresh_seconds: int = Field(
+        default=300,
+        description="TTL (seconds) for the cached {kb_context} grounding block before it's refetched from the KB.",
+        validation_alias="CHAT_HYDE_CONTEXT_REFRESH_SECONDS",
     )
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)

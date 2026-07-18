@@ -65,7 +65,8 @@ class ParentChunkData(BaseModel):
         id: Unique UUID for this chunk.
         doc_id: UUID of the source document.
         text: The full text content (may include HTML tables, VLM
-            descriptions, breadcrumb context header).
+            descriptions). Pure body text — no inline breadcrumb tag;
+            see ``breadcrumbs`` for the structured hierarchical path.
         chunk_index: Sequential index within the document.
         page: Page number of the first element in this chunk.
         breadcrumbs: Hierarchical section path (e.g. ["Chapter 1", "Section 1.1"]).
@@ -106,7 +107,9 @@ class ChildChunkData(BaseModel):
         id: Unique UUID for this chunk.
         parent_chunk_id: UUID of the parent chunk this child belongs to.
         doc_id: UUID of the source document.
-        text: The child text (may include breadcrumb context prefix).
+        text: The child text, prefixed with a breadcrumb tag (e.g.
+            "BAB II > Pasal 5\n\n") when the parent has breadcrumbs —
+            embedding-only, never displayed to the user or LLM.
         page: Page number inherited from the parent.
         breadcrumbs: Hierarchical section path inherited from the parent.
         content_type: The structural type inherited from the parent.
