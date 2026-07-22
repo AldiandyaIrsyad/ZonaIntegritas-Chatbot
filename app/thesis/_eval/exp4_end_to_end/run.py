@@ -1,0 +1,749 @@
+"""Experiment 4 — End-to-End RAG Pipeline Evaluation.
+
+Evaluates the full RAG pipeline (IVM → retrieval → generation → RAM) against
+Subset A (RAG QA triplets). Compares against a no-guardrail baseline
+(skip IVM + RAM, same retrieval + generation).
+
+Skripsi §3.3.5, Tabel 3.10.
+
+Metrics (§3.4):
+    - BERTScore F1 (§3.4.8) — answer quality vs ground truth
+    - Faithfulness (§3.4.9) — proportion of supported sentences
+    - Abstention Accuracy (§3.4.10) — correct refusal of out-of-domain queries
+
+Usage:
+    python -m app.thesis._eval.exp4_end_to_end.run \\
+        --dataset data/subset_a.csv \\
+        --api-url http://localhost:8000
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import re
+import sys
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+
+import httpx
+
+from app.thesis._eval._shared.clients import EvalNLIClient
+from app.thesis._eval._shared.csv_export import write_results_csv
+from app.thesis._eval._shared.dataset import load_subset_a, SubsetARow
+from app.thesis._eval._shared.metrics import (
+    CI,
+    abstention_accuracy,
+    bert_score_f1,
+    bootstrap_ci,
+    faithfulness,
+    wilson_interval,
+)
+from app.thesis.ram.text_utils import split_sentences
+
+DEFAULT_OUTPUT_CSV = "data/results/exp4_end_to_end.csv"
+
+
+# Citation format: *(STATUS: SCORE; SOURCE; Page N; DocID:ID; Evidence:"snippet")*
+# The DocID and Evidence segments are optional and must be accounted for
+# even when unused here, otherwise the pattern fails to reach the closing
+# ")" and silently matches nothing for any citation that includes them.
+CITATION_PATTERN = re.compile(
+    r"\*?\s*\("
+    r"(?P<status>Supported|Contradiction|Neutral)"
+    r":\s*(?P<score>[\d.]+)"
+    r";\s*(?P<source>[^;]+)"
+    r"(?:;\s*Page\s+(?P<page>\d+))?"
+    r"(?:;\s*DocID:(?P<doc_id>[\w-]+))?"
+    r'(?:;\s*Evidence:"(?P<evidence>[^"]*)")?'
+    r"\)\s*\*?"
+)
+
+# Detects an English chain-of-thought preamble at the start of a response
+# that should have been Indonesian-only per CHAT_SYSTEM_PROMPT — a known
+# symptom of LLMConnection.stream_chat's reasoning-delta fallback (see
+# chapter4.md §4.6.3's description of the same mechanism for the relevance
+# judge). Measured on data/results/exp4_end_to_end_qwen3-32b.csv: 48/98
+# full-pipeline and 67/98 baseline responses match this (writing/
+# weekend_fixes_plan.md M1). This is a DETECTOR, not a text-repair tool —
+# there is no structural signal in the NDJSON stream that separates
+# reasoning from real content (confirmed: both are emitted as the same
+# "chunk" event type), so guessing where the real answer starts risks
+# corrupting responses that don't match this pattern. Flagged rows are
+# reported, not silently stripped or dropped, unless --exclude-contaminated
+# is passed.
+REASONING_PREAMBLE_PATTERN = re.compile(
+    r"^\s*(okay|alright|let(?:'|’)s see|let me|the user is ask|i need to|"
+    r"looking at|i should|we need to|hmm)\b",
+    re.IGNORECASE,
+)
+
+
+def detect_reasoning_contamination(text: str) -> bool:
+    """Flag a response likely to open with an un-stripped English CoT preamble.
+
+    Args:
+        text: The response text.
+
+    Returns:
+        True if the response opens with a recognized reasoning-preamble
+        phrase (see REASONING_PREAMBLE_PATTERN).
+    """
+    return bool(text) and bool(REASONING_PREAMBLE_PATTERN.match(text.strip()))
+
+
+def strip_citation_markup(text: str) -> str:
+    """Remove RAM citation markers from a response before scoring it.
+
+    BERTScore should measure similarity of the substantive answer to the
+    reference, not of machine-generated markup — measured citation markup
+    is 49.8-53.0% of full-pipeline response characters (M2 in
+    writing/weekend_fixes_plan.md), while the baseline condition has 0%,
+    so leaving it in made the two conditions' BERTScore not comparable.
+
+    Args:
+        text: Response text, possibly containing citation markers.
+
+    Returns:
+        Text with citation markers removed, whitespace-collapsed.
+    """
+    cleaned = CITATION_PATTERN.sub(" ", text)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+@dataclass
+class PipelineResult:
+    """Result of running the full pipeline on a single query.
+
+    Attributes:
+        question: The input question.
+        response: Full system response text.
+        citations: List of parsed citation tuples (status, score, source, page).
+        abstained: Whether the system genuinely refused/warned (an IVM
+            block or explicit pipeline rejection — the "error" NDJSON
+            event). Distinct from ``errored`` (M4 in
+            writing/weekend_fixes_plan.md): a request timeout or non-200
+            response used to also set this to True, which credited
+            infrastructure failures as correct out-of-domain refusals.
+        errored: Whether the request itself failed (timeout, non-200) —
+            no verdict from the pipeline either way, so this should not be
+            counted as a correct (or incorrect) abstention.
+        reasoning_contaminated: Whether the response was flagged by
+            detect_reasoning_contamination (M1) — reported, not acted on
+            automatically; see --exclude-contaminated.
+        category: Question category.
+        ground_truth: Ground-truth answer.
+        retrieved_context: Context chunks the pipeline retrieved for this
+            query (from the stream's "context" event). Captured regardless
+            of whether guardrails ran, so faithfulness can be computed
+            post-hoc for pipeline runs where RAM didn't run live — see
+            compute_posthoc_faithfulness.
+    """
+
+    question: str
+    response: str
+    citations: List[Tuple[str, float, str, Optional[int]]] = field(default_factory=list)
+    abstained: bool = False
+    errored: bool = False
+    reasoning_contaminated: bool = False
+    category: str = ""
+    ground_truth: str = ""
+    retrieved_context: str = ""
+
+
+@dataclass
+class E2EMetrics:
+    """Aggregated end-to-end metrics.
+
+    Attributes:
+        bertscore_f1: BERTScore F1 (answer quality), computed on
+            citation-stripped candidates (M2).
+        bertscore_f1_ci: Bootstrap CI for BERTScore F1.
+        faithfulness_score: PRIMARY faithfulness metric — post-hoc NLI
+            check over every sentence, computed the same way for both
+            pipeline conditions (M3 in writing/weekend_fixes_plan.md; see
+            compute_posthoc_faithfulness). Populated by the caller
+            (async_main), not by compute_e2e_metrics itself, since it
+            requires an NLI client shared across both conditions.
+        faithfulness_ci: Bootstrap CI for faithfulness_score.
+        citation_faithfulness_score: SECONDARY/diagnostic faithfulness —
+            the original citation-marker-based measure. Only meaningful
+            for the full-pipeline condition (RAM only emits citations
+            there); always 0.0 for the no-guardrail baseline since it
+            never produces citations. Kept for comparison, not as the
+            headline number.
+        citation_faithfulness_ci: Bootstrap CI for citation_faithfulness_score.
+        abstention_acc: Abstention accuracy for out-of-domain queries —
+            counts only genuine refusals (PipelineResult.abstained), not
+            infra errors (M4).
+        abstention_ci: Bootstrap CI for abstention accuracy.
+        false_refusal_rate: Fraction of IN-DOMAIN queries the system
+            wrongly refused — the counterpart metric M4 adds so
+            "refuse everything" can't score a perfect Abstention Accuracy
+            without visibly costing something here.
+        false_refusal_ci: Wilson CI for false_refusal_rate.
+        error_rate: Fraction of ALL queries where the request itself
+            failed (timeout/non-200) rather than returning any verdict.
+        contamination_rate: Fraction of in-domain scored responses flagged
+            by detect_reasoning_contamination (M1) — reported for
+            transparency; see --exclude-contaminated.
+        total_queries: Total number of queries evaluated.
+        out_of_domain_count: Number of out-of-domain queries.
+    """
+
+    bertscore_f1: float = 0.0
+    bertscore_f1_ci: CI = field(default_factory=lambda: CI(0.0, 0.0, 0.0))
+    faithfulness_score: float = 0.0
+    faithfulness_ci: CI = field(default_factory=lambda: CI(0.0, 0.0, 0.0))
+    citation_faithfulness_score: float = 0.0
+    citation_faithfulness_ci: CI = field(default_factory=lambda: CI(0.0, 0.0, 0.0))
+    abstention_acc: float = 0.0
+    abstention_ci: CI = field(default_factory=lambda: CI(0.0, 0.0, 0.0))
+    false_refusal_rate: float = 0.0
+    false_refusal_ci: CI = field(default_factory=lambda: CI(0.0, 0.0, 0.0))
+    error_rate: float = 0.0
+    contamination_rate: float = 0.0
+    total_queries: int = 0
+    out_of_domain_count: int = 0
+
+
+def parse_citations(response: str) -> List[Tuple[str, float, str, Optional[int]]]:
+    """Parse citation markers from a system response.
+
+    Extracts all citations matching the format:
+        *(STATUS: SCORE; SOURCE; Page N)*
+
+    Args:
+        response: Full system response text.
+
+    Returns:
+        List of (status, score, source, page) tuples.
+    """
+    citations: List[Tuple[str, float, str, Optional[int]]] = []
+    for match in CITATION_PATTERN.finditer(response):
+        status = match.group("status")
+        try:
+            score = float(match.group("score"))
+        except ValueError:
+            score = 0.0
+        source = match.group("source").strip()
+        page_str = match.group("page")
+        page = int(page_str) if page_str else None
+        citations.append((status, score, source, page))
+    return citations
+
+
+def extract_sentence_labels(citations: List[Tuple[str, float, str, Optional[int]]]) -> List[str]:
+    """Map citation statuses to faithfulness labels.
+
+    Args:
+        citations: Parsed citation tuples.
+
+    Returns:
+        List of labels for faithfulness computation.
+    """
+    label_map = {
+        "Supported": "supported",
+        "Contradiction": "not_supported",
+        "Neutral": "partially_supported",
+    }
+    return [label_map.get(c[0], "partially_supported") for c in citations]
+
+
+async def run_pipeline(
+    api_url: str,
+    row: SubsetARow,
+    session_id: Optional[str] = None,
+    skip_guardrails: bool = False,
+) -> PipelineResult:
+    """Run the full RAG pipeline on a single query via the chat API.
+
+    Args:
+        api_url: Base URL of the running application.
+        row: Subset A row with question and ground truth.
+        session_id: Optional session ID for the chat.
+        skip_guardrails: If True, append ``?skip_guardrails=true`` to bypass
+            IVM + RAM (baseline mode for Experiment 4).
+
+    Returns:
+        PipelineResult with response and parsed citations.
+    """
+    async with httpx.AsyncClient(base_url=api_url, timeout=120.0) as client:
+        # Create a session
+        if session_id is None:
+            try:
+                resp = await client.post("/api/chat/sessions")
+                if resp.status_code == 200:
+                    session_id = resp.json().get("id")
+            except Exception:
+                session_id = None
+
+        # Send the message to the streaming endpoint
+        stream_url = f"/api/chat/sessions/{session_id}/stream"
+        if skip_guardrails:
+            stream_url += "?skip_guardrails=true"
+        try:
+            resp = await client.post(
+                stream_url,
+                json={"message": row.question},
+                timeout=120.0,
+            )
+            if resp.status_code != 200:
+                # Infra/HTTP failure, not a pipeline verdict — errored, not
+                # abstained (M4 in writing/weekend_fixes_plan.md: crediting
+                # this as a correct out-of-domain refusal was inflating
+                # Abstention Accuracy on infrastructure noise).
+                return PipelineResult(
+                    question=row.question,
+                    response="",
+                    errored=True,
+                    category=row.category,
+                    ground_truth=row.ground_truth_answer,
+                )
+
+            # The response is an NDJSON stream
+            response_text = ""
+            retrieved_context = ""
+            content_type = resp.headers.get("content-type", "")
+            if "application/x-ndjson" in content_type or "text/plain" in content_type:
+                for line in resp.text.strip().split("\n"):
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                        chunk_type = chunk.get("type")
+                        if chunk_type == "chunk":
+                            response_text += chunk.get("content", "")
+                        elif chunk_type == "context":
+                            retrieved_context = chunk.get("content", "")
+                        elif chunk_type == "error":
+                            # Genuine pipeline verdict (IVM block or
+                            # rejection) → a real abstention, unlike the
+                            # infra-failure cases above/below.
+                            return PipelineResult(
+                                question=row.question,
+                                response=chunk.get("content", ""),
+                                abstained=True,
+                                category=row.category,
+                                ground_truth=row.ground_truth_answer,
+                            )
+                        elif chunk_type == "done":
+                            break
+                    except json.JSONDecodeError:
+                        response_text += line
+            else:
+                data = resp.json()
+                response_text = data.get("content", data.get("response", ""))
+        except httpx.TimeoutException:
+            # Infra failure, not a pipeline verdict — see the non-200 case
+            # above (M4).
+            return PipelineResult(
+                question=row.question,
+                response="",
+                errored=True,
+                category=row.category,
+                ground_truth=row.ground_truth_answer,
+            )
+
+    citations = parse_citations(response_text)
+    return PipelineResult(
+        question=row.question,
+        response=response_text,
+        citations=citations,
+        abstained=False,
+        reasoning_contaminated=detect_reasoning_contamination(response_text),
+        category=row.category,
+        ground_truth=row.ground_truth_answer,
+        retrieved_context=retrieved_context,
+    )
+
+
+async def run_no_guardrail_pipeline(
+    api_url: str,
+    row: SubsetARow,
+    session_id: Optional[str] = None,
+) -> PipelineResult:
+    """Run the pipeline without guardrails (baseline).
+
+    Calls the chat endpoint with ``?skip_guardrails=true`` to bypass IVM
+    (safety + relevance) and RAM (per-sentence assessment). Retrieval still
+    runs so the LLM has context.
+
+    Args:
+        api_url: Base URL of the running application.
+        row: Subset A row.
+        session_id: Optional session ID.
+
+    Returns:
+        PipelineResult.
+    """
+    return await run_pipeline(api_url, row, session_id, skip_guardrails=True)
+
+
+def compute_e2e_metrics(
+    results: List[PipelineResult],
+    exclude_contaminated: bool = False,
+) -> Tuple[E2EMetrics, Dict[str, Dict[str, Any]]]:
+    """Compute end-to-end metrics from pipeline results.
+
+    NOTE: this does NOT set the primary faithfulness_score/faithfulness_ci
+    — those come from compute_posthoc_faithfulness, run uniformly over
+    both pipeline conditions by the caller (M3 in
+    writing/weekend_fixes_plan.md). This function only populates the
+    citation-based citation_faithfulness_score as a secondary/diagnostic
+    number.
+
+    Args:
+        results: List of pipeline results.
+        exclude_contaminated: If True, drop rows flagged by
+            detect_reasoning_contamination (M1) from the BERTScore
+            candidate/reference set. contamination_rate is always computed
+            regardless, so the scope of contamination is visible either way.
+
+    Returns:
+        Tuple of (E2EMetrics, per_row_data) — per_row_data maps question ->
+        {"bertscore_f1": float | None, "citation_faithfulness_score":
+        float | None} for CSV export; a row's value is None where it
+        wasn't computed (e.g. empty response for BERTScore, out-of-domain
+        for both).
+    """
+    metrics = E2EMetrics(total_queries=len(results))
+    per_row: Dict[str, Dict[str, Any]] = {
+        r.question: {"bertscore_f1": None, "citation_faithfulness_score": None} for r in results
+    }
+
+    # Separate in-domain and out-of-domain
+    in_domain: List[PipelineResult] = []
+    out_of_domain: List[PipelineResult] = []
+    for r in results:
+        if r.category == "out-of-domain" or r.category == "out_of_domain":
+            out_of_domain.append(r)
+        else:
+            in_domain.append(r)
+    metrics.out_of_domain_count = len(out_of_domain)
+
+    # --- Error rate (all rows) ---
+    if results:
+        metrics.error_rate = sum(1 for r in results if r.errored) / len(results)
+
+    # --- BERTScore F1 (in-domain only, citation markup stripped — M2) ---
+    if in_domain:
+        in_domain_with_response = [r for r in in_domain if r.response]
+        metrics.contamination_rate = (
+            sum(1 for r in in_domain_with_response if r.reasoning_contaminated) / len(in_domain_with_response)
+            if in_domain_with_response
+            else 0.0
+        )
+        scoring_rows = (
+            [r for r in in_domain_with_response if not r.reasoning_contaminated]
+            if exclude_contaminated
+            else in_domain_with_response
+        )
+        candidates = [strip_citation_markup(r.response) for r in scoring_rows]
+        references = [r.ground_truth for r in scoring_rows]
+        if candidates and references:
+            # bert_score_f1 already returns per-example scores (f1_per_example)
+            # alongside the corpus mean — bootstrap-resample that array
+            # directly instead of re-invoking the model per resample (the
+            # previous version called bert_score_f1 1000 times here, each
+            # call reloading IndoBERT and rerunning inference over the
+            # resampled batch; this is the same near-instant pattern
+            # Faithfulness and exp3's Cohen's Kappa already use).
+            _, _, f1, f1_per_example = bert_score_f1(candidates, references)
+            metrics.bertscore_f1 = f1
+            metrics.bertscore_f1_ci = bootstrap_ci(f1_per_example, statistic="mean")
+            for r, score in zip(scoring_rows, f1_per_example):
+                per_row[r.question]["bertscore_f1"] = score
+
+    # --- Citation-based Faithfulness (in-domain only) — SECONDARY/diagnostic,
+    # only meaningful for the full-pipeline condition (RAM emits citations
+    # there); see the primary post-hoc measure the caller computes instead. ---
+    if in_domain:
+        faithfulness_scores: List[float] = []
+        for r in in_domain:
+            if not r.citations:
+                # No citations → assume all sentences are "no_source_needed"
+                sentences = split_sentences(r.response)
+                labels = ["no_source_needed"] * len(sentences)
+            else:
+                labels = extract_sentence_labels(r.citations)
+            score = faithfulness(labels)
+            faithfulness_scores.append(score)
+            per_row[r.question]["citation_faithfulness_score"] = score
+        if faithfulness_scores:
+            metrics.citation_faithfulness_score = sum(faithfulness_scores) / len(faithfulness_scores)
+            metrics.citation_faithfulness_ci = bootstrap_ci(faithfulness_scores, statistic="mean")
+
+    # --- Abstention Accuracy (out-of-domain only; errored rows are neither
+    # a correct nor incorrect abstention — see PipelineResult.errored, M4) ---
+    if out_of_domain:
+        abstained_flags = [r.abstained for r in out_of_domain]
+        metrics.abstention_acc = abstention_accuracy(abstained_flags, len(out_of_domain))
+        successes = sum(1 for a in abstained_flags if a)
+        metrics.abstention_ci = wilson_interval(successes, len(out_of_domain))
+
+    # --- False Refusal Rate (in-domain only) — counterpart to Abstention
+    # Accuracy: a system that refuses everything scores perfectly on
+    # out-of-domain abstention without this metric also visibly costing it
+    # (M4). ---
+    if in_domain:
+        false_refusals = sum(1 for r in in_domain if r.abstained)
+        metrics.false_refusal_rate = false_refusals / len(in_domain)
+        metrics.false_refusal_ci = wilson_interval(false_refusals, len(in_domain))
+
+    return metrics, per_row
+
+
+async def compute_posthoc_faithfulness(
+    results: List[PipelineResult],
+    nli_client: EvalNLIClient,
+) -> Tuple[float, CI, Dict[str, float]]:
+    """Compute the PRIMARY Faithfulness metric via post-hoc NLI checking.
+
+    Originally written only for the no-guardrail baseline (which skips RAM
+    entirely, so citation-based faithfulness is always 0.0/undefined for
+    it — see compute_e2e_metrics's citation_faithfulness_score). Since M3
+    in writing/weekend_fixes_plan.md, this is now called for BOTH pipeline
+    conditions and used as the headline faithfulness_score: the
+    citation-based measure only scores the ~17% of full-pipeline sentences
+    that happened to carry a citation marker (measured on
+    data/results/exp4_end_to_end_qwen3-32b.csv: 4.1 citations / 17.9
+    sentences per response, 31/98 responses with zero citations), while
+    this checks every sentence against the retrieved context directly —
+    the same method for both conditions, over the same denominator, which
+    is what makes the two faithfulness numbers an actual controlled
+    comparison instead of two different measurement tools. Also benefits
+    from the fixed premise-selection in EvalNLIClient (see
+    _shared/clients.py's _select_relevant_chunk — no longer blindly
+    truncating to the first ~10% of a long context).
+
+    No new chat/LLM generation calls — just local Infinity NLI
+    classification against each result's already-captured (response,
+    retrieved_context) pair.
+
+    Args:
+        results: PipelineResults to score (caller filters to in-domain).
+        nli_client: NLI classifier client.
+
+    Returns:
+        Tuple of (mean faithfulness score, bootstrap CI, per-question score
+        map — for CSV export).
+    """
+    faithfulness_scores: List[float] = []
+    per_question: Dict[str, float] = {}
+    for r in results:
+        if not r.response or not r.retrieved_context:
+            continue
+        sentences = split_sentences(r.response)
+        if not sentences:
+            continue
+        labels = []
+        for sentence in sentences:
+            nli_result = await nli_client.check(premise=r.retrieved_context, hypothesis=sentence)
+            labels.append(nli_result.label)
+        score = faithfulness(labels)
+        faithfulness_scores.append(score)
+        per_question[r.question] = score
+
+    if not faithfulness_scores:
+        return 0.0, CI(point=0.0, lower=0.0, upper=0.0), per_question
+
+    mean_score = sum(faithfulness_scores) / len(faithfulness_scores)
+    ci = bootstrap_ci(faithfulness_scores, statistic="mean")
+    return mean_score, ci, per_question
+
+
+def print_report(
+    system_name: str,
+    metrics: E2EMetrics,
+) -> None:
+    """Print a formatted end-to-end evaluation report.
+
+    Args:
+        system_name: Name of the system being evaluated.
+        metrics: Computed end-to-end metrics.
+    """
+    print(f"\n{'=' * 70}")
+    print(f"  {system_name}")
+    print(f"{'=' * 70}")
+    print(f"  Total Queries:      {metrics.total_queries}")
+    print(f"  In-Domain:          {metrics.total_queries - metrics.out_of_domain_count}")
+    print(f"  Out-of-Domain:      {metrics.out_of_domain_count}")
+    print()
+    print(f"  {'Metric':<25} {'Value':>10} {'95% CI':>25}")
+    print(f"  {'-' * 62}")
+    print(f"  {'BERTScore F1':<25} {metrics.bertscore_f1:>10.4f} "
+          f"[{metrics.bertscore_f1_ci.lower:.4f}, {metrics.bertscore_f1_ci.upper:.4f}]")
+    print(f"  {'Faithfulness':<25} {metrics.faithfulness_score:>10.4f} "
+          f"[{metrics.faithfulness_ci.lower:.4f}, {metrics.faithfulness_ci.upper:.4f}]"
+          f"  (primary, post-hoc NLI)")
+    print(f"  {'  Faithfulness (cit.)':<25} {metrics.citation_faithfulness_score:>10.4f} "
+          f"[{metrics.citation_faithfulness_ci.lower:.4f}, {metrics.citation_faithfulness_ci.upper:.4f}]"
+          f"  (secondary, citation markers only)")
+    print(f"  {'Abstention Accuracy':<25} {metrics.abstention_acc:>10.4f} "
+          f"[{metrics.abstention_ci.lower:.4f}, {metrics.abstention_ci.upper:.4f}]")
+    print(f"  {'False Refusal Rate':<25} {metrics.false_refusal_rate:>10.4f} "
+          f"[{metrics.false_refusal_ci.lower:.4f}, {metrics.false_refusal_ci.upper:.4f}]"
+          f"  (in-domain, wrongly refused)")
+    print()
+    print(f"  Error Rate:          {metrics.error_rate:.4f}  (request failed — timeout/non-200, no verdict)")
+    print(f"  Contamination Rate:  {metrics.contamination_rate:.4f}  (responses flagged by "
+          f"detect_reasoning_contamination — see --exclude-contaminated)")
+    print()
+
+
+async def async_main(args: argparse.Namespace) -> None:
+    """Async entry point for Experiment 4.
+
+    Args:
+        args: Parsed command-line arguments.
+    """
+    try:
+        dataset = load_subset_a(args.dataset)
+    except FileNotFoundError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Loaded {len(dataset)} samples from Subset A")
+
+    csv_rows: List[Dict[str, Any]] = []
+
+    def add_csv_rows(results: List[PipelineResult], condition: str, per_row: Dict[str, Dict[str, Any]]) -> None:
+        for r in results:
+            row_data = per_row.get(r.question, {})
+            csv_rows.append({
+                "question": r.question,
+                "category": r.category,
+                "condition": condition,
+                "response": r.response,
+                "abstained": r.abstained,
+                "errored": r.errored,
+                "reasoning_contaminated": r.reasoning_contaminated,
+                "faithfulness_score": row_data.get("faithfulness_score"),
+                "citation_faithfulness_score": row_data.get("citation_faithfulness_score"),
+                "bertscore_f1_contribution": row_data.get("bertscore_f1"),
+            })
+
+    async def add_posthoc_faithfulness(
+        results: List[PipelineResult],
+        metrics: E2EMetrics,
+        per_row: Dict[str, Dict[str, Any]],
+        nli_client: EvalNLIClient,
+    ) -> None:
+        """Compute the PRIMARY faithfulness metric for one condition (M3).
+
+        Run uniformly for both conditions (not baseline-only, as before) —
+        the full-pipeline's own citation-based faithfulness only covers
+        the ~17% of sentences that happened to carry a citation marker, so
+        it isn't a fair like-for-like comparison against the baseline's
+        faithfulness on its own (see compute_posthoc_faithfulness).
+        """
+        in_domain = [r for r in results if r.category not in ("out-of-domain", "out_of_domain")]
+        rows_to_score = (
+            [r for r in in_domain if not r.reasoning_contaminated] if args.exclude_contaminated else in_domain
+        )
+        score, ci, per_question = await compute_posthoc_faithfulness(rows_to_score, nli_client)
+        metrics.faithfulness_score = score
+        metrics.faithfulness_ci = ci
+        for question, s in per_question.items():
+            per_row.setdefault(question, {})["faithfulness_score"] = s
+
+    nli_client = EvalNLIClient(args.infinity_url, args.nli_model)
+    try:
+        if not args.baseline_only:
+            # --- Full pipeline (with guardrails) ---
+            print("\nRunning full RAG pipeline (IVM → retrieval → generation → RAM)...")
+            full_results: List[PipelineResult] = []
+            for i, row in enumerate(dataset, 1):
+                result = await run_pipeline(args.api_url, row)
+                full_results.append(result)
+                if i % 10 == 0:
+                    print(f"  Processed {i}/{len(dataset)} queries...")
+
+            full_metrics, full_per_row = compute_e2e_metrics(full_results, exclude_contaminated=args.exclude_contaminated)
+            print("Computing full-pipeline Faithfulness post-hoc (primary metric, M3)...")
+            await add_posthoc_faithfulness(full_results, full_metrics, full_per_row, nli_client)
+            print_report("Full Pipeline (with IVM + RAM guardrails)", full_metrics)
+            add_csv_rows(full_results, "full", full_per_row)
+
+            if args.no_baseline:
+                write_results_csv(args.output_csv, csv_rows)
+                return
+
+        # --- No-guardrail baseline ---
+        print("\nRunning no-guardrail baseline pipeline...")
+        baseline_results: List[PipelineResult] = []
+        for i, row in enumerate(dataset, 1):
+            result = await run_no_guardrail_pipeline(args.api_url, row)
+            baseline_results.append(result)
+            if i % 10 == 0:
+                print(f"  Processed {i}/{len(dataset)} queries...")
+
+        baseline_metrics, baseline_per_row = compute_e2e_metrics(
+            baseline_results, exclude_contaminated=args.exclude_contaminated
+        )
+        print("Computing baseline Faithfulness post-hoc (primary metric)...")
+        await add_posthoc_faithfulness(baseline_results, baseline_metrics, baseline_per_row, nli_client)
+    finally:
+        await nli_client.aclose()
+
+    print_report("Baseline (no guardrails)", baseline_metrics)
+    add_csv_rows(baseline_results, "baseline", baseline_per_row)
+
+    write_results_csv(args.output_csv, csv_rows)
+
+
+def main() -> None:
+    """Entry point for Experiment 4."""
+    parser = argparse.ArgumentParser(
+        description="Experiment 4: End-to-End RAG Pipeline Evaluation (with guardrails vs no-guardrail baseline)."
+    )
+    parser.add_argument("--dataset", required=True, help="Path to Subset A CSV")
+    parser.add_argument(
+        "--api-url",
+        default="http://localhost:8000",
+        help="Base URL of the running application",
+    )
+    parser.add_argument(
+        "--infinity-url",
+        default="http://localhost:7997",
+        help="Infinity server base URL (for the post-hoc Faithfulness NLI check, both conditions)",
+    )
+    parser.add_argument(
+        "--nli-model",
+        default="StevenLimcorn/indo-roberta-indonli",
+        help="NLI model identifier (must match a model loaded on the Infinity server)",
+    )
+    parser.add_argument(
+        "--exclude-contaminated",
+        action="store_true",
+        help="Exclude responses flagged by detect_reasoning_contamination (M1 in "
+        "writing/weekend_fixes_plan.md — an English chain-of-thought preamble that "
+        "should have been Indonesian) from BERTScore and Faithfulness aggregates. "
+        "Off by default so the default run doesn't silently change which rows are "
+        "scored; contamination_rate is always reported regardless of this flag.",
+    )
+    parser.add_argument(
+        "--no-baseline",
+        action="store_true",
+        help="Skip the no-guardrail baseline",
+    )
+    parser.add_argument(
+        "--baseline-only",
+        action="store_true",
+        help="Skip the full (with-guardrails) pipeline and only run the no-guardrail baseline — "
+        "for re-running just the baseline after a fix that only affects its measurement "
+        "(e.g. Faithfulness), without re-paying for the already-valid guardrail pipeline's LLM calls.",
+    )
+    parser.add_argument(
+        "--output-csv",
+        default=DEFAULT_OUTPUT_CSV,
+        help="Path to write raw per-row results CSV",
+    )
+    args = parser.parse_args()
+    asyncio.run(async_main(args))
+
+
+if __name__ == "__main__":
+    main()
