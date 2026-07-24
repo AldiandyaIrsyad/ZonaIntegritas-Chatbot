@@ -19,6 +19,7 @@ class NaiveSearchResultItem(BaseModel):
 router = APIRouter()
 
 class PDFUpdateRequest(BaseModel):
+    """Request body for toggling a document's active (retrievable) status."""
     active: bool
 
 class SearchResultItem(BaseModel):
@@ -178,15 +179,20 @@ async def search_knowledge_base(
     top_k: int = Query(default=15, ge=1, le=100, description="Number of results to return"),
     session_id: Optional[str] = Query(default=None, description="Optional session scope"),
     mode: str = Query(default="hybrid", description="Retrieval mode: hybrid, dense, or sparse"),
+    rerank: bool = Query(default=True, description="Apply the cross-encoder reranker (set false for ablations)"),
     search_service: SearchService = Depends(get_search_service),
 ) -> List[SearchResultItem]:
     """Search the knowledge base for contexts relevant to a query.
 
     Returns hybrid (dense + sparse with RRF fusion) search results by default.
-    Set ``mode`` to ``dense`` or ``sparse`` for ablation experiments.
+    Set ``mode`` to ``dense`` or ``sparse`` for ablation experiments, and
+    ``rerank=false`` to compare the fusion strategies themselves rather than
+    three reranked variants of them (Experiment 2, M10).
     Used by the chat pipeline and the retrieval evaluation script (Experiment 2).
     """
-    contexts = await search_service.search(query=q, top_k=top_k, session_id=session_id, mode=mode)
+    contexts = await search_service.search(
+        query=q, top_k=top_k, session_id=session_id, mode=mode, rerank=rerank
+    )
     return [
         SearchResultItem(
             chunk_id=c.chunk_id,

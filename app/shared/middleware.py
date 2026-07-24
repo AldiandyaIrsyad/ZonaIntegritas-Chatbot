@@ -1,33 +1,51 @@
+"""HTTP middleware shared across all bounded contexts.
+
+Currently provides :class:`CorrelationIdMiddleware`, which stamps every
+request with a correlation ID so that all log lines emitted during that
+request (via ``structlog``) can be traced end-to-end in Loki/Grafana.
+"""
+
 import uuid
-from typing import Callable
+from typing import Callable, Awaitable
+
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 import structlog
 
 
-from typing import Callable, Awaitable
-
 class CorrelationIdMiddleware(BaseHTTPMiddleware):
-    """
-    Middleware that assigns a unique request ID to each incoming HTTP request 
-    and binds it to the structlog context variables for comprehensive logging.
+    """Assigns a unique request ID to each incoming HTTP request.
+
+    The ID is taken from the ``X-Request-ID`` request header if present
+    (allowing upstream proxies/gateways to propagate their own trace ID),
+    otherwise a fresh UUID4 is generated.
+
+    The ID is then:
+        1. Bound to ``structlog.contextvars`` — the ``merge_contextvars``
+           processor in ``app/shared/logging.py`` injects it into every
+           log line produced during this request.
+        2. Stored on ``request.state.request_id`` for ad-hoc access.
+        3. Echoed back in the ``X-Request-ID`` response header so clients
+           can correlate a response with their logs.
     """
 
-    async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
-        # Generate a unique request ID
+    async def dispatch(
+        self,
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        # Reuse an upstream-provided ID if present, else mint a new one.
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
-        
-        # Bind the request ID to structlog's contextvars
-        # This will automatically be included in all logs within this request's lifecycle
+
+        # Reset per-request context so IDs from a previous request on a
+        # reused worker don't leak in.
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(request_id=request_id)
-        
-        # Add to request state so other parts of the app can access it if needed
+
         request.state.request_id = request_id
 
-        # Proceed with the request
         response = await call_next(request)
-        
-        # Return the request ID in the headers
+
+        # Echo the ID back so clients can correlate response ↔ logs.
         response.headers["X-Request-ID"] = request_id
         return response

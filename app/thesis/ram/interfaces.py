@@ -1,3 +1,20 @@
+"""Ports (Protocol interfaces) for the Response Assessment Module (RAM).
+
+The RAM validates generated LLM sentences against retrieved KB context
+using Natural Language Inference (NLI) to detect hallucinations per
+sentence. It is part of the pure ``thesis`` research core and defines its
+own ports so it never imports chat/kb infra directly (Dependency Inversion).
+
+Ports → adapters map:
+    - :class:`INLIModel`       → ``app/chat/infra/nli_client.py::NLIClient``
+                                (Infinity-hosted NLI model; wired in
+                                ``app/chat/dependency.py::get_nli_client``)
+    - :class:`IRerankerModel`  → ``app/kb/infra/infinity_reranker.py::InfinityReranker``
+                                (the same adapter fulfills the KB
+                                ``IReranker`` port; this is a narrower view
+                                for the RAM's reverse-mapping step)
+"""
+
 from dataclasses import dataclass
 from typing import List, Optional, Protocol
 
@@ -55,7 +72,12 @@ class RetrievedContext:
 
 
 class INLIModel(Protocol):
-    """Structural contract for Natural Language Inference adapters in the research core."""
+    """Port for Natural Language Inference adapters in the research core.
+
+    Implemented by: ``app/chat/infra/nli_client.py::NLIClient``
+    (an Infinity-hosted NLI model; wired in
+    ``app/chat/dependency.py::get_nli_client``).
+    """
 
     async def check(self, premise: str, hypothesis: str) -> NLIResult:
         """Compare a hypothesis against a reference premise using NLI.
@@ -72,13 +94,24 @@ class INLIModel(Protocol):
 
 @dataclass(frozen=True)
 class RerankResult:
-    """Result of a reranking operation."""
+    """Result of a reranking operation.
+
+    Attributes:
+        index: Original position of the document in the input list.
+        score: Relevance score assigned by the reranker (higher = more relevant).
+    """
+
     index: int
     score: float
 
 
 class IRerankerModel(Protocol):
-    """Structural contract for reranker adapters in the research core."""
+    """Port for reranker adapters in the research core.
+
+    Implemented by: ``app/kb/infra/infinity_reranker.py::InfinityReranker``
+    (the same adapter fulfills the KB ``IReranker`` port; wired in
+    ``app/kb/dependency.py::get_reranker``).
+    """
 
     async def rerank(
         self,

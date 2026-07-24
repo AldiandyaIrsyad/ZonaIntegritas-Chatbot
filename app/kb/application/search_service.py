@@ -35,6 +35,12 @@ class SearchService:
         reranker: Optional[IReranker] = None,
         query_expander: Optional[IQueryExpander] = None,
     ):
+        """Wire the collaborators used by the 6-step pipeline (see module
+        docstring): ``text_embedder`` (step 2), ``vector_store`` (step 3),
+        ``kb_repo`` (steps 4, 6), ``reranker`` (step 5, optional — skipped
+        if None), and ``query_expander`` (step 1 HyDE, optional — injected
+        across the chat→kb boundary when enabled, see
+        ``app/kb/domain/interfaces.py::IQueryExpander``)."""
         self.text_embedder = text_embedder
         self.vector_store = vector_store
         self.kb_repo = kb_repo
@@ -47,6 +53,7 @@ class SearchService:
         top_k: int = 15,
         session_id: Optional[str] = None,
         mode: str = "hybrid",
+        rerank: bool = True,
     ) -> List[RetrievedContext]:
         """Search the Knowledge Base using the 6-step retrieval pipeline.
 
@@ -62,6 +69,12 @@ class SearchService:
             top_k: Maximum number of final results to return.
             session_id: Optional session scope filter.
             mode: Retrieval mode — "hybrid" (default), "dense", or "sparse".
+            rerank: When False, skip the cross-encoder rerank step and keep
+                the fusion ranking. For retrieval ablations: with the reranker
+                on, all three modes are really "mode → rerank", so the table
+                compares reranked variants rather than the fusion strategies
+                themselves (M10 in writing/overhaul.md). Production
+                callers leave this True.
 
         Returns:
             List of RetrievedContext ordered by relevance.
@@ -128,7 +141,7 @@ class SearchService:
             )
 
         # --- Step 5: Cross-encoder rerank chunks → top-8 ---
-        if self.reranker is not None and candidates:
+        if rerank and self.reranker is not None and candidates:
             try:
                 child_texts = [c.text for _, c in candidates]
                 rerank_results = await self.reranker.rerank(

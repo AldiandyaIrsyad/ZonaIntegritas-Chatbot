@@ -8,7 +8,7 @@ the earlier 2-way (baseline vs LLM-judge) table.
 Skripsi §3.3.2, Tabel 3.10.
 
 Backends under test (all reused directly from production, not
-reimplemented — see writing/weekend_fixes_plan.md M13):
+reimplemented — see writing/overhaul.md M13):
     1. ``llm_judge``: LLMJudgeRelevanceChecker wrapping the production
        LLMJudge (app/thesis/ivm/judge.py) — same prompt, same
        max_tokens=400, same last-word parse the production system uses.
@@ -42,10 +42,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
+import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import httpx
 
@@ -58,6 +60,17 @@ from app.thesis._eval._shared.metrics import (
     bootstrap_binary_ci,
     compute_binary_metrics,
 )
+from app.thesis._eval._shared.repeats import repeat_passes, self_agreement
+
+# Outcomes a judgement can have. `errored` is kept distinct from a real
+# `out_of_domain` verdict: the LLM-judge is a hosted model that fails closed
+# (an exception is treated as irrelevant), which is right in production but
+# would let an API outage masquerade as an out-of-domain prediction and inflate
+# FPR here — the same defect corrected for Exp1a's baseline. The deterministic
+# checkers cannot error this way and do not use this.
+IN_DOMAIN = "in_domain"
+OUT_OF_DOMAIN = "out_of_domain"
+ERRORED = "errored"
 from app.thesis.ivm.checkers import (
     LLMJudgeRelevanceChecker,
     NliEntailmentRelevanceChecker,
@@ -68,18 +81,105 @@ from app.thesis.ivm.judge import LLMJudge
 DEFAULT_OUTPUT_CSV = "data/results/exp1b_relevance.csv"
 
 
-# JDIH lexicon — keywords that indicate in-domain queries about UPI's internal
-# legal/regulatory documents. In production, this would be built from KB
-# document titles and known terms.
-JDIH_LEXICON: Set[str] = {
-    "upi", "universitas pendidikan indonesia", "jdih", "statuta",
-    "peraturan rektor", "sk rektor", "keputusan rektor", "rektor",
-    "senat akademik", "majelis wali amanat", "mwa", "dewan pertimbangan",
-    "peraturan mwa", "peraturan senat", "pedoman", "peraturan akademik",
-    "ukt", "uang kuliah tunggal", "cuti akademik", "wisuda", "yudisium",
-    "fakultas", "dekan", "dosen", "kepegawaian", "statuta upi",
-    "organisasi dan tata kerja", "ortaker", "renstra", "peraturan universitas",
+# Institutional anchors — the corpus's own identity, in-domain by definition and
+# not tuned to Subset C. Everything else in the keyword baseline's lexicon is
+# DERIVED from the live KB (see ``derive_jdih_lexicon``), so the baseline is
+# reproducible and provably not hand-tuned against the evaluation set.
+JDIH_ANCHORS: Set[str] = {"upi", "universitas pendidikan indonesia", "jdih"}
+
+# Structural/boilerplate title words stripped before deriving domain terms, plus
+# the institution name whose individual words would otherwise dominate. Kept small
+# and generic on purpose — this is not a hand-tuned domain list.
+_TITLE_STOPWORDS: Set[str] = {
+    "yang", "dan", "di", "ke", "dari", "untuk", "atas", "tentang", "nomor",
+    "tahun", "pada", "dalam", "serta", "atau", "perubahan", "kedua", "ketiga",
+    "keempat", "kesatu", "pertama", "melalui", "dengan", "bagi", "para", "oleh",
+    "sebagai", "the", "of", "and", "for", "lingkungan", "universitas",
+    "pendidikan", "indonesia", "per", "lain", "baru",
 }
+# Leading document code (e.g. "2503-UN40-PT.03.03-2025") and "<n> Tahun <yyyy>".
+_DOC_CODE_RE = re.compile(r"^\s*[\dA-Z]+[-/][\w.\-/]+")
+_DOC_YEAR_RE = re.compile(r"^\s*\d+\s+tahun\s+\d+", re.IGNORECASE)
+
+# Default document-frequency floor for a derived term. Bigram-only at df>=5 was
+# the operating point that maximised Subset C separation without hand curation;
+# unigrams collapse to generic legal/administrative vocabulary shared with the
+# out-of-domain near-miss queries (measured FPR ~0.98), so they are excluded.
+DEFAULT_LEXICON_MIN_DOC_FREQ = 5
+
+
+def _title_tokens(title: str) -> List[str]:
+    """Tokenise a KB document title into content unigrams.
+
+    Strips the leading document code / "N Tahun YYYY" prefix and the
+    " - "-separated code segment, lowercases, and drops stopwords and short
+    tokens.
+
+    Args:
+        title: Raw document title.
+
+    Returns:
+        Content tokens (lowercase, >2 chars, non-stopword).
+    """
+    cleaned = _DOC_CODE_RE.sub("", title)
+    cleaned = _DOC_YEAR_RE.sub("", cleaned)
+    if " - " in cleaned:
+        cleaned = cleaned.split(" - ", 1)[-1]
+    return [
+        w for w in re.findall(r"[a-z]+", cleaned.lower())
+        if len(w) > 2 and w not in _TITLE_STOPWORDS
+    ]
+
+
+def derive_jdih_lexicon(
+    titles: Sequence[str],
+    min_doc_freq: int = DEFAULT_LEXICON_MIN_DOC_FREQ,
+) -> Set[str]:
+    """Derive the keyword-baseline lexicon from KB document titles.
+
+    Deterministic and reproducible from the corpus: collects **bigrams** (adjacent
+    content-word pairs) that appear in at least ``min_doc_freq`` distinct titles,
+    plus the institutional anchors. Bigrams (e.g. "peraturan rektor", "majelis
+    wali amanat", "uang kuliah tunggal") are UPI/JDIH-specific; unigrams are
+    deliberately excluded because they reduce to generic legal/administrative
+    vocabulary that the out-of-domain near-miss queries also use.
+
+    Args:
+        titles: KB document titles.
+        min_doc_freq: Minimum number of distinct titles a bigram must appear in.
+
+    Returns:
+        The lexicon (anchors + qualifying bigrams).
+    """
+    bigram_df: Counter = Counter()
+    for title in titles:
+        tokens = _title_tokens(title)
+        pairs = {f"{a} {b}" for a, b in zip(tokens, tokens[1:])}
+        bigram_df.update(pairs)
+    lexicon = set(JDIH_ANCHORS)
+    lexicon.update(term for term, df in bigram_df.items() if df >= min_doc_freq)
+    return lexicon
+
+
+async def fetch_kb_titles(api_url: str) -> List[str]:
+    """Fetch all KB document titles from the admin listing.
+
+    Args:
+        api_url: Base URL of the running application.
+
+    Returns:
+        List of document titles (empty on error — the caller falls back to anchors).
+    """
+    try:
+        async with httpx.AsyncClient(base_url=api_url, timeout=30.0) as client:
+            response = await client.get("/api/admin/pdfs")
+            if response.status_code != 200:
+                return []
+            docs = response.json()
+        return [str(d.get("title", "")) for d in docs if isinstance(d, dict)]
+    except Exception as exc:
+        logger_warn(f"could not fetch KB titles for lexicon derivation: {exc}")
+        return []
 
 @dataclass
 class SubtypeResult:
@@ -100,6 +200,7 @@ async def retrieve_contexts_detailed(
     api_url: str,
     query: str,
     top_k: int = 8,
+    hyde: bool = False,
 ) -> Tuple[List[str], List[float]]:
     """Retrieve top-k contexts and their retrieval scores from the KB.
 
@@ -107,32 +208,50 @@ async def retrieve_contexts_detailed(
     three IRelevanceChecker backends can be driven identically to
     production's ``RelevanceService`` — SimilarityThresholdRelevanceChecker
     needs ``context_scores``, which the earlier version of this function
-    discarded (M20 in writing/weekend_fixes_plan.md).
+    discarded (M20 in writing/overhaul.md).
 
     ``top_k=8`` matches production's ``RERANK_TOP_K``
     (app/kb/application/search_service.py) — the number of chunks the
     reranker actually hands to IVM/generation in the live pipeline,
     regardless of what a caller's own ``top_k`` requests further upstream.
 
+    ``hyde`` selects the retrieval path for the production-faithful Exp1b
+    condition (E7): ``False`` hits ``/api/kb/search`` (HyDE-off, matching the
+    committed numbers); ``True`` hits ``/api/chat/search?hyde=true`` — the same
+    HyDE-on retrieval the live chat pipeline feeds the relevance checkers,
+    which ``/api/kb/search`` cannot provide (``kb/ ⇏ chat/``). The keyword and
+    centroid backends do not call this function, so HyDE only moves the three
+    retrieval-dependent backends (judge/similarity/nli).
+
     Args:
         api_url: Base URL of the running application.
         query: Search query.
         top_k: Number of contexts to retrieve.
+        hyde: Route through the HyDE-on chat retrieval endpoint.
 
     Returns:
         Tuple of (chunk texts, chunk scores), same order, same length.
     """
-    async with httpx.AsyncClient(base_url=api_url, timeout=30.0) as client:
-        response = await client.get(
-            "/api/kb/search",
-            params={"q": query, "top_k": top_k},
-        )
-        if response.status_code != 200:
-            return [], []
-        results = response.json()
-        chunks = [r.get("text", "") for r in results]
-        scores = [float(r.get("score", 0.0)) for r in results]
-        return chunks, scores
+    params = {"q": query, "top_k": top_k}
+    if hyde:
+        endpoint = "/api/chat/search"
+        params["hyde"] = "true"
+    else:
+        endpoint = "/api/kb/search"
+    # HyDE adds an LLM generation call per query — give it more headroom.
+    timeout = 120.0 if hyde else 30.0
+    try:
+        async with httpx.AsyncClient(base_url=api_url, timeout=timeout) as client:
+            response = await client.get(endpoint, params=params)
+            if response.status_code != 200:
+                return [], []
+            results = response.json()
+            chunks = [r.get("text", "") for r in results]
+            scores = [float(r.get("score", 0.0)) for r in results]
+            return chunks, scores
+    except httpx.HTTPError:
+        # A slow/failed HyDE call is a miss for this query, not a run-ending crash.
+        return [], []
 
 
 async def run_llm_judge(
@@ -140,15 +259,22 @@ async def run_llm_judge(
     api_url: str,
     dataset: List[SubsetCRow],
     top_k: int = 8,
-) -> List[bool]:
-    """Run the production LLMJudgeRelevanceChecker over Subset C.
+    hyde: bool = False,
+) -> List[str]:
+    """Run the production LLMJudgeRelevanceChecker over Subset C, once.
 
     Reuses ``app/thesis/ivm/judge.py``'s ``LLMJudge`` directly (via the
     production ``LLMJudgeRelevanceChecker`` wrapper) instead of a
     duplicated ad hoc prompt/parser, so this experiment tests the actual
     component the system ships — including its ``max_tokens=400`` budget
     and last-word parse, both load-bearing for reasoning models (§4.6.3;
-    M13 in writing/weekend_fixes_plan.md).
+    M13 in writing/overhaul.md).
+
+    Returns an **outcome per row** rather than a bool: an API failure is
+    recorded as ``ERRORED`` and excluded from the metrics downstream, instead
+    of being folded into ``out_of_domain``. In production the judge fails
+    closed (an exception blocks the query), which is correct there; scoring it
+    as a genuine out-of-domain verdict would turn an outage into a measurement.
 
     Args:
         checker: Production LLMJudgeRelevanceChecker instance.
@@ -157,18 +283,52 @@ async def run_llm_judge(
         top_k: Number of contexts to retrieve per query.
 
     Returns:
-        List of predictions (True = relevant/in-domain).
+        One outcome per row: ``IN_DOMAIN``, ``OUT_OF_DOMAIN`` or ``ERRORED``.
+    """
+    outcomes: List[str] = []
+    for row in dataset:
+        chunks, scores = await retrieve_contexts_detailed(api_url, row.query, top_k, hyde)
+        try:
+            relevant = await checker.check_query(row.query, chunks, scores)
+            outcomes.append(IN_DOMAIN if relevant else OUT_OF_DOMAIN)
+        except Exception as exc:
+            logger_warn(f"judge call failed: {exc}")
+            outcomes.append(ERRORED)
+    return outcomes
+
+
+def logger_warn(message: str) -> None:
+    """Emit a warning to stderr without pulling in a logging dependency."""
+    print(f"  warning: {message}", file=sys.stderr)
+
+
+def scoreable(
+    outcomes: Sequence[str],
+    dataset: Sequence[SubsetCRow],
+) -> Tuple[List[bool], List[bool], int]:
+    """Keep only the rows the judge actually classified.
+
+    ``ERRORED`` rows are dropped from the metric computation rather than
+    assigned a class, and counted so the reader knows how much of the set the
+    figures rest on.
+
+    Args:
+        outcomes: Per-row outcome constants.
+        dataset: Rows, aligned with ``outcomes``.
+
+    Returns:
+        (predictions as is_in_domain, ground truths as is_in_domain, errored count).
     """
     predictions: List[bool] = []
-    for row in dataset:
-        chunks, scores = await retrieve_contexts_detailed(api_url, row.query, top_k)
-        try:
-            predictions.append(await checker.check_query(row.query, chunks, scores))
-        except Exception:
-            # Fail-closed: treat errors as irrelevant (matches LLMJudge's
-            # own fail-closed behavior on exception).
-            predictions.append(False)
-    return predictions
+    truths: List[bool] = []
+    errored = 0
+    for outcome, row in zip(outcomes, dataset):
+        if outcome == ERRORED:
+            errored += 1
+            continue
+        predictions.append(outcome == IN_DOMAIN)
+        truths.append(row.label == "in_domain")
+    return predictions, truths, errored
 
 
 async def run_similarity_threshold(
@@ -176,6 +336,7 @@ async def run_similarity_threshold(
     api_url: str,
     dataset: List[SubsetCRow],
     top_k: int = 8,
+    hyde: bool = False,
 ) -> List[bool]:
     """Run the production SimilarityThresholdRelevanceChecker over Subset C.
 
@@ -196,7 +357,7 @@ async def run_similarity_threshold(
     """
     predictions: List[bool] = []
     for row in dataset:
-        chunks, scores = await retrieve_contexts_detailed(api_url, row.query, top_k)
+        chunks, scores = await retrieve_contexts_detailed(api_url, row.query, top_k, hyde)
         predictions.append(await checker.check_query(row.query, chunks, scores))
     return predictions
 
@@ -206,6 +367,7 @@ async def run_nli_entailment(
     api_url: str,
     dataset: List[SubsetCRow],
     top_k: int = 8,
+    hyde: bool = False,
 ) -> List[bool]:
     """Run the production NliEntailmentRelevanceChecker over Subset C.
 
@@ -224,22 +386,102 @@ async def run_nli_entailment(
     """
     predictions: List[bool] = []
     for row in dataset:
-        chunks, scores = await retrieve_contexts_detailed(api_url, row.query, top_k)
+        chunks, scores = await retrieve_contexts_detailed(api_url, row.query, top_k, hyde)
         predictions.append(await checker.check_query(row.query, chunks, scores))
     return predictions
 
 
+async def fetch_corpus_dense_vectors(
+    host: str,
+    port: int,
+    collection: str,
+    limit: int = 100_000,
+) -> "np.ndarray":
+    """Scroll the Qdrant collection and return every dense chunk vector.
+
+    The corpus embeddings define the in-domain cloud the centroid detector
+    measures against. Read-only: the eval never writes to the store.
+
+    Args:
+        host: Qdrant host.
+        port: Qdrant HTTP port.
+        collection: Collection name.
+        limit: Safety cap on rows scrolled.
+
+    Returns:
+        Array of shape (n, 1024) of dense vectors.
+    """
+    import numpy as np
+    from qdrant_client import AsyncQdrantClient
+
+    client = AsyncQdrantClient(host=host, port=port)
+    vectors: List[List[float]] = []
+    offset = None
+    try:
+        while len(vectors) < limit:
+            points, offset = await client.scroll(
+                collection_name=collection,
+                with_vectors=["dense"],
+                with_payload=False,
+                limit=256,
+                offset=offset,
+            )
+            for point in points:
+                dense = (point.vector or {}).get("dense")
+                if dense is not None:
+                    vectors.append(dense)
+            if offset is None:
+                break
+    finally:
+        await client.close()
+    return np.asarray(vectors, dtype=float)
+
+
+async def run_centroid(
+    corpus_vectors: "np.ndarray",
+    query_vectors: "np.ndarray",
+    threshold: float,
+    metric: str,
+    shrinkage: float,
+) -> List[bool]:
+    """Score every query against the corpus centroid and threshold it.
+
+    Args:
+        corpus_vectors: Corpus dense embeddings, shape (n, d).
+        query_vectors: Subset C query embeddings, shape (m, d), same order as
+            the dataset.
+        threshold: Decision boundary (see ``centroid.is_in_domain``).
+        metric: ``cosine`` or ``mahalanobis``.
+        shrinkage: Covariance shrinkage for the Mahalanobis precision matrix.
+
+    Returns:
+        One prediction per query (True = in-domain).
+    """
+    from app.thesis._eval._shared.centroid import fit_centroid, is_in_domain, score
+
+    model = fit_centroid(
+        corpus_vectors, with_mahalanobis=(metric == "mahalanobis"), shrinkage=shrinkage
+    )
+    return [
+        is_in_domain(score(model, q, metric), threshold, metric) for q in query_vectors
+    ]
+
+
 def run_keyword_overlap_baseline(
     dataset: List[SubsetCRow],
+    lexicon: Set[str],
     threshold: int = 1,
 ) -> List[bool]:
-    """Run keyword-overlap baseline.
+    """Run keyword-overlap baseline against a lexicon.
 
     A query is predicted as relevant if it contains at least ``threshold``
-    terms from the JDIH lexicon.
+    terms from ``lexicon`` (substring match). The lexicon is passed in rather
+    than referenced as a global so the baseline runs against the reproducible,
+    KB-derived set (``derive_jdih_lexicon``) instead of a hand-authored list.
 
     Args:
         dataset: List of Subset C rows.
+        lexicon: The keyword lexicon (KB-derived bigrams + institutional anchors).
         threshold: Minimum number of lexicon matches for relevance.
 
     Returns:
@@ -248,7 +490,7 @@ def run_keyword_overlap_baseline(
     predictions: List[bool] = []
     for row in dataset:
         query_lower = row.query.lower()
-        matches = sum(1 for term in JDIH_LEXICON if term in query_lower)
+        matches = sum(1 for term in lexicon if term in query_lower)
         predictions.append(matches >= threshold)
     return predictions
 
@@ -282,11 +524,50 @@ def compute_per_subtype(
     return results
 
 
+def compute_by_agreement(
+    predictions: List[bool],
+    dataset: List[SubsetCRow],
+    strict_threshold: int = 4,
+) -> Dict[str, Optional[BinaryMetrics]]:
+    """Split metrics by whether the generating panel agreed strictly.
+
+    Subset C admits boundary queries the panel split on (see
+    ``SubsetCRow.is_contested``) rather than discarding them, because a split
+    panel on a near-miss query is information about the boundary. Pooling the
+    two into one accuracy would hide the thing worth knowing: whether a
+    relevance checker fails specifically where human-level judgement is also
+    divided. Reported separately for exactly that reason.
+
+    Args:
+        predictions: Model predictions (True = in-domain).
+        dataset: Subset C rows.
+        strict_threshold: Generation-time acceptance threshold.
+
+    Returns:
+        Mapping of "strict"/"contested" -> metrics, with None where the slice
+        is empty (e.g. a dataset generated before ``panel_yes`` existed, whose
+        rows all read as strict).
+    """
+    slices: Dict[str, List[Tuple[bool, bool]]] = {"strict": [], "contested": []}
+    for pred, row in zip(predictions, dataset):
+        key = "contested" if row.is_contested(strict_threshold) else "strict"
+        slices[key].append((pred, row.label == "in_domain"))
+
+    out: Dict[str, Optional[BinaryMetrics]] = {}
+    for key, pairs in slices.items():
+        if not pairs:
+            out[key] = None
+            continue
+        out[key] = compute_binary_metrics([p for p, _ in pairs], [g for _, g in pairs])
+    return out
+
+
 def print_report(
     system_name: str,
     overall: BinaryMetrics,
     overall_ci: CI,
     per_subtype: List[SubtypeResult],
+    by_agreement: Optional[Dict[str, Optional[BinaryMetrics]]] = None,
 ) -> None:
     """Print a formatted evaluation report.
 
@@ -295,6 +576,8 @@ def print_report(
         overall: Overall binary metrics.
         overall_ci: Bootstrap CI for overall accuracy.
         per_subtype: Per-subtype results.
+        by_agreement: Optional strict/contested split from
+            ``compute_by_agreement``.
     """
     print(f"\n{'=' * 70}")
     print(f"  {system_name}")
@@ -313,7 +596,7 @@ def print_report(
         # Only Accuracy and FPR (not Precision/Recall/F1, which are
         # mathematically undefined for Subset C's single-class subtypes,
         # e.g. off_topic is 100% out_of_domain — see M15 in
-        # writing/weekend_fixes_plan.md). n is shown explicitly since some
+        # writing/overhaul.md). n is shown explicitly since some
         # subtypes are small (near_miss_government is n=6) and a subtype
         # accuracy shouldn't be read as a stable rate at that size.
         print(f"\n  Per Subtype:")
@@ -322,6 +605,20 @@ def print_report(
         for r in per_subtype:
             m = r.metrics
             print(f"  {r.subtype:<25} {m.total:>5} {m.accuracy:>8.4f} {m.fpr:>8.4f}")
+
+    if by_agreement and by_agreement.get("contested"):
+        # Reported separately rather than pooled: a checker that matches the
+        # panel on clear-cut queries but not on the ones the panel itself
+        # split over is a different (and more interesting) result than a
+        # single averaged accuracy would show.
+        print(f"\n  By Generating-Panel Agreement:")
+        print(f"  {'Slice':<25} {'n':>5} {'Acc':>8} {'FPR':>8}")
+        print(f"  {'-' * 49}")
+        for key, label in (("strict", "strict (full panel)"), ("contested", "contested (split panel)")):
+            m = by_agreement.get(key)
+            if m is None:
+                continue
+            print(f"  {label:<25} {m.total:>5} {m.accuracy:>8.4f} {m.fpr:>8.4f}")
     print()
 
 
@@ -341,6 +638,11 @@ async def async_main(args: argparse.Namespace) -> None:
 
     ground_truths = [row.label == "in_domain" for row in dataset]
     preds: Dict[str, List[bool]] = {}
+    # The judge is stored apart from the deterministic bool-based backends: it
+    # runs several times and can error, so it carries per-pass outcomes and a
+    # flip count rather than a single bool.
+    judge_runs: List[List[str]] = []
+    judge_flips: List[int] = []
 
     def write_csv() -> None:
         rows = []
@@ -353,17 +655,37 @@ async def async_main(args: argparse.Namespace) -> None:
             for name, p in preds.items():
                 r[f"{name}_pred"] = "in_domain" if p[i] else "out_of_domain"
                 r[f"{name}_correct"] = p[i] == ground_truths[i]
+            if judge_runs:
+                for run_index, run in enumerate(judge_runs, start=1):
+                    r[f"llm_judge_pred_run{run_index}"] = run[i]
+                r["llm_judge_distinct_labels"] = judge_flips[i]
             rows.append(r)
         write_results_csv(args.output_csv, rows)
 
-    # --- 1. Keyword overlap baseline ---
-    print("\nRunning keyword-overlap baseline...")
-    preds["baseline"] = run_keyword_overlap_baseline(dataset, threshold=args.keyword_threshold)
+    # --- 1. Keyword overlap baseline (KB-derived lexicon) ---
+    titles = await fetch_kb_titles(args.api_url)
+    if titles:
+        lexicon = derive_jdih_lexicon(titles, min_doc_freq=args.lexicon_min_doc_freq)
+        print(
+            f"\nDerived JDIH lexicon from {len(titles)} KB titles: "
+            f"{len(lexicon)} terms (bigrams df>={args.lexicon_min_doc_freq} + anchors)"
+        )
+    else:
+        lexicon = set(JDIH_ANCHORS)
+        logger_warn(
+            f"KB titles unavailable — keyword baseline falls back to {len(lexicon)} "
+            "institutional anchors only (results not comparable to a derived run)"
+        )
+    print("Running keyword-overlap baseline...")
+    preds["baseline"] = run_keyword_overlap_baseline(
+        dataset, lexicon, threshold=args.keyword_threshold
+    )
     print_report(
         "Baseline (Keyword Overlap)",
         compute_binary_metrics(preds["baseline"], ground_truths),
         bootstrap_binary_ci(preds["baseline"], ground_truths, metric="accuracy"),
         compute_per_subtype(preds["baseline"], dataset),
+        compute_by_agreement(preds["baseline"], dataset, args.strict_threshold),
     )
 
     # --- 2. LLM-as-Judge (production LLMJudge, via LLMJudgeRelevanceChecker) ---
@@ -371,27 +693,54 @@ async def async_main(args: argparse.Namespace) -> None:
         print("\nSkipping LLM-as-Judge (--skip-llm-judge)")
     else:
         try:
-            # A single session_id lets OpenRouter route every judge call for
-            # this run to the same upstream provider, so the shared judge
-            # system prompt (identical on all 56 calls) can be provider-
-            # cached instead of re-billed in full each time.
-            llm_client = get_llm_client_from_env(session_id="exp1b-llm-judge")
+            # session_id is accepted and ignored by the client (C6 measured it
+            # does nothing for caching); the provider is pinned instead so the
+            # judge is not silently rerouted to a different upstream mid-run.
+            llm_client = get_llm_client_from_env(model=args.judge_model or None)
         except ValueError as e:
             print(f"\nSkipping LLM-as-Judge: {e}", file=sys.stderr)
         else:
             try:
                 judge = LLMJudge(llm_connection=llm_client, model=llm_client.model)
                 checker = LLMJudgeRelevanceChecker(judge)
-                print("\nRunning LLM-as-Judge (production LLMJudge)...")
-                preds["llm_judge"] = await run_llm_judge(checker, args.api_url, dataset, args.top_k)
+                print(
+                    f"\nRunning LLM-as-Judge ({args.judge_repeats} passes, "
+                    f"model={llm_client.model}, hyde={'on' if args.hyde else 'off'})..."
+                )
+                judge_runs = await repeat_passes(
+                    lambda: run_llm_judge(checker, args.api_url, dataset, args.top_k, args.hyde),
+                    args.judge_repeats,
+                    "judge pass",
+                )
             finally:
                 await llm_client.aclose()
+
+            agreement, judge_flips = self_agreement(judge_runs)
+            # Metrics come from the first pass; errored rows are excluded and
+            # the per-subtype/agreement tables are computed over the rows that
+            # were actually classified, aligned with their dataset rows.
+            judge_preds, judge_truths, judge_errored = scoreable(judge_runs[0], dataset)
+            kept_rows = [
+                row for outcome, row in zip(judge_runs[0], dataset) if outcome != ERRORED
+            ]
             print_report(
                 "LLM-as-Judge (production)",
-                compute_binary_metrics(preds["llm_judge"], ground_truths),
-                bootstrap_binary_ci(preds["llm_judge"], ground_truths, metric="accuracy"),
-                compute_per_subtype(preds["llm_judge"], dataset),
+                compute_binary_metrics(judge_preds, judge_truths),
+                bootstrap_binary_ci(judge_preds, judge_truths, metric="accuracy"),
+                compute_per_subtype(judge_preds, kept_rows),
+                compute_by_agreement(judge_preds, kept_rows, args.strict_threshold),
             )
+            print(f"  Rows scored          : {len(judge_preds)} of {len(dataset)}")
+            if judge_errored:
+                print(f"  Errored              : {judge_errored} (excluded; an outage is not a verdict)")
+            if args.judge_repeats > 1:
+                unstable = sum(1 for count in judge_flips if count > 1)
+                print(f"  Self-agreement       : {agreement:.4f} over {args.judge_repeats} passes")
+                print(f"  Rows with flips      : {unstable}")
+                if agreement < 0.95:
+                    print("  NOTE: the judge is not stable enough to quote as a bare point")
+                    print("        estimate — report the agreement rate alongside it.")
+            print()
 
     # --- 3. similarity_threshold (no LLM call) ---
     if args.skip_similarity:
@@ -399,12 +748,13 @@ async def async_main(args: argparse.Namespace) -> None:
     else:
         sim_checker = SimilarityThresholdRelevanceChecker(threshold=args.similarity_threshold)
         print(f"\nRunning similarity_threshold (threshold={args.similarity_threshold})...")
-        preds["similarity_threshold"] = await run_similarity_threshold(sim_checker, args.api_url, dataset, args.top_k)
+        preds["similarity_threshold"] = await run_similarity_threshold(sim_checker, args.api_url, dataset, args.top_k, args.hyde)
         print_report(
             f"Similarity Threshold ({args.similarity_threshold})",
             compute_binary_metrics(preds["similarity_threshold"], ground_truths),
             bootstrap_binary_ci(preds["similarity_threshold"], ground_truths, metric="accuracy"),
             compute_per_subtype(preds["similarity_threshold"], dataset),
+            compute_by_agreement(preds["similarity_threshold"], dataset, args.strict_threshold),
         )
 
     # --- 4. nli_entailment ---
@@ -415,7 +765,7 @@ async def async_main(args: argparse.Namespace) -> None:
         try:
             nli_checker = NliEntailmentRelevanceChecker(nli_model=nli_client, threshold=args.nli_threshold)
             print(f"\nRunning nli_entailment (threshold={args.nli_threshold})...")
-            preds["nli_entailment"] = await run_nli_entailment(nli_checker, args.api_url, dataset, args.top_k)
+            preds["nli_entailment"] = await run_nli_entailment(nli_checker, args.api_url, dataset, args.top_k, args.hyde)
         finally:
             await nli_client.aclose()
         print_report(
@@ -423,7 +773,46 @@ async def async_main(args: argparse.Namespace) -> None:
             compute_binary_metrics(preds["nli_entailment"], ground_truths),
             bootstrap_binary_ci(preds["nli_entailment"], ground_truths, metric="accuracy"),
             compute_per_subtype(preds["nli_entailment"], dataset),
+            compute_by_agreement(preds["nli_entailment"], dataset, args.strict_threshold),
         )
+
+    # --- 5. centroid / Mahalanobis (Metode 4, offline, no LLM call) ---
+    if args.skip_centroid:
+        print("\nSkipping centroid (--skip-centroid)")
+    else:
+        from app.kb.infra.bge_m3_embeddings import BGEM3Embeddings
+
+        print(
+            f"\nRunning centroid ({args.centroid_metric}, threshold={args.centroid_threshold})..."
+        )
+        corpus = await fetch_corpus_dense_vectors(
+            args.qdrant_host, args.qdrant_port, args.qdrant_collection
+        )
+        if corpus.shape[0] == 0:
+            print("  Skipping centroid: the Qdrant collection returned no vectors", file=sys.stderr)
+        else:
+            print(f"  Fitted on {corpus.shape[0]} corpus vectors (dim {corpus.shape[1]})")
+            # Embed Subset C queries with the same model that embedded the
+            # corpus, so query-to-centroid distances are meaningful.
+            embedder = BGEM3Embeddings(model_name=args.embed_model, device=args.embed_device)
+            embedded = await embedder.embed_texts([row.query for row in dataset])
+            import numpy as np
+
+            query_vectors = np.asarray([e.dense for e in embedded], dtype=float)
+            preds["centroid"] = await run_centroid(
+                corpus,
+                query_vectors,
+                threshold=args.centroid_threshold,
+                metric=args.centroid_metric,
+                shrinkage=args.centroid_shrinkage,
+            )
+            print_report(
+                f"Centroid ({args.centroid_metric}, {args.centroid_threshold})",
+                compute_binary_metrics(preds["centroid"], ground_truths),
+                bootstrap_binary_ci(preds["centroid"], ground_truths, metric="accuracy"),
+                compute_per_subtype(preds["centroid"], dataset),
+                compute_by_agreement(preds["centroid"], dataset, args.strict_threshold),
+            )
 
     write_csv()
 
@@ -454,6 +843,22 @@ def main() -> None:
         help="NLI model identifier (must match a model loaded on the Infinity server)",
     )
     parser.add_argument(
+        "--hyde",
+        action="store_true",
+        help="Production-faithful condition (E7): route the retrieval-dependent "
+        "backends (llm_judge, similarity_threshold, nli_entailment) through the "
+        "HyDE-on chat retrieval endpoint (/api/chat/search) instead of the HyDE-off "
+        "/api/kb/search, matching what the live pipeline feeds the relevance checkers. "
+        "Keyword and centroid backends are unaffected (they don't retrieve via that path).",
+    )
+    parser.add_argument(
+        "--judge-model",
+        default="",
+        help="Override the LLM-as-Judge model (else EVAL_LLM_MODEL, default deepseek). "
+        "Set to 'qwen/qwen3-14b' for the production-faithful judge (the model the live "
+        "pipeline actually uses), typically paired with --hyde.",
+    )
+    parser.add_argument(
         "--top-k",
         type=int,
         default=8,
@@ -465,6 +870,22 @@ def main() -> None:
         type=int,
         default=1,
         help="Minimum lexicon matches for keyword baseline (default: 1)",
+    )
+    parser.add_argument(
+        "--lexicon-min-doc-freq",
+        type=int,
+        default=DEFAULT_LEXICON_MIN_DOC_FREQ,
+        help="Min distinct KB titles a bigram must appear in to enter the derived "
+        f"keyword-baseline lexicon (default: {DEFAULT_LEXICON_MIN_DOC_FREQ}; unigrams "
+        "are excluded as they reduce to generic legal vocabulary)",
+    )
+    parser.add_argument(
+        "--strict-threshold",
+        type=int,
+        default=4,
+        help="Generation-time panel acceptance threshold. Rows admitted below it "
+        "(see the panel_yes column) are reported as a separate 'contested' slice "
+        "rather than pooled into the headline accuracy (default: 4)",
     )
     parser.add_argument(
         "--similarity-threshold",
@@ -482,6 +903,16 @@ def main() -> None:
         "matching production's default)",
     )
     parser.add_argument(
+        "--judge-repeats",
+        type=int,
+        default=3,
+        help=(
+            "How many identical passes to make for the LLM-judge. A hosted model "
+            "is not bit-reproducible even at temperature 0, so repeats turn its "
+            "stability into a measured self-agreement rate (default: 3)."
+        ),
+    )
+    parser.add_argument(
         "--skip-llm-judge",
         action="store_true",
         help="Skip the LLM-as-Judge backend",
@@ -495,6 +926,57 @@ def main() -> None:
         "--skip-nli",
         action="store_true",
         help="Skip the nli_entailment backend",
+    )
+    parser.add_argument(
+        "--skip-centroid",
+        action="store_true",
+        help="Skip the centroid/Mahalanobis backend (Metode 4)",
+    )
+    parser.add_argument(
+        "--centroid-metric",
+        choices=["cosine", "mahalanobis"],
+        default="cosine",
+        help="Distance to the corpus centre (default: cosine, higher = in-domain)",
+    )
+    parser.add_argument(
+        "--centroid-threshold",
+        type=float,
+        default=0.5,
+        help="Decision boundary for the centroid backend (placeholder — sweep it; "
+        "cosine is in-domain at or above, Mahalanobis at or below)",
+    )
+    parser.add_argument(
+        "--centroid-shrinkage",
+        type=float,
+        default=0.1,
+        help="Covariance shrinkage toward a scaled identity for Mahalanobis "
+        "(0..1; bge-m3 is 1024-dim so a non-zero value is required for a stable inverse)",
+    )
+    parser.add_argument(
+        "--qdrant-host",
+        default=os.environ.get("QDRANT_HOST", "127.0.0.1"),
+        help="Qdrant host for the corpus vectors (centroid backend)",
+    )
+    parser.add_argument(
+        "--qdrant-port",
+        type=int,
+        default=int(os.environ.get("QDRANT_PORT", "6333")),
+        help="Qdrant HTTP port",
+    )
+    parser.add_argument(
+        "--qdrant-collection",
+        default=os.environ.get("QDRANT_COLLECTION_NAME", "knowledge_base"),
+        help="Qdrant collection name",
+    )
+    parser.add_argument(
+        "--embed-model",
+        default="BAAI/bge-m3",
+        help="Embedding model for Subset C queries (must match the corpus embedder)",
+    )
+    parser.add_argument(
+        "--embed-device",
+        default=os.environ.get("EMBED_DEVICE", "cuda"),
+        help="Device for the query embedder (cuda or cpu)",
     )
     parser.add_argument(
         "--output-csv",

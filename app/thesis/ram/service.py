@@ -91,6 +91,11 @@ class RAMService:
     When NLI is disabled (nli_enabled=False), assess_sentence returns a
     neutral result immediately — zero overhead, zero model calls.
 
+    Depends only on the ``INLIModel``/``IRerankerModel`` Protocols, so it
+    stays part of the infra-free ``thesis`` research core (see
+    ``docs/02-arsitektur.md`` §2.2). Wired in
+    ``app/chat/dependency.py::get_ram_service``.
+
     Args:
         nli_model (INLIModel): The NLI inference client.
         reranker_model (IRerankerModel): The reranker client for exact premise extraction.
@@ -98,6 +103,14 @@ class RAMService:
     """
 
     def __init__(self, nli_model: INLIModel, reranker_model: IRerankerModel, enabled: bool = True):
+        """Args:
+            nli_model: NLI backend used to check sentence-vs-context entailment.
+            reranker_model: Reranker used to find the exact candidate window
+                within the top contexts before running NLI (see
+                ``assess_sentence``).
+            enabled: When False, ``assess_sentence`` short-circuits to a
+                neutral result with zero model calls.
+        """
         self.nli_model = nli_model
         self.reranker_model = reranker_model
         self.enabled = enabled

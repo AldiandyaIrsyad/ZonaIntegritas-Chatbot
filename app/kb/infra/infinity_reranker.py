@@ -1,4 +1,8 @@
-"""Infinity reranker adapter for re-ranking retrieved documents."""
+"""Infinity reranker adapter for re-ranking retrieved documents.
+
+Fulfills: ``app/kb/domain/interfaces.py::IReranker``.
+Wired in: ``app/kb/dependency.py::get_reranker``.
+"""
 
 import httpx
 import structlog
@@ -12,11 +16,18 @@ logger = structlog.get_logger(__name__)
 class InfinityReranker(IReranker):
     """HTTP adapter for the Infinity reranking server.
 
-    Implements the IReranker Protocol by calling the Infinity ``/rerank``
-    endpoint with the BGE-reranker-v2-m3 model loaded via docker-compose.
+    Fulfills: ``app/kb/domain/interfaces.py::IReranker``. Calls the Infinity
+    ``/rerank`` endpoint with the BGE-reranker-v2-m3 model loaded via
+    docker-compose.
     """
 
     def __init__(self, base_url: str, model: str) -> None:
+        """Open an HTTP client for the Infinity reranking endpoint.
+
+        Args:
+            base_url: Infinity server base URL.
+            model: Reranker model identifier registered with Infinity.
+        """
         self.model = model
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),

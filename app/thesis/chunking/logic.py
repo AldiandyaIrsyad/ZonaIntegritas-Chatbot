@@ -12,6 +12,10 @@ Content-type aware:
 - Tables (Markdown): split by row groups, repeating the header in each child
   chunk so every child is independently embeddable.
 - Figures: VLM descriptions split at sentence boundaries if long.
+
+Depends only on stdlib ``re``/``uuid`` and the ``langchain_text_splitters``
+library (a pure text-splitting utility, not an infra client) — no HTTP/DB
+imports, per the ``thesis/`` purity rule (see ``docs/02-arsitektur.md`` §2.2).
 """
 import re
 import uuid

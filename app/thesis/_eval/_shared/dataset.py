@@ -33,7 +33,8 @@ class SubsetARow:
         question: User query.
         category: Question category (factual, procedural, multi-hop, out-of-domain).
         ground_truth_answer: Reference answer from source documents.
-        source_doc_id: ID of the source document.
+        source_doc_id: ID of the source document. May hold several
+            pipe-separated IDs — see ``gold_doc_ids``.
         source_context: Verbatim paragraph from the source document (NONE for out-of-domain).
     """
 
@@ -42,6 +43,26 @@ class SubsetARow:
     ground_truth_answer: str
     source_doc_id: str
     source_context: str
+
+    @property
+    def gold_doc_ids(self) -> List[str]:
+        """Return the relevant document IDs for retrieval scoring.
+
+        A multi-hop question synthesises several paragraphs and can legitimately
+        have more than one correct source document, but the column holds a
+        single ID, so such a question is scored as a miss whenever retrieval
+        surfaces one of its *other* valid sources (M11 in
+        writing/overhaul.md). Pipe-separated IDs are therefore
+        accepted here; single-ID rows are unaffected.
+
+        Returns:
+            List of gold document IDs — empty for out-of-domain rows, which
+            carry the sentinel "NONE".
+        """
+        raw = (self.source_doc_id or "").strip()
+        if not raw or raw.upper() == "NONE":
+            return []
+        return [part.strip() for part in raw.split("|") if part.strip()]
 
 
 @dataclass(frozen=True)
@@ -67,11 +88,37 @@ class SubsetCRow:
         query: User query.
         label: 'in_domain' or 'out_of_domain'.
         subtype: Subtype for error analysis.
+        panel_yes: How many panel members voted to accept this row's label.
+            Defaults to 0 for CSVs generated before this column existed.
+        panel_size: Panel size at generation time. 0 when unrecorded.
     """
 
     query: str
     label: str
     subtype: str
+    panel_yes: int = 0
+    panel_size: int = 0
+
+    def is_contested(self, strict_threshold: int = 4) -> bool:
+        """Whether the panel fell short of the strict rule on this row.
+
+        Subset C's boundary subtypes — ``near_miss_government`` above all —
+        are defined as sitting near the domain edge, so a split panel is
+        information about the boundary rather than evidence of a bad item.
+        Rows admitted one vote below the strict threshold are kept and marked
+        here, so Exp1b can report the strict and contested slices separately
+        instead of pooling them or silently discarding the hard cases.
+
+        Args:
+            strict_threshold: The strict acceptance threshold to compare
+                against (the generation-time ``acceptance_threshold``).
+
+        Returns:
+            True if this row was admitted below ``strict_threshold``. Rows
+            with no recorded vote count (older CSVs) are treated as not
+            contested, since they could only have been accepted strictly.
+        """
+        return 0 < self.panel_yes < strict_threshold
 
 
 @dataclass(frozen=True)
@@ -87,6 +134,18 @@ class SubsetDRow:
         retrieved_context: Context retrieved by the system.
         label: Annotation label (supported, partially_supported, not_supported, no_source_needed).
         verifier_note: Researcher verification note.
+        construction: How the row was made — ``natural`` (real pipeline output) or
+            ``perturbed`` (a verified counterfactual edit). Empty for legacy files.
+        perturbation_family: The edit strategy for a ``perturbed`` row (e.g.
+            ``factual_flip``); empty otherwise.
+        intended_label: The label a ``perturbed`` row was designed to carry, which
+            the panel then confirmed equals ``label``; empty otherwise.
+        perturbation_of: The parent ``question_id:sentence_id`` a perturbed row was
+            derived from; empty otherwise.
+        difficulty_band: ``easy``/``medium``/``hard`` from how the production NLI
+            verifier fared on the row (a reported slice, not an inclusion gate).
+        split: ``core`` (balanced diagnostic) or ``natural`` (realistic base rate).
+        edit_note: Short description of the perturbation, for auditing.
     """
 
     question_id: str
@@ -97,6 +156,34 @@ class SubsetDRow:
     retrieved_context: str
     label: str
     verifier_note: str
+    # Optional slice metadata from the hard rebuild. Absent in legacy 2026-07-19
+    # files, so all default to empty and load via ``.get()`` — Exp3/Exp4 keep
+    # reading the old schema unchanged.
+    construction: str = ""
+    perturbation_family: str = ""
+    intended_label: str = ""
+    perturbation_of: str = ""
+    difficulty_band: str = ""
+    split: str = ""
+    edit_note: str = ""
+
+
+def _int_or_zero(value: Optional[str]) -> int:
+    """Parse an optional CSV cell as an int, defaulting to 0.
+
+    Columns added after a dataset was generated are absent (None) in the older
+    file, and may be blank in a hand-edited one; neither should crash a load.
+
+    Args:
+        value: Raw cell value, or None if the column is absent.
+
+    Returns:
+        The parsed integer, or 0 when missing or unparseable.
+    """
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
 
 
 def _open_csv(path: str) -> csv.DictReader:
@@ -181,6 +268,8 @@ def load_subset_c(path: str) -> List[SubsetCRow]:
                 query=row["query"].strip(),
                 label=row["label"].strip().lower(),
                 subtype=row.get("subtype", "").strip().lower(),
+                panel_yes=_int_or_zero(row.get("panel_yes")),
+                panel_size=_int_or_zero(row.get("panel_size")),
             )
         )
     return rows
@@ -208,6 +297,13 @@ def load_subset_d(path: str) -> List[SubsetDRow]:
                 retrieved_context=row.get("retrieved_context", "").strip(),
                 label=row["label"].strip().lower(),
                 verifier_note=row.get("verifier_note", "").strip(),
+                construction=row.get("construction", "").strip().lower(),
+                perturbation_family=row.get("perturbation_family", "").strip().lower(),
+                intended_label=row.get("intended_label", "").strip().lower(),
+                perturbation_of=row.get("perturbation_of", "").strip(),
+                difficulty_band=row.get("difficulty_band", "").strip().lower(),
+                split=row.get("split", "").strip().lower(),
+                edit_note=row.get("edit_note", "").strip(),
             )
         )
     return rows

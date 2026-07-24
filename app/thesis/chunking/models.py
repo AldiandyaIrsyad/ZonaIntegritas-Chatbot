@@ -8,6 +8,9 @@ Defines the data structures that flow through the chunking pipeline:
 Each model carries a ``content_type`` field so downstream components
 (embedding, vector store, retrieval, citation) can distinguish narrative
 text from tables and VLM-enriched figure descriptions.
+
+Pure ``pydantic`` data models, no infra imports — part of the ``thesis/``
+research core purity rule (see ``docs/02-arsitektur.md`` §2.2).
 """
 
 from enum import Enum

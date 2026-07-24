@@ -13,6 +13,10 @@ Usage:
     bundle = build_prompt(user_message, contexts, base_system_prompt)
     messages = [{"role": "system", "content": bundle.system_prompt}, ...]
     messages.append({"role": "user", "content": bundle.user_turn})
+
+Pure Python (stdlib ``secrets`` + the ``RetrievedContext`` data type from
+``thesis/ram/interfaces.py``) — no infra imports, per the ``thesis/``
+purity rule (see ``docs/02-arsitektur.md`` §2.2).
 """
 import secrets
 from dataclasses import dataclass
@@ -144,6 +148,7 @@ def build_prompt(
     user_message: str,
     contexts: List[RetrievedContext],
     base_system_prompt: str,
+    use_nonce: bool = True,
 ) -> PromptBundle:
     """One-shot composer: generates the nonce, context block, user turn, and
     system prompt together so they can never drift out of sync (e.g. a
@@ -153,12 +158,27 @@ def build_prompt(
         user_message: The user's raw question.
         contexts: Retrieved context blocks with breadcrumbs.
         base_system_prompt: The operator-configured persona/behavior prompt.
+        use_nonce: When False, omit the delimiter tags and the paragraph of
+            defense instructions that names them, so the user message is
+            passed through unwrapped. This exists to ablate the structural
+            injection defense on its own — it is a separate layer from the
+            classifier-based guard in ``app/thesis/ivm/service.py``, and
+            measuring what it contributes requires being able to turn it off.
+            Production callers leave this True.
 
     Returns:
-        A ``PromptBundle`` with the final system prompt, user turn, and nonce.
+        A ``PromptBundle`` with the final system prompt, user turn, and nonce
+        (empty string when ``use_nonce`` is False).
     """
-    nonce = make_user_delimiter()
     context_block = build_context_block(contexts)
+    if not use_nonce:
+        if context_block:
+            user_turn = f"Konteks:\n{context_block}\n\nPertanyaan:\n{user_message}"
+        else:
+            user_turn = f"Pertanyaan:\n{user_message}"
+        return PromptBundle(system_prompt=base_system_prompt, user_turn=user_turn, nonce="")
+
+    nonce = make_user_delimiter()
     user_turn = build_user_turn(user_message, context_block, nonce)
     system_prompt = build_system_prompt(base_system_prompt, nonce)
     return PromptBundle(system_prompt=system_prompt, user_turn=user_turn, nonce=nonce)

@@ -12,28 +12,41 @@ from app.thesis.ivm.judge import (
 class ChatConfig(BaseSettings):
     """Configuration for the Chat module.
 
-    LLM settings read the ``LLM_*`` environment variables defined in ``.env``
-    (e.g. ``LLM_API_KEY``, ``LLM_OPENROUTER_BASE_URL``, ``LLM_OPENROUTER_MODEL``).
-    The ``validation_alias`` for each field maps the canonical env var name to
-    the config attribute so that ``get_chat_config()`` picks up the OpenRouter
-    credentials instead of falling back to the dead Ollama defaults.
+    LLM settings read the ``CHAT_LLM_*`` environment variables defined in
+    ``.env`` (e.g. ``CHAT_LLM_API_KEY``, ``CHAT_LLM_BASE_URL``,
+    ``CHAT_LLM_MODEL``) — matching the ``CHAT_`` prefix every other field in
+    this class uses. The ``validation_alias`` for each field maps the
+    canonical env var name to the config attribute so that
+    ``get_chat_config()`` picks up the OpenRouter credentials instead of
+    falling back to the dead Ollama defaults.
+
+    NOTE: prior to this fix, these three fields used a stale ``LLM_*``
+    alias (``LLM_API_KEY``, ``LLM_OPENROUTER_BASE_URL``,
+    ``LLM_OPENROUTER_MODEL``) left over from before the rest of the class
+    was migrated to the ``CHAT_`` prefix — ``.env.example`` and
+    ``docs/11-deployment.md`` had already documented ``CHAT_LLM_*`` as the
+    real variable names, so any ``.env`` written against the docs silently
+    fell back to the dead Ollama defaults instead of erroring. If you have
+    an existing ``.env`` with ``LLM_API_KEY``/``LLM_OPENROUTER_BASE_URL``/
+    ``LLM_OPENROUTER_MODEL``, rename them to ``CHAT_LLM_API_KEY``/
+    ``CHAT_LLM_BASE_URL``/``CHAT_LLM_MODEL``.
     """
 
     # LLM Settings
     llm_base_url: str = Field(
         default="http://localhost:11434/v1",
         description="OpenAI-compatible base URL",
-        validation_alias="LLM_OPENROUTER_BASE_URL",
+        validation_alias="CHAT_LLM_BASE_URL",
     )
     llm_api_key: SecretStr = Field(
         default=SecretStr("dummy"),
         description="API key for LLM",
-        validation_alias="LLM_API_KEY",
+        validation_alias="CHAT_LLM_API_KEY",
     )
     llm_model: str = Field(
         default="llama3.1:8b",
         description="Model name to use for generation",
-        validation_alias="LLM_OPENROUTER_MODEL",
+        validation_alias="CHAT_LLM_MODEL",
     )
     llm_temperature: float = Field(
         default=0.0,
@@ -50,6 +63,54 @@ class ChatConfig(BaseSettings):
     prompt_guard_model: str = Field(default="meta-llama/Llama-Prompt-Guard-2-86M", validation_alias="INFINITY_PROMPT_GUARD_MODEL")
     nli_model: str = Field(default="StevenLimcorn/indo-roberta-indonli", validation_alias="INFINITY_NLI_MODEL")
     security_threshold: float = Field(default=0.75, description="Threshold for prompt injection detection")
+
+    # --- Safety backend selection (IVM) ---
+    # Mirrors ``ood_method``: one env var swaps the ISafetyModel adapter so the
+    # off-the-shelf classifier, its Indonesian fine-tune, and a hosted
+    # generative guard can all be compared without a code change.
+    safety_backend: Literal["prompt_guard", "qwen3guard"] = Field(
+        default="prompt_guard",
+        description=(
+            "IVM safety backend. 'prompt_guard' = local sequence classifier "
+            "(base or fine-tuned, chosen via prompt_guard_model); 'qwen3guard' = "
+            "hosted generative guard over an OpenAI-compatible API."
+        ),
+        validation_alias="CHAT_SAFETY_BACKEND",
+    )
+    prompt_guard_url: str = Field(
+        default="http://localhost:7998",
+        description=(
+            "Base URL of the dedicated prompt-guard server. Separate from "
+            "``infinity_url`` so the guard can be swapped or restarted without "
+            "reloading the reranker and NLI models."
+        ),
+        validation_alias="PROMPT_GUARD_BASE_URL",
+    )
+    safety_api_base_url: str = Field(
+        default="https://router.huggingface.co/v1",
+        description="OpenAI-compatible base URL for the hosted safety backend",
+        validation_alias="CHAT_SAFETY_API_BASE_URL",
+    )
+    safety_api_key: str = Field(
+        default="",
+        description="API key for the hosted safety backend",
+        validation_alias="CHAT_SAFETY_API_KEY",
+    )
+    safety_api_model: str = Field(
+        default="Qwen/Qwen3Guard-Gen-0.6B:featherless-ai",
+        description="Model identifier for the hosted safety backend",
+        validation_alias="CHAT_SAFETY_API_MODEL",
+    )
+    safety_controversial_is_unsafe: bool = Field(
+        default=True,
+        description=(
+            "Qwen3Guard emits three tiers (Safe/Controversial/Unsafe). True maps "
+            "Controversial to unsafe, matching the fail-closed posture of the rest "
+            "of the IVM. Fix this before running an experiment — changing it "
+            "afterwards turns the label boundary into a tuned parameter."
+        ),
+        validation_alias="CHAT_SAFETY_CONTROVERSIAL_IS_UNSAFE",
+    )
     relevance_judge_prompt: str = Field(
         default=DEFAULT_RELEVANCE_JUDGE_PROMPT,
         description="System prompt for the IVM LLM-as-judge relevance checker",
@@ -78,6 +139,32 @@ class ChatConfig(BaseSettings):
         default=0.5,
         description="Min NLI entailment_score for the 'nli_entailment' OOD method",
         validation_alias="CHAT_OOD_NLI_THRESHOLD",
+    )
+
+    # Chat PDF Attachments
+    attachment_max_file_size_mb: int = Field(
+        default=15,
+        description="Max upload size (MB) for a chat-attached PDF",
+        validation_alias="CHAT_ATTACHMENT_MAX_FILE_SIZE_MB",
+    )
+    attachment_max_pages: int = Field(
+        default=40,
+        description="Max page count for a chat-attached PDF",
+        validation_alias="CHAT_ATTACHMENT_MAX_PAGES",
+    )
+    attachment_max_chars: int = Field(
+        default=50_000,
+        description="Max extracted character count kept from a chat-attached PDF (truncated beyond this)",
+        validation_alias="CHAT_ATTACHMENT_MAX_CHARS",
+    )
+    attachment_search_excerpt_chars: int = Field(
+        default=4_000,
+        description=(
+            "Max characters of attachment text folded into the KB relevance/"
+            "retrieval search query (kept short so it doesn't degrade "
+            "embedding/HyDE quality — full text still goes to the LLM prompt)"
+        ),
+        validation_alias="CHAT_ATTACHMENT_SEARCH_EXCERPT_CHARS",
     )
 
     # HyDE (Hypothetical Document Embeddings) Settings

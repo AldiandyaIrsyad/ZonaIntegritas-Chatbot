@@ -52,6 +52,16 @@ class KBApplicationService:
         ingest_worker: IngestWorker,
         upload_dir: str = "./uploads/knowledge_base",
     ):
+        """Wire the service's collaborators and ensure the upload directory exists.
+
+        Args:
+            kb_repo: Postgres-backed :class:`IKBRepository` for document/chunk
+                persistence.
+            vector_store: :class:`IVectorStore` (Qdrant) for chunk vectors.
+            ingest_worker: Orchestrates the parse→embed→upsert pipeline;
+                triggered as a FastAPI background task, not awaited here.
+            upload_dir: Directory where uploaded PDFs are saved on disk.
+        """
         self.kb_repo = kb_repo
         self.vector_store = vector_store
         self.ingest_worker = ingest_worker
@@ -61,12 +71,24 @@ class KBApplicationService:
             os.makedirs(self.upload_dir, exist_ok=True)
 
     async def list_pdfs(self) -> List[PDFDocument]:
+        """Return all KB documents (passthrough to ``IKBRepository``)."""
         return await self.kb_repo.get_all_pdfs()
 
     async def naive_title_search(self, query: str) -> List[PDFDocument]:
+        """Passthrough to ``IKBRepository.search_titles_naive`` — see there
+        for why this literal ILIKE search exists alongside the real
+        hybrid-search pipeline."""
         return await self.kb_repo.search_titles_naive(query)
 
     async def upload_pdf(self, title: str, description: str, file: UploadFile, bg_tasks: BackgroundTasks) -> PDFDocument:
+        """Save one uploaded PDF to disk, record it, and schedule ingestion.
+
+        Coordinates two systems: the filesystem (saves the file under
+        ``upload_dir`` with a safe name) and ``IKBRepository`` (creates the
+        ``PDFDocument`` row). Vector storage isn't touched here — embedding
+        and upserting into Qdrant happen later, asynchronously, inside
+        ``ingest_worker.ingest_document`` via ``bg_tasks``.
+        """
         file_path = os.path.join(self.upload_dir, _safe_upload_filename(file.filename))
 
         with open(file_path, "wb") as buffer:
@@ -137,16 +159,26 @@ class KBApplicationService:
         return results, failures
 
     async def update_pdf_status(self, pdf_id: str, active: bool) -> Optional[PDFDocument]:
+        """Toggle a document's active flag in both Postgres and Qdrant.
+
+        Inactive documents are excluded from retrieval (``hybrid_search``
+        filters on the ``is_active`` payload field), so the flag must be
+        mirrored into the vector store's payload, not just the Postgres row.
+        """
         doc = await self.kb_repo.update_pdf_active_status(pdf_id, active)
         if doc:
             await self.vector_store.update_payload(pdf_id, {"is_active": active})
         return doc
 
     async def delete_pdf(self, pdf_id: str) -> bool:
+        """Delete a document across all three systems it lives in: the
+        Postgres row (and cascaded chunks), its vectors in Qdrant, and the
+        PDF file on disk. Returns False without side effects if the document
+        doesn't exist."""
         doc = await self.kb_repo.get_pdf_by_id(pdf_id)
         if not doc:
             return False
-            
+
         # Delete from postgres
         await self.kb_repo.delete_pdf(pdf_id)
 
@@ -156,10 +188,12 @@ class KBApplicationService:
         # Remove file
         if os.path.exists(str(doc.pdf_path)):
             os.remove(str(doc.pdf_path))
-            
+
         return True
 
     async def get_ingestion_status(self, pdf_id: str) -> Optional[dict[str, Any]]:
+        """Return the latest ingestion task's status for a document, or
+        None if no ingestion task has been recorded for it."""
         task = await self.kb_repo.get_ingestion_task_by_doc_id(pdf_id)
         if not task:
             return None

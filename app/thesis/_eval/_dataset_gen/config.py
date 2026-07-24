@@ -1,21 +1,20 @@
 """Configuration for the dataset generation pipeline.
 
-Skripsi §3.2.1c defines a Generator–Evaluator architecture with a cost-conscious
-model selection (binary YES/NO or single-label judging does not need frontier
-reasoning models):
-    - Generator: DeepSeek (deepseek-v4-pro) — cheap, strong instruction-following
+Skripsi §3.2.1c defines a Generator–Evaluator architecture:
+    - Generator: DeepSeek — cheap, strong instruction-following
     - Panel (5 distinct labs, generator excluded to avoid self-eval bias), all
       verified live on OpenRouter: Gemini 2.5 Flash, Llama 3.3 70B, Qwen3.7
-      Plus, Mistral Large 2512, and GPT-5.6-Luna as a premium tie-breaker
-      voice (the other 4 are cheap; panel votes are short YES/NO/label
-      outputs so the tie-breaker's higher per-token rate adds negligible
-      absolute cost).
-    - Temperature: 0.0 (deterministic)
+      Plus, Nemotron 3 Super, and GPT-5.6-Luna.
+    - Temperature: 0.0 (deterministic), with upstream provider pinned — see
+      ``panel_allow_fallbacks``, since temperature alone is not enough for
+      reproducibility when a slug is served by several providers.
     - Acceptance threshold: ≥4/5 majority vote
 
 Model slugs must resolve on OpenRouter; an invalid slug fails closed (panel
-votes NO) and silently rejects every candidate. Verify with a live /models
-check before a full run.
+votes NO) and silently rejects every candidate. Run
+``python -m app.thesis._eval._dataset_gen.preflight`` before a full run — it
+resolves slugs, checks each model votes correctly in both directions, and
+reports which upstream provider served each call.
 
 NOTE: the "flash-lite"/"flash" (smallest) tier of a model family is not
 always reliable enough for judging tasks — during real generation runs,
@@ -67,46 +66,65 @@ class DatasetGenSettings(BaseSettings):
     )
 
     # --- Evaluator Panel ---
-    # 5 distinct-lab models (verified OpenRouter list prices, 2026-07-22):
-    #   google/gemini-2.5-flash               $0.30  / $2.50  per 1M tokens
-    #   meta-llama/llama-3.3-70b-instruct     $0.10  / $0.32  per 1M tokens
-    #   qwen/qwen3.7-plus                     $0.32  / $1.28  per 1M tokens
-    #   mistralai/mistral-small-3.2-24b-instruct $0.075/$0.20 per 1M tokens
-    #   openai/gpt-oss-20b                    $0.029 / $0.14  per 1M tokens
-    # Keeps the original panel size/quality (5 members, majority-of-4) —
-    # a 3-model panel of smaller checkpoints was tried and reverted: fewer,
-    # weaker raters isn't a good trade against the actual cost driver, which
-    # was specific expensive members, not panel size. Two swaps vs. the
-    # original default, both same-lab (keeps 5 distinct labs) and both real
-    # mid/large checkpoints, not downgrades to tiny ones:
-    #   - openai/gpt-5.6-luna ($1.00/$6.00, ~46% of panel cost alone)
-    #     → openai/gpt-oss-20b
-    #   - mistralai/mistral-large-2512 ($0.50/$1.50)
-    #     → mistralai/mistral-small-3.2-24b-instruct (not a reasoning/
-    #       thinking-toggle model, so no risk from this panel's
-    #       ``reasoning: {enabled: false}`` request being unsupported)
-    # Since each panel call's output is a single label word, INPUT price
-    # dominates cost, not output price — the panel's average input price
-    # drops from ~$0.44/M to ~$0.17/M (~63% lower) from these two swaps
-    # alone. Generator (deepseek) remains intentionally excluded to avoid
+    # 5 distinct-lab models (slugs and prices verified live against
+    # OpenRouter /models on 2026-07-22 via the preflight script):
+    #   google/gemini-2.5-flash              $0.30  / $2.50  per 1M tokens
+    #   meta-llama/llama-3.3-70b-instruct    $0.10  / $0.32  per 1M tokens
+    #   qwen/qwen3.7-plus                    $0.32  / $1.28  per 1M tokens
+    #   nvidia/nemotron-3-super-120b-a12b    $0.08  / $0.45  per 1M tokens
+    #   openai/gpt-5.6-luna                  $1.00  / $6.00  per 1M tokens
+    # Panel size stays 5 with a majority-of-4 threshold: a 3-model panel was
+    # tried and reverted as too volatile, and fewer/weaker raters is a poor
+    # trade against cost that is negligible at this scale anyway (the whole
+    # A-C regeneration is well under $1).
+    #
+    # This restores gpt-5.6-luna, which an earlier cost pass had swapped out
+    # for openai/gpt-oss-20b, and replaces the Mistral slot with Nemotron 3
+    # Super — a 120B MoE (12B active) at essentially the same price as the
+    # mistral-small-24b it replaces, so it is a straight capability gain.
+    # Blended input price is ~$0.36/M. Since each panel call's output is a
+    # single label word, INPUT price is what dominates cost.
+    #
+    # NOTE ON ORDER: position carries no meaning. EvaluatorPanel.evaluate
+    # gathers all five votes concurrently and counts them equally; there is
+    # no tie-breaker role in the code, whatever earlier revisions of this
+    # comment implied by calling a premium member a "tie-breaker voice".
+    #
+    # Generator (deepseek) remains intentionally excluded to avoid
     # self-evaluation bias.
     #
-    # Caveat carried over from the original panel selection: avoid gemini
-    # flash-lite specifically for judging (empirically unreliable — bare
-    # unexplained "NO" votes / empty responses from exhausted reasoning
-    # budget; plain "flash" has not shown this). gpt-oss uses OpenAI's own
-    # reasoning-effort semantics, which may not honor this panel's
-    # ``reasoning: {enabled: false}`` the same way Qwen3/Llama do — if it
-    # produces unreliable votes, the existing majority-of-4 threshold
-    # degrades gracefully (worst case, that member's vote just doesn't
-    # count) rather than corrupting results, but swap it for
-    # qwen/qwen3-32b (same reasoning-disable path already proven via
-    # qwen3.7-plus) if it turns out to misbehave.
+    # Caveats carried over: avoid gemini flash-**lite** for judging
+    # (empirically unreliable — bare unexplained "NO" votes / empty responses
+    # from an exhausted reasoning budget; plain "flash" has not shown this),
+    # and avoid ':free' variants, which are separately rate-limited. Any
+    # model that rejects this panel's ``reasoning: {enabled: false}`` request
+    # errors into a fail-closed NO vote on every call, so run
+    # ``python -m app.thesis._eval._dataset_gen.preflight`` before a full
+    # generation — it verifies each slug resolves and votes correctly in both
+    # directions, which is exactly the failure this comment keeps warning about.
     panel_models: str = Field(
-        default="google/gemini-2.5-flash,meta-llama/llama-3.3-70b-instruct,qwen/qwen3.7-plus,mistralai/mistral-small-3.2-24b-instruct,openai/gpt-oss-20b",
+        default="google/gemini-2.5-flash,meta-llama/llama-3.3-70b-instruct,qwen/qwen3.7-plus,nvidia/nemotron-3-super-120b-a12b,openai/gpt-5.6-luna",
         description=(
             "Comma-separated list of 5 distinct-lab panel models for majority "
             "voting. Generator (deepseek) intentionally excluded."
+        ),
+    )
+    panel_provider_order: str = Field(
+        default="",
+        description=(
+            "Optional comma-separated OpenRouter provider preference order for "
+            "panel calls (e.g. 'DeepInfra,Together'). Empty = let OpenRouter "
+            "choose, but still pin the choice per run via allow_fallbacks."
+        ),
+    )
+    panel_allow_fallbacks: bool = Field(
+        default=False,
+        description=(
+            "Whether OpenRouter may fall back to another upstream provider. "
+            "False by default: one slug can be served by several providers at "
+            "different quantizations, so temperature=0.0 alone does NOT make "
+            "the panel reproducible — a mid-run reroute silently changes the "
+            "rater. Set True only if pinning causes availability failures."
         ),
     )
     panel_temperature: float = Field(

@@ -1,5 +1,8 @@
 """
-Dependency injection for the KB domain.
+Dependency injection for the KB domain — the composition root that builds
+concrete adapters (``app/kb/infra/``) and wires them into the application
+services behind the domain's Protocol ports (``app/kb/domain/interfaces.py``).
+See ``docs/02-arsitektur.md`` §2.1 for the dependency-rule diagram.
 """
 
 from functools import lru_cache
@@ -21,6 +24,7 @@ from app.kb.application.kb_service import KBApplicationService
 from app.kb.domain.interfaces import IQueryExpander
 
 async def get_kb_repo(db: AsyncSession = Depends(get_db_session)) -> PostgresKBRepository:
+    """Provide ``IKBRepository`` (per-request, bound to the request's DB session)."""
     return PostgresKBRepository(db)
 
 # These four are process-lifetime singletons (not per-request factories):
@@ -31,6 +35,7 @@ async def get_kb_repo(db: AsyncSession = Depends(get_db_session)) -> PostgresKBR
 
 @lru_cache
 def get_vector_store() -> QdrantStore:
+    """Provide the process-lifetime ``IVectorStore`` singleton (Qdrant)."""
     config = get_qdrant_settings()
     return QdrantStore(
         host=config.host,
@@ -40,6 +45,8 @@ def get_vector_store() -> QdrantStore:
 
 @lru_cache
 def get_document_parser() -> UnstructuredClient:
+    """Provide the process-lifetime ``IDocumentParser`` singleton
+    (Unstructured, local or cloud per ``UnstructuredSettings.api_key``)."""
     config = get_unstructured_settings()
     return UnstructuredClient(
         base_url=config.base_url,
@@ -49,6 +56,8 @@ def get_document_parser() -> UnstructuredClient:
 
 @lru_cache
 def get_text_embedder() -> BGEM3Embeddings:
+    """Provide the process-lifetime ``ITextEmbedder`` singleton (in-process
+    BGE-M3 — see ``bge_m3_embeddings.py`` for why not Infinity)."""
     config = get_bge_m3_settings()
     return BGEM3Embeddings(
         model_name=config.model,
@@ -59,6 +68,8 @@ def get_text_embedder() -> BGEM3Embeddings:
 
 @lru_cache
 def get_reranker() -> Optional[InfinityReranker]:
+    """Provide the process-lifetime ``IReranker`` singleton (Infinity), or
+    None if reranking is disabled via ``KBInfinitySettings.reranker_enabled``."""
     config = get_infinity_settings()
     if not config.reranker_enabled:
         return None
@@ -123,6 +134,8 @@ async def get_ingest_worker(
     vstore: QdrantStore = Depends(get_vector_store),
     vlm_enricher: Optional[IVLMEnricher] = Depends(get_vlm_enricher),
 ) -> IngestWorker:
+    """Assemble a per-request ``IngestWorker`` from the process-lifetime
+    adapters plus VLM/storage settings."""
     storage_config = get_storage_settings()
     vlm_settings = get_vlm_settings()
     return IngestWorker(
@@ -144,6 +157,7 @@ async def get_kb_service(
     vstore: QdrantStore = Depends(get_vector_store),
     worker: IngestWorker = Depends(get_ingest_worker),
 ) -> KBApplicationService:
+    """Assemble a per-request ``KBApplicationService`` (admin CRUD + upload)."""
     config = get_storage_settings()
     return KBApplicationService(
         kb_repo=repo,
@@ -159,6 +173,10 @@ async def get_search_service(
     reranker: Optional[InfinityReranker] = Depends(get_reranker),
     query_expander: Optional[IQueryExpander] = Depends(get_query_expander),
 ) -> SearchService:
+    """Assemble a per-request ``SearchService`` for the 6-step retrieval
+    pipeline. ``query_expander`` resolves to None here unless
+    ``chat/dependency.py::get_query_expander`` has overridden the provider
+    to enable HyDE."""
     return SearchService(
         text_embedder=embedder,
         vector_store=vstore,

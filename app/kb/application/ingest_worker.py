@@ -65,6 +65,25 @@ class IngestWorker:
         page_extraction_prompt: str = VLM_PAGE_EXTRACTION_PROMPT,
         on_stage: Optional[Callable[[str, dict], None]] = None,
     ):
+        """Wire the pipeline's collaborators (all injected ports/adapters).
+
+        Args:
+            db: Async DB session, committed at each pipeline stage boundary
+                so partial progress survives a later failure.
+            document_parser: :class:`IDocumentParser` — PDF → elements.
+            text_embedder: :class:`ITextEmbedder` — children → dense+sparse.
+            vector_store: :class:`IVectorStore` — Qdrant upsert target.
+            kb_repo: :class:`IKBRepository` — Postgres persistence.
+            vlm_enricher: Optional VLM for figure/visual-page description;
+                None disables enrichment (figures are dropped or, in
+                fallback mode, heuristically described upstream).
+            image_dir: Directory for page images extracted during routing.
+            page_image_ratio_threshold: Passed through to :func:`classify_page`.
+            page_garbage_ratio_threshold: Passed through to :func:`classify_page`.
+            image_description_prompt: VLM prompt for single-figure enrichment.
+            page_extraction_prompt: VLM prompt for full-page VISUAL extraction.
+            on_stage: See the inline comment on ``self.on_stage`` below.
+        """
         self.db = db
         self.document_parser = document_parser
         self.text_embedder = text_embedder
@@ -84,6 +103,8 @@ class IngestWorker:
         self.on_stage = on_stage
 
     def _emit(self, stage: str, data: dict) -> None:
+        """Invoke ``self.on_stage`` (if configured) with a pipeline stage's
+        intermediate data; a no-op for normal (production) ingestion runs."""
         if self.on_stage is not None:
             self.on_stage(stage, data)
 
@@ -219,7 +240,7 @@ class IngestWorker:
 
         except Exception as e:
             await self.db.rollback()
-            logger.error("kb.ingest.failed", doc_id=doc_id, error=str(e))
+            logger.error("kb.ingest.failed", doc_id=doc_id, error=str(e), exc_info=True)
             try:
                 await self.kb_repo.update_ingestion_task(task.id, "failed", error_message=str(e))
                 pdf_doc = await self.kb_repo.get_pdf_by_id(doc_id)
@@ -308,6 +329,7 @@ class IngestWorker:
                     page_number=page_key,
                     image_ratio_threshold=self.page_image_ratio_threshold,
                     garbage_ratio_threshold=self.page_garbage_ratio_threshold,
+                    native_text_len=self._get_native_text_length(pdf_path, page_key),
                 )
                 pages_classified += 1
                 logger.debug(
@@ -583,6 +605,49 @@ class IngestWorker:
             },
             content_type=ContentType.FIGURE,
         )
+
+    def _get_native_text_length(
+        self,
+        pdf_path: str,
+        page_number: int,
+    ) -> Optional[int]:
+        """Length of a PDF page's native (embedded) text layer via PyMuPDF.
+
+        Feeds ``classify_page``'s scan-only detection (see
+        ``NATIVE_TEXT_LEN_THRESHOLD``) — near-zero native text combined with
+        at least one image element is a much more reliable scan-only signal
+        than Unstructured's per-element garbage-OCR ratio, which misses
+        pages where Unstructured's own OCR pass emits mis-read-but-real-word
+        text as separate text elements rather than as the image's text.
+
+        Args:
+            pdf_path: Path to the source PDF.
+            page_number: 1-indexed page number.
+
+        Returns:
+            Character count of the page's native text, or ``None`` if the
+            PDF couldn't be opened or the page is out of range (classify_page
+            treats ``None`` as "signal unavailable", not "zero text").
+        """
+        try:
+            import fitz  # PyMuPDF
+
+            doc = fitz.open(pdf_path)
+            page_idx = max(0, page_number - 1)
+            if page_idx >= len(doc):
+                doc.close()
+                return None
+
+            text_len = len(doc[page_idx].get_text())
+            doc.close()
+            return text_len
+        except Exception as exc:
+            logger.warning(
+                "kb.ingest.native_text_length_failed",
+                page=page_number,
+                error=str(exc),
+            )
+            return None
 
     def _extract_page_image(
         self,

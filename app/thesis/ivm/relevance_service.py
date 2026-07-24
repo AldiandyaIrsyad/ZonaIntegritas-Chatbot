@@ -26,11 +26,21 @@ class IrrelevantQueryException(RelevanceException):
 class RelevanceService:
     """Validates that queries and documents are in-domain for the knowledge base.
 
+    Depends only on the ``IRelevanceChecker`` Protocol, so it stays part of
+    the infra-free ``thesis`` research core (see ``docs/02-arsitektur.md``
+    §2.2). Wired in ``app/chat/dependency.py::get_relevance_service``.
+
     Args:
         relevance_checker (IRelevanceChecker): The active OOD-check backend.
     """
 
     def __init__(self, relevance_checker: IRelevanceChecker):
+        """Args:
+            relevance_checker: The active OOD-check backend (one of the
+                ``IRelevanceChecker`` implementations in
+                ``app/thesis/ivm/checkers.py``, selected by
+                ``app/chat/dependency.py::get_relevance_checker``).
+        """
         self.relevance_checker = relevance_checker
 
     async def check_relevance(

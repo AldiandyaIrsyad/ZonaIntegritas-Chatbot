@@ -14,8 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.db import get_db_session
 from app.chat.config import get_chat_config
-from app.chat.infra import LLMConnection, PromptGuardClient, NLIClient, PostgresChatRepository
+from app.chat.infra import LLMConnection, PromptGuardClient, NLIClient, PostgresChatRepository, PdfTextExtractor
 from app.chat.infra.hyde_expander import HyDEExpander
+from app.chat.application.attachment_service import AttachmentService
 from app.chat.application.chat_service import ChatService
 from app.kb.dependency import (
     get_kb_repo,
@@ -32,31 +33,83 @@ from app.thesis.ivm.checkers import (
     NliEntailmentRelevanceChecker,
     SimilarityThresholdRelevanceChecker,
 )
-from app.thesis.ivm.interfaces import IRelevanceChecker
+from app.chat.infra.qwen3guard_client import Qwen3GuardClient
+from app.thesis.ivm.interfaces import IRelevanceChecker, ISafetyModel
 from app.thesis.ivm.judge import LLMJudge
 from app.thesis.ivm.relevance_service import RelevanceService
 from app.thesis.ivm.service import IVMService
 from app.thesis.ram.service import RAMService
 
 async def get_chat_repo(db: AsyncSession = Depends(get_db_session)) -> PostgresChatRepository:
+    """Provides ``IChatRepository`` via Postgres, bound to the request-scoped DB session."""
     return PostgresChatRepository(db)
 
 def get_llm_connection() -> LLMConnection:
+    """Provides ``ILLMConnection`` — a fresh OpenAI-compatible client per call (not cached),
+    pointed at ``ChatConfig``'s configured LLM backend."""
     config = get_chat_config()
     return LLMConnection(base_url=config.llm_base_url, api_key=config.llm_api_key)
 
 def get_prompt_guard_client() -> PromptGuardClient:
+    """Provides the local Prompt Guard adapter.
+
+    Points at ``prompt_guard_url`` — the dedicated guard server — rather than
+    the shared inference server, so swapping the off-the-shelf classifier for
+    its Indonesian fine-tune restarts one small container instead of reloading
+    the reranker and NLI models alongside it.
+    """
     config = get_chat_config()
-    return PromptGuardClient(base_url=config.infinity_url, model=config.prompt_guard_model, security_threshold=config.security_threshold)
+    return PromptGuardClient(
+        base_url=config.prompt_guard_url,
+        model=config.prompt_guard_model,
+        security_threshold=config.security_threshold,
+    )
+
+def get_safety_model() -> ISafetyModel:
+    """Provides ``ISafetyModel`` (IVM), selected by ``ChatConfig.safety_backend``.
+
+    Mirrors ``get_relevance_checker``: one environment variable swaps the
+    adapter, so the off-the-shelf classifier, its Indonesian fine-tune (same
+    adapter, different ``prompt_guard_model``) and a hosted generative guard can
+    be compared without a code change.
+    """
+    config = get_chat_config()
+
+    if config.safety_backend == "qwen3guard":
+        return Qwen3GuardClient(
+            base_url=config.safety_api_base_url,
+            api_key=config.safety_api_key,
+            model=config.safety_api_model,
+            controversial_is_unsafe=config.safety_controversial_is_unsafe,
+        )
+
+    return get_prompt_guard_client()
 
 def get_nli_client() -> NLIClient:
+    """Provides ``INLIModel`` (RAM) via the Infinity-hosted NLI model."""
     config = get_chat_config()
     return NLIClient(base_url=config.infinity_url, model=config.nli_model)
 
 def get_ivm_service(
-    safety_client: PromptGuardClient = Depends(get_prompt_guard_client)
+    safety_client: ISafetyModel = Depends(get_safety_model)
 ) -> IVMService:
+    """Provides the IVM application service (safety gate) wrapping ``get_safety_model``."""
     return IVMService(safety_model=safety_client)
+
+def get_pdf_text_extractor() -> PdfTextExtractor:
+    """Provides ``IAttachmentExtractor`` via PyMuPDF, sized from ``ChatConfig``'s attachment limits."""
+    config = get_chat_config()
+    return PdfTextExtractor(
+        max_pages=config.attachment_max_pages,
+        max_chars=config.attachment_max_chars,
+    )
+
+def get_attachment_service(
+    extractor: PdfTextExtractor = Depends(get_pdf_text_extractor),
+    ivm_service: IVMService = Depends(get_ivm_service),
+) -> AttachmentService:
+    """Provides the application service handling chat PDF upload extraction + safety-checking."""
+    return AttachmentService(extractor=extractor, ivm_service=ivm_service)
 
 def get_relevance_checker(
     nli_client: NLIClient = Depends(get_nli_client),
@@ -92,6 +145,7 @@ def get_relevance_checker(
 def get_relevance_service(
     checker: IRelevanceChecker = Depends(get_relevance_checker),
 ) -> RelevanceService:
+    """Provides the IVM application service (topical/OOD relevance gate) wrapping ``get_relevance_checker``."""
     return RelevanceService(relevance_checker=checker)
 
 def get_query_expander(
@@ -123,6 +177,7 @@ def get_ram_service(
     nli_client: NLIClient = Depends(get_nli_client),
     reranker: Optional[InfinityReranker] = Depends(get_reranker)
 ) -> RAMService:
+    """Provides the RAM application service (per-sentence citation/hallucination assessment)."""
     if reranker is None:
         raise RuntimeError("Reranker is required for RAMService.")
     return RAMService(
@@ -155,6 +210,7 @@ async def get_chat_service(
     relevance_service: RelevanceService = Depends(get_relevance_service),
     ram_service: RAMService = Depends(get_ram_service)
 ) -> ChatService:
+    """Provides ``ChatService``, the top-level application service assembling all chat-pipeline collaborators."""
     config = get_chat_config()
     return ChatService(
         chat_repo=chat_repo,
@@ -166,4 +222,5 @@ async def get_chat_service(
         model_name=config.llm_model,
         system_prompt=config.system_prompt,
         temperature=config.llm_temperature,
+        attachment_search_excerpt_chars=config.attachment_search_excerpt_chars,
     )

@@ -1,4 +1,8 @@
-"""Unstructured API document parser adapter."""
+"""Unstructured API document parser adapter.
+
+Fulfills: ``app/kb/domain/interfaces.py::IDocumentParser``.
+Wired in: ``app/kb/dependency.py::get_document_parser``.
+"""
 
 import os
 import time
@@ -15,7 +19,11 @@ from app.thesis.chunking.models import ParsedElement
 logger = structlog.get_logger(__name__)
 
 class UnstructuredClient(IDocumentParser):
-    """HTTP adapter for the unstructured-api container.
+    """HTTP adapter for the unstructured-api container (local Docker) or
+    Unstructured Platform (cloud, job-based), selected by whether ``api_key``
+    is set.
+
+    Fulfills: ``app/kb/domain/interfaces.py::IDocumentParser``.
 
     When ``extract_images=True``, the parser sends
     ``extract_image_block_types=["Image", "Table"]`` to the unstructured
@@ -24,6 +32,15 @@ class UnstructuredClient(IDocumentParser):
     """
 
     def __init__(self, base_url: str, extract_images: bool = True, api_key: str = "") -> None:
+        """Configure the HTTP client for either local or cloud Unstructured.
+
+        Args:
+            base_url: Base URL of the unstructured-api container, or the
+                Unstructured Platform API when ``api_key`` is set.
+            extract_images: Whether to request Image/Table block extraction.
+            api_key: Unstructured Cloud API key; empty string selects the
+                local self-hosted parsing path instead.
+        """
         headers: dict[str, str] = {"accept": "application/json"}
         if api_key:
             # Unstructured API uses a custom header, not Authorization: Bearer
@@ -43,6 +60,13 @@ class UnstructuredClient(IDocumentParser):
         )
 
     async def parse_pdf(self, file_path: str) -> List[ParsedElement]:
+        """Parse a PDF into typed elements via local or cloud Unstructured
+        (dispatched on whether an API key was configured).
+
+        Image elements are kept even with empty text (for later VLM
+        enrichment); Table elements prefer ``text_as_html`` over plain text
+        when available; any other element with empty text is dropped.
+        """
         resolved = os.path.realpath(file_path)
         if not os.path.isfile(resolved):
             raise FileNotFoundError(f"PDF not found: {resolved!r}")
@@ -73,7 +97,7 @@ class UnstructuredClient(IDocumentParser):
         table_count = 0
 
         for elem in raw_output:
-            text = elem.get("text", "").strip()
+            text = (elem.get("text") or "").strip()
 
             elem_type = elem.get("type", "UncategorizedText")
             metadata = elem.get("metadata") or {}
@@ -279,4 +303,5 @@ class UnstructuredClient(IDocumentParser):
         return response
 
     async def close(self) -> None:
+        """Release the underlying HTTP client."""
         await self._client.aclose()

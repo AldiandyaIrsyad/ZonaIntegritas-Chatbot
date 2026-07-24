@@ -426,11 +426,12 @@ class TestBertScore:
     """Tests for bert_score_f1() — only tests fallback behavior."""
 
     def test_empty_inputs(self) -> None:
-        """Empty inputs → (0, 0, 0)."""
-        p, r, f1 = bert_score_f1([], [])
+        """Empty inputs → (0, 0, 0, [])."""
+        p, r, f1, f1_per_example = bert_score_f1([], [])
         assert p == 0.0
         assert r == 0.0
         assert f1 == 0.0
+        assert f1_per_example == []
 
     def test_length_mismatch_raises(self) -> None:
         """Mismatched lengths should raise."""

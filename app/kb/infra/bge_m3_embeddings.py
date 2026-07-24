@@ -1,13 +1,18 @@
 """In-process BGE-M3 dense+sparse embedding adapter.
 
-Infinity (the other embedding/reranking server this app uses, see
-``infinity_embeddings.py``) documents ``BAAI/bge-m3`` as dense-only in its
-own model list ("no sparse") — this is a server limitation, not a
-misconfiguration (confirmed against open, unresolved upstream GitHub issues
-on the Infinity project). This adapter replaces Infinity for embeddings
-specifically, using BAAI's own reference implementation
-(``FlagEmbedding.BGEM3FlagModel``), which is the only path that actually
-computes BGE-M3's lexical (sparse) weights alongside the dense vector.
+Runs BGE-M3 in-process rather than over HTTP via Infinity (the other
+embedding/reranking server this app uses, see ``infinity_embeddings.py``):
+Infinity's own model list documents ``BAAI/bge-m3`` as dense-only ("no
+sparse") — this is a server limitation, not a misconfiguration (confirmed
+against open, unresolved upstream GitHub issues on the Infinity project).
+This adapter replaces Infinity for embeddings specifically, using BAAI's own
+reference implementation (``FlagEmbedding.BGEM3FlagModel``), which is the
+only path that actually computes BGE-M3's lexical (sparse) weights alongside
+the dense vector. See ``docs/02-arsitektur.md`` §2.1 for the broader
+architecture context.
+
+Fulfills: ``app/kb/domain/interfaces.py::ITextEmbedder``.
+Wired in: ``app/kb/dependency.py::get_text_embedder``.
 """
 
 import asyncio
@@ -58,7 +63,10 @@ def _load_model(model_name: str, use_fp16: bool, device: str):
 
 
 class BGEM3Embeddings(ITextEmbedder):
-    """Dense + sparse text embedding adapter backed by an in-process BGE-M3."""
+    """Dense + sparse text embedding adapter backed by an in-process BGE-M3.
+
+    Fulfills: ``app/kb/domain/interfaces.py::ITextEmbedder``.
+    """
 
     def __init__(
         self,
@@ -67,6 +75,8 @@ class BGEM3Embeddings(ITextEmbedder):
         use_fp16: bool = True,
         batch_size: int = 12,
     ) -> None:
+        """Store model config; the model itself is loaded lazily (and once
+        per process) by :func:`_load_model` on first ``embed_texts`` call."""
         self.model_name = model_name
         self.device = device
         self.use_fp16 = use_fp16
@@ -79,6 +89,9 @@ class BGEM3Embeddings(ITextEmbedder):
         )
 
     async def embed_texts(self, texts: List[str]) -> List[EmbeddingResult]:
+        """Encode texts via the shared BGE-M3 model, returning dense vectors
+        and lexical (sparse) weights for each. Retries once-transient CUDA
+        OOM through :data:`_cuda_oom_retry` on the inner :meth:`_encode` call."""
         if not texts:
             return []
 

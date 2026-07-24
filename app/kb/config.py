@@ -6,6 +6,8 @@ from app.thesis.chunking.page_classifier import VLM_PAGE_EXTRACTION_PROMPT
 from app.thesis.vlm.client import DEFAULT_VLM_PROMPT
 
 class QdrantSettings(BaseSettings):
+    """Connection settings for the Qdrant vector store (``QdrantStore``)."""
+
     host: str = Field(default="127.0.0.1")
     port: int = Field(default=6333)
     grpc_port: int = Field(default=6334)
@@ -17,6 +19,9 @@ def get_qdrant_settings() -> QdrantSettings: return QdrantSettings()
 
 
 class UnstructuredSettings(BaseSettings):
+    """Connection/auth settings for ``UnstructuredClient`` (local Docker
+    unstructured-api when ``api_key`` is empty, Unstructured Cloud otherwise)."""
+
     base_url: str = Field(default="http://localhost:8001")
     port: int = Field(default=8001)
     api_key: str = Field(
@@ -33,6 +38,8 @@ class UnstructuredSettings(BaseSettings):
 def get_unstructured_settings() -> UnstructuredSettings: return UnstructuredSettings()
 
 class KBStorageSettings(BaseSettings):
+    """Filesystem locations for uploaded PDFs and extracted page images."""
+
     upload_dir: str = Field(default="./uploads/knowledge_base")
     image_dir: str = Field(
         default="./uploads/knowledge_base/images",
@@ -45,6 +52,10 @@ def get_storage_settings() -> KBStorageSettings: return KBStorageSettings()
 
 # KB only cares about Infinity's embedding and reranking features
 class KBInfinitySettings(BaseSettings):
+    """Infinity server settings as seen from the KB context — only the
+    reranking model/toggle is actually used here (embeddings run in-process
+    via ``BGEM3Embeddings`` instead, see that module's docstring)."""
+
     base_url: str = Field(default="http://127.0.0.1:7997")
     embedding_model: str = Field(default="BAAI/bge-m3")
     reranker_model: str = Field(default="BAAI/bge-reranker-v2-m3")

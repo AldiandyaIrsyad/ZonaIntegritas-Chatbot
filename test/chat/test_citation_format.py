@@ -5,8 +5,8 @@ Verifies that ``_format_citation()`` produces the canonical citation format
 with and without source/page/doc_id information.
 
 Canonical format:
-    *(Supported: 0.92; Pedoman ZI UPI; Page 12; DocID:doc-123)*
-    *(Contradiction: 0.88; Pedoman ZI UPI; Page 12; DocID:doc-123)*
+    *(Supported: 0.92; Pedoman Rektor UPI; Page 12; DocID:doc-123)*
+    *(Contradiction: 0.88; Pedoman Rektor UPI; Page 12; DocID:doc-123)*
 
 Neutral (and any unrecognized label) results produce no marker at all.
 """
@@ -28,7 +28,7 @@ def _make_nli_result(
     entailment_score: float = 0.92,
     contradiction_score: float = 0.05,
     neutral_score: float = 0.03,
-    source_title: str = "Pedoman ZI UPI",
+    source_title: str = "Pedoman Rektor UPI",
     page: Optional[int] = 12,
     doc_id: str = "doc-123",
     evidence_snippet: str = "",
@@ -54,13 +54,13 @@ class TestFormatCitation:
         result = _make_nli_result(
             label="entailment",
             entailment_score=0.92,
-            source_title="Pedoman ZI UPI",
+            source_title="Pedoman Rektor UPI",
             page=12,
         )
         citation = ChatService._format_citation(result)
         assert "Supported" in citation
         assert "0.92" in citation
-        assert "Pedoman ZI UPI" in citation
+        assert "Pedoman Rektor UPI" in citation
         assert "Page 12" in citation
 
     def test_contradiction_with_source_and_page(self) -> None:
@@ -69,13 +69,13 @@ class TestFormatCitation:
             label="contradiction",
             entailment_score=0.05,
             contradiction_score=0.88,
-            source_title="Pedoman ZI UPI",
+            source_title="Pedoman Rektor UPI",
             page=5,
         )
         citation = ChatService._format_citation(result)
         assert "Contradiction" in citation
         assert "0.88" in citation
-        assert "Pedoman ZI UPI" in citation
+        assert "Pedoman Rektor UPI" in citation
         assert "Page 5" in citation
 
     def test_neutral_returns_empty(self) -> None:
@@ -85,7 +85,7 @@ class TestFormatCitation:
             entailment_score=0.10,
             contradiction_score=0.15,
             neutral_score=0.75,
-            source_title="Pedoman ZI UPI",
+            source_title="Pedoman Rektor UPI",
             page=3,
         )
         citation = ChatService._format_citation(result)
@@ -111,13 +111,13 @@ class TestFormatCitation:
         result = _make_nli_result(
             label="entailment",
             entailment_score=0.85,
-            source_title="Pedoman ZI",
+            source_title="Pedoman Rektor",
             page=None,
         )
         citation = ChatService._format_citation(result)
         assert "Supported" in citation
         assert "0.85" in citation
-        assert "Pedoman ZI" in citation
+        assert "Pedoman Rektor" in citation
         assert "Page" not in citation
 
     def test_without_source_and_page(self) -> None:
@@ -138,7 +138,7 @@ class TestFormatCitation:
         result = _make_nli_result(
             label="entailment",
             entailment_score=0.90,
-            source_title="Pedoman ZI UPI",
+            source_title="Pedoman Rektor UPI",
             page=12,
             doc_id="abc-123",
         )
@@ -150,7 +150,7 @@ class TestFormatCitation:
         result = _make_nli_result(
             label="entailment",
             entailment_score=0.90,
-            source_title="Pedoman ZI UPI",
+            source_title="Pedoman Rektor UPI",
             page=12,
             doc_id="",
         )
@@ -201,7 +201,7 @@ class TestFormatCitation:
         result = _make_nli_result(
             label="entailment",
             entailment_score=0.90,
-            source_title="Pedoman ZI UPI",
+            source_title="Pedoman Rektor UPI",
             page=12,
             doc_id="abc-123",
             evidence_snippet="Permohonan diajukan melalui portal.",
@@ -217,7 +217,7 @@ class TestFormatCitation:
         result = _make_nli_result(
             label="entailment",
             entailment_score=0.90,
-            source_title="Pedoman ZI UPI",
+            source_title="Pedoman Rektor UPI",
             page=12,
             evidence_snippet="",
         )

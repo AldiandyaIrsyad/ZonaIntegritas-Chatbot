@@ -61,6 +61,7 @@ import asyncio
 import csv
 import random
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -75,8 +76,9 @@ from app.thesis._eval._dataset_gen.build_subset_d import (
 )
 from app.thesis._eval._dataset_gen.concordance import BlindInjectionTracker
 from app.thesis._eval._dataset_gen.config import DatasetGenSettings, get_dataset_gen_settings
-from app.thesis._eval._dataset_gen.generator import DatasetGenerator
+from app.thesis._eval._dataset_gen.generator import DatasetGenerator, parse_json_object
 from app.thesis._eval._dataset_gen.panel import EvaluatorPanel
+from app.thesis._eval._dataset_gen.provenance import write_provenance
 from app.thesis._eval._shared.dataset import load_subset_a, load_subset_c
 
 logger = structlog.get_logger(__name__)
@@ -177,21 +179,24 @@ async def generate_detail_questions(
     doc_cycle = list(docs)
     random.shuffle(doc_cycle)
 
+    attempts = 0
+    max_attempts = max(3 * n, 30)  # cap so a parse regression can't loop the whole corpus
     for doc in doc_cycle:
-        if len(questions) >= n:
+        if len(questions) >= n or attempts >= max_attempts:
             break
         doc_text = await fetch_document_text(api_url, doc.get("id", ""), doc.get("title", ""))
         if not doc_text:
             continue
+        attempts += 1
         seed_prompt = f"Document excerpt:\n\n{doc_text[:3000]}\n\nGenerate 1 precise-detail-recall question."
         try:
-            drafts = await generator.generate(seed_prompt=seed_prompt, count=1, system_prompt=DETAIL_SYSTEM_PROMPT)
+            raw = await generator.generate_single(prompt=seed_prompt, system_prompt=DETAIL_SYSTEM_PROMPT)
         except Exception as e:
             logger.error("datagen.subset_d_hard.detail_generator_error", error=str(e), exc_info=True)
             continue
-        for draft in drafts:
-            if isinstance(draft.parsed, dict) and draft.parsed.get("question", "").strip():
-                questions.append(draft.parsed["question"].strip())
+        obj = parse_json_object(raw)
+        if obj and str(obj.get("question", "")).strip():
+            questions.append(str(obj["question"]).strip())
 
     return questions[:n]
 
@@ -222,21 +227,24 @@ async def generate_evaluative_questions(
     doc_cycle = list(docs)
     random.shuffle(doc_cycle)
 
+    attempts = 0
+    max_attempts = max(3 * n, 30)
     for doc in doc_cycle:
-        if len(questions) >= n:
+        if len(questions) >= n or attempts >= max_attempts:
             break
         doc_text = await fetch_document_text(api_url, doc.get("id", ""), doc.get("title", ""))
         if not doc_text:
             continue
+        attempts += 1
         seed_prompt = f"Document excerpt:\n\n{doc_text[:3000]}\n\nGenerate 1 evaluative/rationale-eliciting question."
         try:
-            drafts = await generator.generate(seed_prompt=seed_prompt, count=1, system_prompt=EVALUATIVE_SYSTEM_PROMPT)
+            raw = await generator.generate_single(prompt=seed_prompt, system_prompt=EVALUATIVE_SYSTEM_PROMPT)
         except Exception as e:
             logger.error("datagen.subset_d_hard.evaluative_generator_error", error=str(e), exc_info=True)
             continue
-        for draft in drafts:
-            if isinstance(draft.parsed, dict) and draft.parsed.get("question", "").strip():
-                questions.append(draft.parsed["question"].strip())
+        obj = parse_json_object(raw)
+        if obj and str(obj.get("question", "")).strip():
+            questions.append(str(obj["question"]).strip())
 
     return questions[:n]
 
@@ -266,26 +274,29 @@ async def generate_crossdoc_questions(
     random.shuffle(pairs)
     pair_iter = [(pairs[i], pairs[i + 1]) for i in range(0, len(pairs) - 1, 2)]
 
+    attempts = 0
+    max_attempts = max(3 * n, 30)
     for doc_a, doc_b in pair_iter:
-        if len(questions) >= n:
+        if len(questions) >= n or attempts >= max_attempts:
             break
         text_a = await fetch_document_text(api_url, doc_a.get("id", ""), doc_a.get("title", ""))
         text_b = await fetch_document_text(api_url, doc_b.get("id", ""), doc_b.get("title", ""))
         if not text_a or not text_b:
             continue
+        attempts += 1
         seed_prompt = (
             f"--- DOCUMENT A ---\n{text_a[:1500]}\n\n"
             f"--- DOCUMENT B ---\n{text_b[:1500]}\n\n"
             "Generate 1 cross-document synthesis question."
         )
         try:
-            drafts = await generator.generate(seed_prompt=seed_prompt, count=1, system_prompt=CROSSDOC_SYSTEM_PROMPT)
+            raw = await generator.generate_single(prompt=seed_prompt, system_prompt=CROSSDOC_SYSTEM_PROMPT)
         except Exception as e:
             logger.error("datagen.subset_d_hard.crossdoc_generator_error", error=str(e), exc_info=True)
             continue
-        for draft in drafts:
-            if isinstance(draft.parsed, dict) and draft.parsed.get("question", "").strip():
-                questions.append(draft.parsed["question"].strip())
+        obj = parse_json_object(raw)
+        if obj and str(obj.get("question", "")).strip():
+            questions.append(str(obj["question"]).strip())
 
     return questions[:n]
 
@@ -353,7 +364,7 @@ async def process_question(
     # Shares label_sentence with build_subset_d.py so both scripts get the
     # same fragment filter (M8), chunk narrowing (cost + quality), and
     # accept/dispute/drop plurality-fallback logic (M5) — see
-    # writing/weekend_fixes_plan.md.
+    # writing/overhaul.md.
     panel_session_id = f"subset-d-hard-{question_id}"
     for sent_idx, sentence in enumerate(sentences):
         row, status, unanimous = await label_sentence(
@@ -506,6 +517,22 @@ async def build_subset_d_hard(
         writer.writeheader()
         writer.writerows(accepted_items)
 
+    write_provenance(
+        output_path,
+        subset="d_hard",
+        settings=settings,
+        row_count=len(accepted_items),
+        extra={
+            "source_subset_a": subset_a_path,
+            "source_subset_c": subset_c_path,
+            "questions_processed": len(questions_by_source),
+            "by_hardening_source": dict(source_counters),
+            "sentences_rejected": total_rejected,
+            # See the note in build_subset_d — same regeneration sanity check.
+            "label_distribution": Counter(r.get("label", "") for r in accepted_items),
+        },
+    )
+
     logger.info(
         "datagen.subset_d_hard.complete",
         questions_processed=len(questions_by_source),
@@ -517,9 +544,24 @@ async def build_subset_d_hard(
 
 
 def main() -> None:
-    """Entry point for Subset D-Hard generation."""
+    """Entry point for Subset D-Hard generation.
+
+    DEPRECATED as a standalone builder. The question-hardening this produced only
+    hardened the *question*, which a well-grounded pipeline still answers
+    faithfully — the committed build was 95% ``supported`` with zero
+    ``partially_supported``. Subset D is now built by ``build_subset_d.py``, which
+    imports the question generators below for its natural backbone and adds a
+    panel-verified counterfactual-perturbation core. This entry point is retained
+    only so the generators remain importable; do not run it to produce a dataset.
+    """
+    print(
+        "DEPRECATED: run `python -m app.thesis._eval._dataset_gen.build_subset_d` "
+        "instead — the hard Subset D is now a single file (natural backbone + "
+        "verified perturbation core). This script's generators are reused there.",
+        file=sys.stderr,
+    )
     parser = argparse.ArgumentParser(
-        description="Build Subset D-Hard (Adversarial RAM Ground Truth) using harder input questions."
+        description="[DEPRECATED] Build Subset D-Hard — use build_subset_d instead."
     )
     parser.add_argument("--api-url", default="http://localhost:8000", help="Base URL of the running application")
     parser.add_argument("--subset-a", default="data/subset_a.csv", help="Path to Subset A CSV")

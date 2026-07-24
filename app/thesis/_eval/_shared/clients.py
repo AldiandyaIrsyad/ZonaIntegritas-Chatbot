@@ -132,7 +132,7 @@ def _select_relevant_chunk(premise: str, hypothesis: str, max_chars: int) -> str
     fell through to a blind ``premise[:max_chars]`` — on Subset D's
     15k-22k-char contexts that means the NLI model only ever saw the
     first ~10% of the context, regardless of which part actually supports
-    the hypothesis (see ``writing/weekend_fixes_plan.md`` M7/M22).
+    the hypothesis (see ``writing/overhaul.md`` M7/M22).
 
     This instead splits on blank lines (the real, if imperfect, boundary —
     chunk text can itself contain a blank line, so this is a heuristic,
@@ -343,24 +343,33 @@ class EvalLLMClient:
     - LLM-as-Judge relevance evaluation (Exp 1b)
     - End-to-end generation (Exp 4)
 
+    Requests are pinned to a single upstream provider, for the same reason the
+    dataset-generation panel is (see ``_dataset_gen/panel.py``): one model slug
+    can be served by several providers at different quantizations, so
+    ``temperature=0.0`` alone does not make a result reproducible. A mid-run
+    reroute silently changes the system under measurement — which matters most
+    here, where the whole point of the Exp1a baseline row is to characterise one
+    named model.
+
     Args:
         base_url: API base URL.
         api_key: API key.
         model: Default model identifier.
-        session_id: Default OpenRouter sticky-routing session id (optional,
-            per-call ``session_id`` overrides it). OpenRouter routes requests
-            sharing a ``session_id`` to the same upstream inference provider,
-            which is what lets automatic prompt caching (supported natively
-            by DeepSeek, OpenAI, Gemini 2.5, and others — see
-            ``writing/weekend_fixes_plan.md`` §2) actually hit on repeated
-            calls that share a prefix (e.g. the same system prompt across
-            all Exp1a rows, or the same question+response prefix across all
-            of one question's per-sentence panel calls in dataset_gen).
-            NOTE: this is deliberately *not* provider-order pinning
-            (``provider.order`` / ``provider.only``) — OpenRouter's own docs
-            state manual provider ordering actively disables sticky routing,
-            so the two mechanisms are mutually exclusive; ``session_id`` is
-            the correct one for caching.
+        provider_order: Comma-separated OpenRouter provider slugs to prefer, in
+            order. Empty means no explicit preference, but fallbacks stay off.
+        allow_fallbacks: Whether OpenRouter may reroute to another provider.
+            Defaults to False so a run fails visibly rather than quietly
+            measuring a different deployment.
+        session_id: Accepted for call-site compatibility but **not sent**. It
+            was introduced on the belief that it enabled provider-side prompt
+            caching, and a cost claim rested on that. Measured directly
+            (2026-07-22, gemini-2.5-flash, 6 identical calls per condition on a
+            fresh prefix, the ``session_id`` condition run first so it could not
+            inherit a warm cache): 3/6 cache hits with it, 2/6 without. Caching
+            is automatic and prefix-driven. OpenRouter silently drops parameters
+            it does not recognise, so sending it never errored and the belief
+            went unchallenged. Reproduce with
+            ``preflight.py --check-session-id``.
     """
 
     def __init__(
@@ -368,10 +377,13 @@ class EvalLLMClient:
         base_url: str,
         api_key: str,
         model: str,
+        provider_order: str = "",
+        allow_fallbacks: bool = False,
         session_id: Optional[str] = None,
     ) -> None:
         self._model = model
-        self._session_id = session_id
+        self._provider_order = [p.strip() for p in provider_order.split(",") if p.strip()]
+        self._allow_fallbacks = allow_fallbacks
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             headers={"Authorization": f"Bearer {api_key}"},
@@ -382,6 +394,36 @@ class EvalLLMClient:
     def model(self) -> str:
         """The default model identifier this client was configured with."""
         return self._model
+
+    def _provider_payload(self) -> Dict[str, Any]:
+        """Build the OpenRouter provider-routing block."""
+        provider: Dict[str, Any] = {"allow_fallbacks": self._allow_fallbacks}
+        if self._provider_order:
+            provider["order"] = self._provider_order
+        return provider
+
+    @staticmethod
+    def _disable_qwen_thinking(model: str, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Append Qwen's ``/no_think`` so reasoning models return a clean verdict.
+
+        The same fix as ``LLMConnection._suppress_thinking`` but for the eval
+        client, which calls OpenRouter directly: qwen3 ignores
+        ``reasoning={"enabled": False}``, so without this the safety baseline
+        and relevance judge get an empty or reasoning-contaminated response that
+        ``parse_verdict`` classifies as INDETERMINATE for every row (measured:
+        qwen3-14b/32b returned zero parseable verdicts -> empty predictions ->
+        crash). Scoped to qwen so a stray control token never reaches deepseek etc.
+        """
+        if "qwen" not in model.lower():
+            return messages
+        patched = list(messages)
+        for i in range(len(patched) - 1, -1, -1):
+            if patched[i].get("role") == "user":
+                content = patched[i].get("content", "")
+                if "/no_think" not in content:
+                    patched[i] = {**patched[i], "content": f"{content.rstrip()} /no_think"}
+                break
+        return patched
 
     async def chat(
         self,
@@ -398,25 +440,27 @@ class EvalLLMClient:
             model: Override model (defaults to self._model).
             temperature: Sampling temperature.
             max_tokens: Maximum tokens to generate.
-            session_id: Override the client's default sticky-routing
-                session id for this call (see class docstring).
+            session_id: Accepted and ignored (see class docstring).
 
         Returns:
             The assistant's response text.
         """
+        target_model = model or self._model
         payload: Dict[str, Any] = {
-            "model": model or self._model,
-            "messages": messages,
+            "model": target_model,
+            "messages": self._disable_qwen_thinking(target_model, messages),
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "reasoning": {"enabled": False},
+            "provider": self._provider_payload(),
         }
-        sid = session_id or self._session_id
-        if sid:
-            payload["session_id"] = sid
         response = await self._client.post("/chat/completions", json=payload)
         response.raise_for_status()
         data = response.json()
-        return data["choices"][0]["message"]["content"]
+        message = data["choices"][0]["message"]
+        # Fall back to the reasoning field only if content is empty (some models
+        # can't disable thinking); with /no_think on qwen, content is populated.
+        return message.get("content") or message.get("reasoning") or ""
 
     async def stream_chat(
         self,
@@ -431,22 +475,20 @@ class EvalLLMClient:
             model: Model identifier.
             messages: List of message dicts.
             max_tokens: Maximum tokens to generate.
-            session_id: Override the client's default sticky-routing
-                session id for this call (see class docstring).
+            session_id: Accepted and ignored (see class docstring).
 
         Yields:
             Text chunks as they arrive.
         """
         payload: Dict[str, Any] = {
             "model": model,
-            "messages": messages,
+            "messages": self._disable_qwen_thinking(model, messages),
             "max_tokens": max_tokens,
             "stream": True,
             "temperature": 0.0,
+            "reasoning": {"enabled": False},
+            "provider": self._provider_payload(),
         }
-        sid = session_id or self._session_id
-        if sid:
-            payload["session_id"] = sid
         async with self._client.stream(
             "POST",
             "/chat/completions",
@@ -472,19 +514,23 @@ class EvalLLMClient:
         await self._client.aclose()
 
 
-def get_llm_client_from_env(session_id: Optional[str] = None) -> EvalLLMClient:
+def get_llm_client_from_env(
+    session_id: Optional[str] = None, model: Optional[str] = None
+) -> EvalLLMClient:
     """Create an EvalLLMClient from environment variables.
 
     Reads:
         OPENROUTER_API_KEY: API key for OpenRouter.
         EVAL_LLM_MODEL: Model identifier (default: deepseek/deepseek-chat).
+        EVAL_PROVIDER_ORDER: Comma-separated provider slugs to prefer.
+        EVAL_ALLOW_FALLBACKS: "true" to permit rerouting to another provider.
 
     Args:
-        session_id: Default OpenRouter sticky-routing session id for every
-            call made with this client (see EvalLLMClient docstring). Pass
-            a stable per-run id (e.g. "exp1a-safety-prompting-baseline") so
-            repeated calls sharing a prefix (a static system prompt, a
-            production judge's instructions) can be provider-cached.
+        session_id: Accepted and ignored (see EvalLLMClient docstring).
+        model: Explicit model id override. When given, it wins over
+            ``EVAL_LLM_MODEL`` — used by the production-faithful Exp1b judge
+            pass to pin ``qwen/qwen3-14b`` (the production judge) instead of
+            the eval default.
 
     Returns:
         Configured EvalLLMClient.
@@ -497,10 +543,12 @@ def get_llm_client_from_env(session_id: Optional[str] = None) -> EvalLLMClient:
         raise ValueError(
             "OPENROUTER_API_KEY environment variable is required for LLM eval."
         )
-    model = os.environ.get("EVAL_LLM_MODEL", "deepseek/deepseek-chat")
+    model = model or os.environ.get("EVAL_LLM_MODEL", "deepseek/deepseek-chat")
     return EvalLLMClient(
         base_url="https://openrouter.ai/api/v1",
         api_key=api_key,
         model=model,
+        provider_order=os.environ.get("EVAL_PROVIDER_ORDER", ""),
+        allow_fallbacks=os.environ.get("EVAL_ALLOW_FALLBACKS", "false").lower() == "true",
         session_id=session_id,
     )

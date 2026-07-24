@@ -118,3 +118,31 @@ class TestBuildPrompt:
         ctx = _make_context("Isi SOP penting.")
         bundle = build_prompt("Apa isi SOP?", [ctx], "Base prompt.")
         assert "Isi SOP penting." in bundle.user_turn
+
+
+class TestBuildPromptWithoutNonce:
+    """``use_nonce=False`` ablates the structural injection defense.
+
+    It is a separate layer from the classifier-based IVM guard, so measuring
+    what it contributes requires being able to turn it off on its own.
+    """
+
+    def test_user_message_is_not_wrapped(self) -> None:
+        bundle = build_prompt("Apa itu SOP?", [], "Base prompt.", use_nonce=False)
+        assert "<user_input_" not in bundle.user_turn
+        assert "Apa itu SOP?" in bundle.user_turn
+
+    def test_system_prompt_drops_the_delimiter_defense(self) -> None:
+        bundle = build_prompt("Apa itu SOP?", [], "Base prompt.", use_nonce=False)
+        assert bundle.system_prompt == "Base prompt."
+        assert "user_input_" not in bundle.system_prompt
+
+    def test_nonce_is_empty(self) -> None:
+        bundle = build_prompt("Apa itu SOP?", [], "Base prompt.", use_nonce=False)
+        assert bundle.nonce == ""
+
+    def test_context_still_included(self) -> None:
+        ctx = _make_context("Isi SOP penting.")
+        bundle = build_prompt("Apa isi SOP?", [ctx], "Base prompt.", use_nonce=False)
+        assert "Isi SOP penting." in bundle.user_turn
+        assert "Apa isi SOP?" in bundle.user_turn

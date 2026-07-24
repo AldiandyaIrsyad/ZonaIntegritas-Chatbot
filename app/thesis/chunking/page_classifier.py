@@ -126,6 +126,23 @@ def _is_garbage_ocr_text(text: str) -> bool:
 DEFAULT_IMAGE_RATIO_THRESHOLD = 0.5
 DEFAULT_GARBAGE_RATIO_THRESHOLD = 0.7
 
+# A page whose PDF-native text layer is at or below this many characters is
+# treated as scan-only regardless of Unstructured's element-level garbage
+# ratio. This catches a failure mode the garbage-ratio check structurally
+# can't: Unstructured's own OCR pass over a scan-only page sometimes emits
+# its noisy output as separate NarrativeText/UncategorizedText elements
+# (mis-read but real-word-shaped text, e.g. "PNRIMA PENGHARGAAN..." for
+# "PENERIMA PENGHARGAAN...") rather than as the Image element's own text.
+# Those fragments are too long and too alphanumeric-dense to ever trip
+# ``_is_garbage_ocr_text`` (by design — see its docstring), so they inflate
+# text_element_count and dilute image_ratio below threshold, keeping a truly
+# scan-only page out of VISUAL. A near-empty native text layer is a much
+# more direct signal: PyMuPDF's ``page.get_text()`` reads the PDF's actual
+# embedded text objects, which is near-zero if and only if the page is
+# genuinely a scanned image with no real text layer underneath, independent
+# of how Unstructured happened to chunk its OCR guesswork.
+NATIVE_TEXT_LEN_THRESHOLD = 30
+
 # Prompt for VLM full-page extraction (Indonesian output)
 VLM_PAGE_EXTRACTION_PROMPT = (
     "Ekstrak SEMUA konten dari halaman dokumen ini dalam format Markdown yang bersih. "
@@ -145,6 +162,7 @@ def classify_page(
     page_number: int,
     image_ratio_threshold: float = DEFAULT_IMAGE_RATIO_THRESHOLD,
     garbage_ratio_threshold: float = DEFAULT_GARBAGE_RATIO_THRESHOLD,
+    native_text_len: Optional[int] = None,
 ) -> PageClassification:
     """Classify a single PDF page based on its Unstructured element composition.
 
@@ -162,6 +180,15 @@ def classify_page(
         garbage_ratio_threshold: Minimum fraction of image elements that must
             have garbage text (≤ 3 chars) for the page to be classified VISUAL.
             Default 0.7.
+        native_text_len: Length of the PDF page's native (embedded) text
+            layer, e.g. from PyMuPDF's ``page.get_text()``, if the caller has
+            it available. When at or below ``NATIVE_TEXT_LEN_THRESHOLD`` and
+            the page has at least one image element, the page is classified
+            VISUAL regardless of the garbage-ratio check — see
+            ``NATIVE_TEXT_LEN_THRESHOLD`` docstring for why the garbage-ratio
+            check alone misses this case. ``None`` (default) skips this
+            signal entirely, preserving prior behavior for callers that
+            don't have PDF-level access (this module stays infra-free).
 
     Returns:
         :class:`PageClassification` describing this page's type and statistics.
@@ -200,10 +227,18 @@ def classify_page(
     image_ratio = image_count / total
     garbage_ratio = garbage_image_count / image_count if image_count > 0 else 0.0
 
+    is_scan_only = (
+        native_text_len is not None
+        and native_text_len <= NATIVE_TEXT_LEN_THRESHOLD
+        and image_count > 0
+    )
+
     # --- Classification logic ---
-    # VISUAL: more than half the elements are images AND most image OCR is garbage.
-    # This signals a flowchart/diagram page where Unstructured is unreliable.
-    if image_ratio >= image_ratio_threshold and garbage_ratio >= garbage_ratio_threshold:
+    # VISUAL: more than half the elements are images AND most image OCR is
+    # garbage (flowchart/diagram signal), OR the page's native PDF text
+    # layer is near-empty despite having an image (scan-only signal — see
+    # NATIVE_TEXT_LEN_THRESHOLD).
+    if (image_ratio >= image_ratio_threshold and garbage_ratio >= garbage_ratio_threshold) or is_scan_only:
         page_type = PageType.VISUAL
     elif table_count > 0:
         # Any substantive tables present → TABLE_RICH (may also have text)

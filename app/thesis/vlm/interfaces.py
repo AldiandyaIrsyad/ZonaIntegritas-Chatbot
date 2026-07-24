@@ -23,6 +23,14 @@ class IVLMEnricher(Protocol):
     or local model like LLaVA via Ollama, or a text-only fallback using
     PyMuPDF drawing analysis).
 
+    Implemented by (all in ``app/thesis/vlm/client.py``):
+        - ``OpenRouterVLMClient``  — cloud VLM via OpenRouter (default).
+        - ``OllamaVLMClient``      — local VLM via Ollama.
+        - ``FallbackVLMClient``   — text-only fallback using PyMuPDF drawing
+          analysis (no external model; used when no VLM endpoint is configured).
+
+    Wired in ``app/kb/dependency.py::get_vlm_enricher``.
+
     The enricher is called during ingestion for each ``ParsedElement``
     whose ``content_type`` is :attr:`ContentType.FIGURE`. The returned
     text description replaces the element's (likely empty) text field,

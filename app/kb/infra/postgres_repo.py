@@ -1,4 +1,8 @@
-"""PostgreSQL repository for the Knowledge Base."""
+"""PostgreSQL repository for the Knowledge Base.
+
+Fulfills: ``app/kb/domain/interfaces.py::IKBRepository``.
+Wired in: ``app/kb/dependency.py::get_kb_repo``.
+"""
 
 import structlog
 from datetime import datetime, timezone
@@ -16,21 +20,28 @@ logger = structlog.get_logger(__name__)
 
 
 class PostgresKBRepository(IKBRepository):
-    """Database operations for the Knowledge Base domain."""
+    """Database operations for the Knowledge Base domain.
+
+    Fulfills: ``app/kb/domain/interfaces.py::IKBRepository``.
+    """
 
     def __init__(self, db: AsyncSession):
         self.db = db
 
     async def get_all_pdfs(self) -> List[PDFDocument]:
+        """Return all KB documents, newest first."""
         result = await self.db.execute(select(PDFDocument).order_by(PDFDocument.created_at.desc()))
         return list(result.scalars().all())
 
     async def get_pdf_by_id(self, pdf_id: str) -> Optional[PDFDocument]:
+        """Fetch a single document by primary key, or None if not found."""
         query = select(PDFDocument).where(PDFDocument.id == pdf_id)
         result = await self.db.execute(query)
         return result.scalars().first()
 
     async def create_pdf(self, title: str, description: str, pdf_path: str) -> PDFDocument:
+        """Insert a new PDFDocument row and flush/refresh it so callers get
+        back a fully-populated instance (e.g. server-generated ``id``)."""
         new_pdf = PDFDocument(title=title, description=description, pdf_path=pdf_path)
         self.db.add(new_pdf)
         await self.db.flush()
@@ -39,6 +50,13 @@ class PostgresKBRepository(IKBRepository):
         return new_pdf
 
     async def update_pdf_active_status(self, pdf_id: str, active: bool) -> Optional[PDFDocument]:
+        """Set a document's ``active`` flag; returns None if it doesn't exist.
+
+        Only touches the Postgres row — mirroring this into Qdrant's
+        payload (so inactive docs are excluded from retrieval) is the
+        caller's responsibility, see
+        ``app/kb/application/kb_service.py::KBApplicationService.update_pdf_status``.
+        """
         pdf = await self.get_pdf_by_id(pdf_id)
         if pdf:
             pdf.active = active  # type: ignore
@@ -49,6 +67,10 @@ class PostgresKBRepository(IKBRepository):
         return None
 
     async def delete_pdf(self, pdf_id: str) -> bool:
+        """Delete a document row; its chunks cascade via FK on-delete rules.
+        Returns True if a row was found and deleted, False otherwise.
+        Does not touch Qdrant vectors or the on-disk PDF file — see
+        ``KBApplicationService.delete_pdf`` for the multi-system delete."""
         pdf = await self.get_pdf_by_id(pdf_id)
         if pdf:
             await self.db.delete(pdf)
@@ -88,6 +110,7 @@ class PostgresKBRepository(IKBRepository):
         return list(result.scalars().all())
 
     async def save_parent_chunks(self, chunks: List[ParentChunk]) -> List[ParentChunk]:
+        """Bulk-insert parent chunks for a document."""
         if not chunks:
             return []
         self.db.add_all(chunks)
@@ -96,6 +119,9 @@ class PostgresKBRepository(IKBRepository):
         return chunks
 
     async def get_parent_chunks_by_ids(self, chunk_ids: List[str]) -> List[ParentChunk]:
+        """Fetch parent chunks by ID, eager-loading the parent ``document``
+        (joinedload) so callers can read the source PDFDocument without a
+        second round-trip, ordered by ``chunk_index`` for stable output."""
         if not chunk_ids:
             return []
         result = await self.db.execute(
@@ -160,6 +186,7 @@ class PostgresKBRepository(IKBRepository):
         return list(result.scalars().all())
 
     async def create_ingestion_task(self, doc_id: str) -> IngestionTask:
+        """Create a new ``pending`` ingestion task row for a document."""
         task = IngestionTask(doc_id=doc_id, status="pending")
         self.db.add(task)
         await self.db.flush()
@@ -170,6 +197,10 @@ class PostgresKBRepository(IKBRepository):
     async def update_ingestion_task(
         self, task_id: str, status: str, error_message: Optional[str] = None
     ) -> Optional[IngestionTask]:
+        """Update a task's status (and optional error message); sets
+        ``completed_at`` when transitioning to a terminal status
+        (``completed``/``failed``) and clears it otherwise. Returns None if
+        the task doesn't exist."""
         result = await self.db.execute(select(IngestionTask).where(IngestionTask.id == task_id))
         task = result.scalars().first()
         if not task:
@@ -188,6 +219,8 @@ class PostgresKBRepository(IKBRepository):
         return task
 
     async def get_ingestion_task_by_doc_id(self, doc_id: str) -> Optional[IngestionTask]:
+        """Return the most recently created ingestion task for a document
+        (a document may have multiple tasks across re-ingestion attempts)."""
         result = await self.db.execute(
             select(IngestionTask)
             .where(IngestionTask.doc_id == doc_id)
@@ -197,7 +230,11 @@ class PostgresKBRepository(IKBRepository):
         return result.scalars().first()
 
     async def commit(self) -> None:
+        """Commit the current transaction on the underlying session."""
         await self.db.commit()
 
     async def rollback(self) -> None:
+        """Roll back the current transaction on the underlying session
+        (used by ``upload_pdfs_batch`` to recover the session after a
+        per-file failure so the loop can continue)."""
         await self.db.rollback()

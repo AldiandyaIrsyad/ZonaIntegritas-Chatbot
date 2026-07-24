@@ -66,7 +66,7 @@ class TestHandleCompleteProposition:
 
         out = await _collect(service._handle_complete_proposition(
             "| PT ABC | Menang | 2020 |", "\n",
-            ram_contexts=[], premise="", skip_guardrails=False, table_rows=table_rows,
+            ram_contexts=[], premise="", skip_ram=False, table_rows=table_rows,
         ))
 
         assert out == ["| PT ABC | Menang | 2020 |\n"]
@@ -89,7 +89,7 @@ class TestHandleCompleteProposition:
 
         out = await _collect(service._handle_complete_proposition(
             "Itu adalah rangkumannya.", "\n",
-            ram_contexts=[], premise="", skip_guardrails=False, table_rows=table_rows,
+            ram_contexts=[], premise="", skip_ram=False, table_rows=table_rows,
         ))
 
         # Two assess_sentence calls: one for the flushed table block, one
@@ -120,7 +120,7 @@ class TestHandleCompleteProposition:
 
         out = await _collect(service._handle_complete_proposition(
             "Ini adalah fakta penting", "\n",
-            ram_contexts=[], premise="", skip_guardrails=False, table_rows=table_rows,
+            ram_contexts=[], premise="", skip_ram=False, table_rows=table_rows,
         ))
 
         assert len(out) == 1
@@ -136,21 +136,21 @@ class TestHandleCompleteProposition:
 
         out = await _collect(service._handle_complete_proposition(
             "Ya", "\n",
-            ram_contexts=[], premise="", skip_guardrails=False, table_rows=table_rows,
+            ram_contexts=[], premise="", skip_ram=False, table_rows=table_rows,
         ))
 
         ram_service.assess_sentence.assert_not_called()
         assert out == ["Ya.\n"]
 
     @pytest.mark.asyncio
-    async def test_skip_guardrails_yields_no_citation(self) -> None:
+    async def test_skip_ram_yields_no_citation(self) -> None:
         ram_service = AsyncMock()
         service = _make_chat_service(ram_service)
         table_rows: list[tuple[str, str]] = []
 
         out = await _collect(service._handle_complete_proposition(
             "Ini adalah fakta penting", "\n",
-            ram_contexts=[], premise="", skip_guardrails=True, table_rows=table_rows,
+            ram_contexts=[], premise="", skip_ram=True, table_rows=table_rows,
         ))
 
         ram_service.assess_sentence.assert_not_called()

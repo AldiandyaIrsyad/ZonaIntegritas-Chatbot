@@ -18,7 +18,7 @@ The NLI pipeline:
 Baseline: token-containment similarity with threshold (high containment →
 entailment, low → contradiction, mid → neutral) — see
 run_containment_baseline for why this replaced an earlier token-Jaccard
-baseline (M6 in writing/weekend_fixes_plan.md: Jaccard's union-denominator
+baseline (M6 in writing/overhaul.md: Jaccard's union-denominator
 made every score on this dataset land below any reachable threshold).
 
 Metrics (§3.4): Accuracy, Precision, Recall, F1 (macro), Cohen's Kappa + CI.
@@ -39,8 +39,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from app.kb.infra import InfinityReranker
 from app.thesis._eval._shared.clients import EvalNLIClient
 from app.thesis._eval._shared.csv_export import write_results_csv
+from app.thesis.ram.interfaces import RetrievedContext
+from app.thesis.ram.service import RAMService
 from app.thesis._eval._shared.dataset import load_subset_d, SubsetDRow
 from app.thesis._eval._shared.metrics import (
     CI,
@@ -122,6 +125,41 @@ async def run_nli_classification(
     return predictions
 
 
+async def run_ram_classification(
+    ram: RAMService,
+    dataset: List[SubsetDRow],
+) -> List[str]:
+    """Classify each sentence with the *production* RAM (windowing + rerank + NLI).
+
+    This is the system the thesis actually ships (§3.2.7): rather than running
+    NLI once over the whole ``retrieved_context`` (which makes indo-roberta
+    default to ``neutral`` on long premises — see run_nli_classification, kept as
+    the no-windowing ablation), it splits the context into ~3-sentence windows,
+    reranks them against the sentence, and runs NLI on the best candidates. Each
+    row's flat ``retrieved_context`` is wrapped as a single ``RetrievedContext``
+    so ``assess_sentence`` windows over it exactly as in production.
+
+    Args:
+        ram: A production ``RAMService`` (NLI client + reranker).
+        dataset: Filtered Subset D rows.
+
+    Returns:
+        List of predicted NLI labels (entailment/neutral/contradiction).
+    """
+    predictions: List[str] = []
+    for i, row in enumerate(dataset, 1):
+        contexts = [RetrievedContext(text=row.retrieved_context, source_title="", content_type="text")]
+        result = await ram.assess_sentence(
+            sentence=row.sentence_text,
+            premise=row.retrieved_context,
+            contexts=contexts,
+        )
+        predictions.append(result.label)
+        if i % 20 == 0:
+            print(f"  [RAM] Processed {i}/{len(dataset)} sentences...")
+    return predictions
+
+
 def run_containment_baseline(
     dataset: List[SubsetDRow],
     entail_threshold: float = 0.7,
@@ -130,7 +168,7 @@ def run_containment_baseline(
     """Run token-containment similarity baseline.
 
     Replaces the earlier token-Jaccard baseline (M6 in
-    writing/weekend_fixes_plan.md): Jaccard's union-of-both-texts
+    writing/overhaul.md): Jaccard's union-of-both-texts
     denominator is dominated by the 4,000-22,000-token retrieved context
     almost regardless of a ~20-token sentence's overlap with it, so every
     Jaccard score on this dataset landed in roughly [0, 0.1] — below the
@@ -145,7 +183,7 @@ def run_containment_baseline(
     The thresholds below are picked to be reachable given that measured
     distribution, not tuned against Subset D's ground truth (whose
     contradiction/partially_supported classes have only 2-4 examples each —
-    see M5 in writing/weekend_fixes_plan.md — too few to calibrate a
+    see M5 in writing/overhaul.md — too few to calibrate a
     threshold against without overfitting to noise). Recalibrate once
     Subset D is rebuilt with a less degenerate label distribution.
 
@@ -225,6 +263,57 @@ def print_report(result: EvalResult) -> None:
     print()
 
 
+def slice_breakdown(
+    filtered: List[SubsetDRow],
+    ground_truths: List[str],
+    preds: List[str],
+    attr: str,
+) -> List[Tuple[str, int, float, float]]:
+    """Group rows by a slice attribute and score each group.
+
+    Powers the dual reporting the hardened Subset D enables: macro-F1 on the
+    balanced ``core`` versus the realistic ``natural`` base rate (``split``), and
+    accuracy on the adversarially-hard rows (``difficulty_band``). Rows whose
+    attribute is empty (a legacy pre-rebuild file) form no group, so the block is
+    simply skipped for old datasets.
+
+    Args:
+        filtered: Scored rows (``no_source_needed`` already removed).
+        ground_truths: NLI-mapped ground truth, aligned with ``filtered``.
+        preds: Predicted NLI labels, aligned with ``filtered``.
+        attr: The ``SubsetDRow`` attribute to slice on (``split`` / ``difficulty_band``).
+
+    Returns:
+        (slice_value, n, accuracy, macro_f1) per non-empty slice, sorted by value.
+    """
+    groups: Dict[str, List[int]] = {}
+    for i, row in enumerate(filtered):
+        key = (getattr(row, attr, "") or "").strip()
+        if not key:
+            continue
+        groups.setdefault(key, []).append(i)
+
+    out: List[Tuple[str, int, float, float]] = []
+    for key, idx in sorted(groups.items()):
+        gts = [ground_truths[i] for i in idx]
+        prs = [preds[i] for i in idx]
+        m = compute_multiclass_metrics(prs, gts, NLI_LABELS)
+        out.append((key, len(idx), m.accuracy, m.macro_f1))
+    return out
+
+
+def print_slice_breakdown(title: str, rows: List[Tuple[str, int, float, float]]) -> None:
+    """Print a compact per-slice accuracy/macro-F1 table (skips if empty)."""
+    if not rows:
+        return
+    print(f"\n  {title}")
+    print(f"  {'slice':<18}{'n':>6}{'Acc':>10}{'MacroF1':>10}")
+    print("  " + "-" * 44)
+    for key, n, acc, f1 in rows:
+        print(f"  {key:<18}{n:>6}{acc:>10.4f}{f1:>10.4f}")
+    print()
+
+
 async def async_main(args: argparse.Namespace) -> None:
     """Async entry point for Experiment 3.
 
@@ -291,6 +380,10 @@ async def async_main(args: argparse.Namespace) -> None:
                 "sentence_text": row.sentence_text,
                 "true_label": ground_truths[i],
                 "containment_pred": baseline_preds[i],
+                "split": row.split,
+                "difficulty_band": row.difficulty_band,
+                "construction": row.construction,
+                "perturbation_family": row.perturbation_family,
             }
             if nli_preds:
                 r["nli_pred"] = nli_preds[i]
@@ -301,38 +394,58 @@ async def async_main(args: argparse.Namespace) -> None:
         write_csv()
         return
 
-    # --- NLI Model ---
-    nli_client = EvalNLIClient(
-        base_url=args.infinity_url,
-        model=args.nli_model,
-    )
+    def _kappa_ci(preds: List[str], metrics: MultiClassMetrics) -> CI:
+        samples: List[float] = []
+        rng2 = random.Random(42)
+        for _ in range(1000):
+            indices = [rng2.randrange(n) for _ in range(n)]
+            m = compute_multiclass_metrics(
+                [preds[i] for i in indices], [ground_truths[i] for i in indices], NLI_LABELS
+            )
+            samples.append(m.cohen_kappa)
+        samples.sort()
+        return CI(point=metrics.cohen_kappa, lower=samples[25], upper=samples[974])
+
+    # --- Production RAM (NLI + windowing + rerank) — the system under test (§3.2.7) ---
+    nli_client = EvalNLIClient(base_url=args.infinity_url, model=args.nli_model)
+    reranker = InfinityReranker(base_url=args.infinity_url, model=args.reranker_model)
+    ram = RAMService(nli_model=nli_client, reranker_model=reranker, enabled=True)
     try:
-        print("\nRunning NLI classification...")
-        nli_preds = await run_nli_classification(nli_client, filtered)
+        print("\nRunning production RAM (windowing + rerank + NLI)...")
+        nli_preds = await run_ram_classification(ram, filtered)
+        # No-windowing ablation: raw single-shot NLI over the full context, to
+        # show how much the windowing contributes (long-premise -> neutral).
+        print("\nRunning no-windowing ablation (raw NLI over full context)...")
+        raw_preds = await run_nli_classification(nli_client, filtered)
     finally:
         await nli_client.aclose()
+        await reranker.close()
 
     nli_metrics = compute_multiclass_metrics(nli_preds, ground_truths, NLI_LABELS)
-    # Bootstrap CI for Cohen's Kappa
-    kappa_samples_nli: List[float] = []
-    rng2 = random.Random(42)
-    for _ in range(1000):
-        indices = [rng2.randrange(n) for _ in range(n)]
-        preds_sample = [nli_preds[i] for i in indices]
-        gts_sample = [ground_truths[i] for i in indices]
-        m = compute_multiclass_metrics(preds_sample, gts_sample, NLI_LABELS)
-        kappa_samples_nli.append(m.cohen_kappa)
-    kappa_samples_nli.sort()
-    nli_kappa_ci = CI(
-        point=nli_metrics.cohen_kappa,
-        lower=kappa_samples_nli[25],
-        upper=kappa_samples_nli[974],
-    )
     print_report(EvalResult(
-        system_name="NLI Model (indo-roberta)",
+        system_name="RAM (NLI + windowing + rerank)",
         metrics=nli_metrics,
-        kappa_ci=nli_kappa_ci,
+        kappa_ci=_kappa_ci(nli_preds, nli_metrics),
     ))
+    raw_metrics = compute_multiclass_metrics(raw_preds, ground_truths, NLI_LABELS)
+    print_report(EvalResult(
+        system_name="Ablation: NLI without windowing (raw, full context)",
+        metrics=raw_metrics,
+        kappa_ci=_kappa_ci(raw_preds, raw_metrics),
+    ))
+
+    # Dual reporting on the hardened Subset D: the balanced core is where macro-F1
+    # is meaningful; the natural slice is the realistic base rate; the NLI-hard
+    # band is the adversarial stress slice. All three are silently skipped on a
+    # legacy file whose rows carry no split/band.
+    print_slice_breakdown(
+        "RAM (NLI) by split (core = balanced diagnostic, natural = base rate):",
+        slice_breakdown(filtered, ground_truths, nli_preds, "split"),
+    )
+    print_slice_breakdown(
+        "RAM (NLI) by difficulty band (hard = production NLI was wrong at build time):",
+        slice_breakdown(filtered, ground_truths, nli_preds, "difficulty_band"),
+    )
     write_csv()
 
 
@@ -351,6 +464,12 @@ def main() -> None:
         "--nli-model",
         default="StevenLimcorn/indo-roberta-indonli",
         help="NLI model identifier (must match a model loaded on the Infinity server)",
+    )
+    parser.add_argument(
+        "--reranker-model",
+        default="BAAI/bge-reranker-v2-m3",
+        help="Reranker model for the production RAM's window selection "
+        "(must match a model loaded on the Infinity server)",
     )
     parser.add_argument(
         "--entail-threshold",

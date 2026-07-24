@@ -6,6 +6,12 @@ jailbreak detection). Relevance/OOD checking lives in
 ``app/thesis/ivm/relevance_service.py`` — the two concerns have independent
 dependencies (a safety classifier vs. a relevance backend) and are composed
 separately at the DI layer.
+
+``IVMService`` is a plain application-level service, not an
+``IRelevanceChecker``/``IJudge`` adapter — it depends only on the
+``ISafetyModel`` Protocol, so it stays part of the infra-free ``thesis``
+research core (see ``docs/02-arsitektur.md`` §2.2). Wired in
+``app/chat/dependency.py::get_ivm_service``.
 """
 from .interfaces import ISafetyModel
 
@@ -35,6 +41,10 @@ class IVMService:
         self,
         safety_model: ISafetyModel,
     ):
+        """Args:
+            safety_model: Prompt injection classifier backend (typically
+                ``app/chat/infra/prompt_guard_client.py::PromptGuardClient``).
+        """
         self.safety_model = safety_model
 
     async def check_malicious(self, query: str) -> None:

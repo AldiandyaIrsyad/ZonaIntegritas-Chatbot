@@ -7,6 +7,16 @@ Concrete IRelevanceChecker implementations.
   no model call (kNN-OOD framing, Sun et al. ICML 2022).
 - NliEntailmentRelevanceChecker: thresholds NLI entailment_score between
   query and joined context (Yin, Hay & Roth, EMNLP 2019).
+
+Fulfills: ``app/thesis/ivm/interfaces.py::IRelevanceChecker``.
+Wired in: ``app/chat/dependency.py::get_relevance_checker``, which selects
+one of the three classes below at runtime based on ``ChatConfig.ood_method``
+("llm_judge" / "similarity_threshold" / "nli_entailment").
+
+Part of the pure ``thesis`` research core: no infra imports (see
+``docs/02-arsitektur.md`` §2.2). ``NliEntailmentRelevanceChecker`` depends
+only on the ``INLIModel`` Protocol from ``app/thesis/ram/interfaces.py``,
+not on any concrete HTTP client.
 """
 from typing import List
 
@@ -19,14 +29,41 @@ logger = structlog.get_logger(__name__)
 
 
 class LLMJudgeRelevanceChecker(IRelevanceChecker):
-    """Relevance backend using an LLM-as-judge (today's default method)."""
+    """Relevance backend using an LLM-as-judge (today's default method).
+
+    Delegates the actual relevance decision to an injected :class:`IJudge`
+    (see ``app/thesis/ivm/judge.py::LLMJudge``) — one LLM call per check.
+    Fails closed: any exception from the judge propagates to the caller
+    (``RelevanceService.check_relevance``) rather than being swallowed here.
+
+    Fulfills: ``app/thesis/ivm/interfaces.py::IRelevanceChecker``.
+    Wired in: ``app/chat/dependency.py::get_relevance_checker`` (selected
+    when ``ChatConfig.ood_method == "llm_judge"``, the default).
+    """
 
     def __init__(self, judge: IJudge):
+        """Args:
+            judge: The LLM-as-judge backend to delegate relevance calls to.
+        """
         self.judge = judge
 
     async def check_query(
         self, query: str, context_chunks: List[str], context_scores: List[float]
     ) -> bool:
+        """Ask the judge whether ``query`` is on-topic for the joined context.
+
+        ``context_scores`` is accepted for :class:`IRelevanceChecker`
+        interface compatibility but unused — this backend only reasons
+        over the context text, not the retrieval scores.
+
+        Args:
+            query: The user's raw query text.
+            context_chunks: Text of the top retrieved KB contexts.
+            context_scores: Unused by this implementation.
+
+        Returns:
+            bool: True if the judge considers the query in-domain.
+        """
         combined_context = "\n".join(context_chunks)
         return await self.judge.evaluate_relevance(query, combined_context)
 
@@ -49,14 +86,35 @@ class SimilarityThresholdRelevanceChecker(IRelevanceChecker):
     ``threshold`` must be calibrated empirically against this KB's actual
     score distribution — do not assume a default tuned elsewhere carries
     over.
+
+    Fulfills: ``app/thesis/ivm/interfaces.py::IRelevanceChecker``.
+    Wired in: ``app/chat/dependency.py::get_relevance_checker`` (selected
+    when ``ChatConfig.ood_method == "similarity_threshold"``, via
+    ``config.ood_similarity_threshold``).
     """
 
     def __init__(self, threshold: float):
+        """Args:
+            threshold: Minimum top retrieval score for a query to be
+                considered in-domain. Must be calibrated against this KB's
+                own RRF score distribution (see class docstring).
+        """
         self.threshold = threshold
 
     async def check_query(
         self, query: str, context_chunks: List[str], context_scores: List[float]
     ) -> bool:
+        """Decide relevance from the max retrieval score alone.
+
+        Args:
+            query: The user's raw query text (used only for logging here).
+            context_chunks: Unused by this implementation.
+            context_scores: Similarity/RRF scores already computed by
+                retrieval, in the same order as ``context_chunks``.
+
+        Returns:
+            bool: True if the top score meets or exceeds ``self.threshold``.
+        """
         if not context_scores:
             logger.warning("similarity_threshold_checker.no_scores", query=query[:100])
             return False
@@ -106,15 +164,38 @@ class NliEntailmentRelevanceChecker(IRelevanceChecker):
     unlike LLMJudgeRelevanceChecker's fail-closed behavior on exception.
     If fail-closed semantics matter for your deployment, set
     ``ood_nli_entailment_threshold`` above 0.5 (e.g. 0.55) as a mitigation.
+
+    Fulfills: ``app/thesis/ivm/interfaces.py::IRelevanceChecker``.
+    Wired in: ``app/chat/dependency.py::get_relevance_checker`` (selected
+    when ``ChatConfig.ood_method == "nli_entailment"``, sharing the same
+    ``NLIClient`` instance wired for RAM via
+    ``app/chat/dependency.py::get_nli_client``).
     """
 
     def __init__(self, nli_model: INLIModel, threshold: float):
+        """Args:
+            nli_model: NLI backend (``INLIModel`` Protocol) used to score
+                entailment between context and query.
+            threshold: Minimum entailment_score for a query to be considered
+                in-domain (see KNOWN LIMITATION above re: fail-open default).
+        """
         self.nli_model = nli_model
         self.threshold = threshold
 
     async def check_query(
         self, query: str, context_chunks: List[str], context_scores: List[float]
     ) -> bool:
+        """Run NLI with the joined context as premise and the query as hypothesis.
+
+        Args:
+            query: The user's raw query text — the NLI hypothesis.
+            context_chunks: Text of the top retrieved KB contexts, joined
+                into a single NLI premise.
+            context_scores: Unused by this implementation.
+
+        Returns:
+            bool: True if ``entailment_score >= self.threshold``.
+        """
         if not context_chunks:
             logger.warning("nli_entailment_checker.no_context", query=query[:100])
             return False

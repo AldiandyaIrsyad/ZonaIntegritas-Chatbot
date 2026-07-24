@@ -27,6 +27,43 @@ from app.thesis._eval._dataset_gen.config import DatasetGenSettings
 logger = structlog.get_logger(__name__)
 
 
+def parse_json_object(raw: str) -> Optional[Dict[str, Any]]:
+    """Recover a single JSON object from a possibly-messy generator reply.
+
+    Robust to the two ways a model breaks a strict JSONL contract: a
+    **pretty-printed multi-line** object (which a line-by-line JSONL parser
+    shreds into non-JSON fragments) and an object wrapped in prose or ```json
+    fences. Extracts the widest brace-balanced span and parses it whole.
+
+    This exists because the earlier per-line parse in the Subset-D question
+    generators silently failed on multi-line JSON — ``draft.parsed`` came back a
+    string, the ``isinstance(dict)`` check dropped every draft, and the generator
+    looped the entire 922-document corpus without producing a question.
+
+    Args:
+        raw: The generator's text reply.
+
+    Returns:
+        The parsed object, or None if no JSON object can be recovered.
+    """
+    if not raw or not raw.strip():
+        return None
+    text = re.sub(r"```(?:json)?", "", raw).strip()
+    candidates = []
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if match:
+        candidates.append(match.group())
+    candidates.append(text)
+    for candidate in candidates:
+        try:
+            obj = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
 @dataclass(frozen=True)
 class GeneratedItem:
     """A single generated draft item.

@@ -1,4 +1,8 @@
-"""Qdrant vector database adapter."""
+"""Qdrant vector database adapter.
+
+Fulfills: ``app/kb/domain/interfaces.py::IVectorStore``.
+Wired in: ``app/kb/dependency.py::get_vector_store``.
+"""
 
 from typing import Any, Optional, List
 import structlog
@@ -17,12 +21,36 @@ logger = structlog.get_logger(__name__)
 BGE_M3_DENSE_DIM: int = 1024
 
 class QdrantStore(IVectorStore):
+    """Async adapter for Qdrant hybrid (dense + sparse) vector search.
+
+    Fulfills: ``app/kb/domain/interfaces.py::IVectorStore``.
+    """
+
     def __init__(self, host: str, port: int, collection_name: str) -> None:
+        """Open a Qdrant client for the given collection.
+
+        Args:
+            host: Qdrant server host.
+            port: Qdrant REST port.
+            collection_name: Name of the single collection this app uses
+                (see ``docs/05-basis-data.md``).
+        """
         self.collection_name = collection_name
         self._client = AsyncQdrantClient(host=host, port=port)
         logger.info("QdrantStore initialized", host=host, port=port, collection_name=collection_name)
 
     async def ensure_collection(self) -> None:
+        """Create the collection and its payload indexes if they don't
+        already exist (idempotent — checks ``get_collections`` first and
+        returns early if the collection is present, so this is safe to call
+        on every app startup).
+
+        Sets up the hybrid schema this adapter's search relies on: a
+        ``dense`` vector (BGE-M3, 1024-dim, cosine) plus a ``bm25`` sparse
+        vector (IDF-modified), and payload indexes on ``is_active``,
+        ``session_id``, ``doc_id``, and ``content_type`` for the filters
+        used in :meth:`hybrid_search`.
+        """
         try:
             collections = await self._client.get_collections()
             existing = {c.name for c in collections.collections}
@@ -57,6 +85,13 @@ class QdrantStore(IVectorStore):
             raise
 
     async def upsert_chunks(self, chunks: List[ChunkVector]) -> None:
+        """Upsert vectorized child chunks in batches of 100.
+
+        Batching avoids sending one oversized request for documents with
+        many children; each ``ChunkVector`` becomes a Qdrant point with a
+        ``dense`` vector and, when sparse terms are present, a ``bm25``
+        sparse vector alongside it.
+        """
         if not chunks:
             return
 
@@ -164,6 +199,8 @@ class QdrantStore(IVectorStore):
         ]
 
     async def update_payload(self, doc_id: str, payload: dict[str, Any]) -> None:
+        """Merge ``payload`` fields into every point belonging to ``doc_id``
+        (e.g. flipping ``is_active`` when a document is toggled)."""
         await self._client.set_payload(
             collection_name=self.collection_name,
             payload=payload,
@@ -171,6 +208,10 @@ class QdrantStore(IVectorStore):
         )
 
     async def delete_by_doc_id(self, doc_id: str) -> None:
+        """Delete all points for a document, e.g. when it's removed from the
+        KB. A 404 (collection/points already gone) is swallowed since the
+        end state — no vectors for this doc_id — is what the caller wants
+        either way; any other error is re-raised."""
         try:
             await self._client.delete(
                 collection_name=self.collection_name,
@@ -181,4 +222,5 @@ class QdrantStore(IVectorStore):
                 raise
 
     async def close(self) -> None:
+        """Release the underlying Qdrant client connection."""
         await self._client.close()

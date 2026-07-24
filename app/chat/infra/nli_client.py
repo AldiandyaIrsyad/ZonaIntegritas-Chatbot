@@ -1,8 +1,19 @@
-"""Natural Language Inference (NLI) infrastructure adapter."""
+"""Natural Language Inference (NLI) infrastructure adapter.
+
+Infra adapter for the RAM (Response Assessment Module) research core. Calls
+an Infinity-hosted NLI model (indo-roberta-indonli) to classify the
+entailment relationship between a generated sentence and retrieved KB
+context, enabling per-sentence hallucination detection.
+
+Fulfills: ``app/thesis/ram/interfaces.py::INLIModel``.
+Wired in: ``app/chat/dependency.py::get_nli_client``.
+"""
 
 import httpx
 import structlog
-from typing import Any
+from typing import Any, Optional
+
+from tokenizers import Tokenizer
 
 from app.thesis.ram.interfaces import INLIModel, NLIResult
 
@@ -12,6 +23,9 @@ LABEL_ENTAILMENT = "entailment"
 LABEL_NEUTRAL = "neutral"
 LABEL_CONTRADICTION = "contradiction"
 
+# Infinity returns either human-readable labels or HF-style "label_0/1/2"
+# depending on the model; normalize both to the canonical strings the RAM
+# service expects.
 _LABEL_MAP: dict[str, str] = {
     "entailment": LABEL_ENTAILMENT,
     "neutral": LABEL_NEUTRAL,
@@ -21,22 +35,88 @@ _LABEL_MAP: dict[str, str] = {
     "label_2": LABEL_CONTRADICTION,
 }
 
+
 class NLIClient(INLIModel):
-    """Infrastructure adapter for NLI inference via the Infinity HTTP server."""
+    """Infrastructure adapter for NLI inference via the Infinity HTTP server.
+
+    Fulfills: ``app/thesis/ram/interfaces.py::INLIModel``.
+    """
+
+    # indo-roberta-indonli has a 514-position embedding table, but Infinity's
+    # `truncation=True` doesn't reliably clip to that (the model's tokenizer
+    # config leaves model_max_length at the HF default sentinel, effectively
+    # infinite), so an oversized input crashes the batch worker mid-request
+    # instead of erroring cleanly — and that crash hangs every other request
+    # queued behind it on the shared Infinity server (batch_size=2). A
+    # char-count heuristic isn't a safe proxy for token count here: dense
+    # Indonesian legal text (hyphenated document numbers, dates) tokenizes
+    # close to 1 token/char, far denser than ordinary prose. Truncate by
+    # actual token count instead, leaving margin under 514 for whatever
+    # special tokens Infinity's own tokenizer adds.
+    _MAX_TOTAL_TOKENS = 500
+    _MAX_HYPOTHESIS_TOKENS = 150
 
     def __init__(self, base_url: str, model: str):
+        """Configure the Infinity HTTP client and load the model's tokenizer.
+
+        Args:
+            base_url: Base URL of the Infinity server hosting the NLI model.
+            model: HF model identifier (also used to select the NLI
+                separator style and to load a matching tokenizer for
+                token-accurate truncation).
+        """
         self.model = model
         self._nli_sep = " </s></s> " if "roberta" in model.lower() else " [SEP] "
-        
+
+        self._tokenizer: Optional[Tokenizer] = None
+        try:
+            self._tokenizer = Tokenizer.from_pretrained(model)
+            # tokenizer.json for this model ships its own truncation config
+            # (max_length=128) that silently overrides any max_length we'd
+            # pass to .encode() — disable it so our explicit token budgets
+            # below (which target the model's real 514-position limit, not
+            # this arbitrary default) actually take effect.
+            self._tokenizer.no_truncation()
+        except Exception as e:
+            logger.warning("chat.nli.tokenizer_load_failed", error=str(e))
+
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             timeout=httpx.Timeout(10.0, connect=5.0),
         )
         logger.info("chat.nli.initialized", model=model, base_url=base_url, sep=self._nli_sep)
 
+    def _truncate_to_tokens(self, text: str, max_tokens: int) -> str:
+        """Clip ``text`` to at most ``max_tokens`` tokens using the loaded
+        tokenizer, decoding back to a string (no-op if already short enough
+        or if no tokenizer was loaded)."""
+        if not text or self._tokenizer is None:
+            return text
+        ids = self._tokenizer.encode(text).ids
+        if len(ids) <= max_tokens:
+            return text
+        return self._tokenizer.decode(ids[:max_tokens])
+
     async def check(self, premise: str, hypothesis: str) -> NLIResult:
-        max_premise_chars = 1500
-        if len(premise) > max_premise_chars:
+        """Fulfills ``INLIModel.check``: classify the entailment relation
+        between ``premise`` (retrieved KB context) and ``hypothesis`` (a
+        generated sentence), truncating both to fit the model's token
+        budget before calling Infinity's ``/classify`` endpoint.
+
+        Falls back to a neutral ``NLIResult`` (rather than raising) if the
+        request fails, so a transient NLI outage degrades to "no citation"
+        instead of breaking the chat stream.
+        """
+        if self._tokenizer is not None:
+            hypothesis = self._truncate_to_tokens(hypothesis, self._MAX_HYPOTHESIS_TOKENS)
+            reserved = len(self._tokenizer.encode(hypothesis).ids) + len(self._tokenizer.encode(self._nli_sep).ids)
+            premise_budget = max(0, self._MAX_TOTAL_TOKENS - reserved)
+            premise = self._truncate_to_tokens(premise, premise_budget)
+        else:
+            # Tokenizer unavailable (e.g. no network at startup) — fall back
+            # to a conservative char cap as a last-resort safety net.
+            hypothesis = hypothesis[:400]
+            max_premise_chars = max(0, 1000 - len(hypothesis) - len(self._nli_sep))
             premise = premise[:max_premise_chars]
 
         text = f"{premise}{self._nli_sep}{hypothesis}"
@@ -63,6 +143,16 @@ class NLIClient(INLIModel):
 
     @staticmethod
     def _parse_response(data: dict[str, Any]) -> NLIResult:
+        """Parse an Infinity ``/classify`` response into an ``NLIResult``.
+
+        Infinity's response shape for this model varies by deployment: the
+        per-input prediction may be a list of ``{"label", "score"}`` dicts
+        (one per class — the ``raw_scores=True`` shape, dispatched to
+        ``_parse_raw_scores``), or a single dict with either a nested
+        ``score`` dict (also raw scores) or a scalar top-1
+        ``{"label", "score"}`` (dispatched to ``_parse_top1``). Returns a
+        neutral result for an empty/unrecognized payload.
+        """
         items = data.get("data", [])
         if not items or not items[0]:
             return NLIResult(label=LABEL_NEUTRAL, entailment_score=0.5, contradiction_score=0.0, neutral_score=0.5)
@@ -85,6 +175,11 @@ class NLIClient(INLIModel):
 
     @staticmethod
     def _parse_raw_scores(score_dict: dict[str, Any]) -> NLIResult:
+        """Build an ``NLIResult`` from a per-class score dict (Infinity's
+        ``raw_scores=True`` shape: one score per of entailment/neutral/
+        contradiction, keyed by either human-readable or ``label_N`` names
+        per ``_LABEL_MAP``), picking the highest-scoring class as the label.
+        """
         scores: dict[str, float] = {}
         for raw_label, score in score_dict.items():
             canonical = _LABEL_MAP.get(raw_label.lower(), LABEL_NEUTRAL)
@@ -112,6 +207,10 @@ class NLIClient(INLIModel):
 
     @staticmethod
     def _parse_top1(label: str, score: float) -> NLIResult:
+        """Build an ``NLIResult`` from a scalar top-1 prediction (only the
+        winning label's score is known — the other two classes are left at
+        0.0, unlike ``_parse_raw_scores`` which has all three).
+        """
         canonical = _LABEL_MAP.get(label.lower(), LABEL_NEUTRAL)
 
         entailment_score = score if canonical == LABEL_ENTAILMENT else 0.0
@@ -126,4 +225,5 @@ class NLIClient(INLIModel):
         )
 
     async def close(self) -> None:
+        """Release the underlying ``httpx.AsyncClient`` connection pool."""
         await self._client.aclose()

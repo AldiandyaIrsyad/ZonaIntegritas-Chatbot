@@ -3,6 +3,10 @@
 Used both to decide what generated text to run NLI on
 (``ChatService._split_propositions``) and to window the retrieved KB text
 for reverse-mapping the exact NLI premise (``RAMService.assess_sentence``).
+
+Pure Python (stdlib ``re`` + the sibling ``thesis.chunking.table_converter``
+module) — no infra imports, per the ``thesis/`` purity rule (see
+``docs/02-arsitektur.md`` §2.2).
 """
 import re
 from typing import List, Tuple

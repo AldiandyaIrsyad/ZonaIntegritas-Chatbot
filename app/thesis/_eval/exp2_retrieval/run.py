@@ -21,7 +21,7 @@ import asyncio
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -57,13 +57,24 @@ async def retrieve(
     query: str,
     top_k: int,
     mode: str,
+    rerank: bool = True,
+    hyde: Optional[bool] = None,
 ) -> List[str]:
     """Retrieve document IDs from the KB search endpoint.
+
+    ``hyde`` selects the endpoint (HyDE ablation, E6): ``None`` (default) hits
+    ``/api/kb/search``, which is structurally HyDE-off and preserves the
+    original behaviour. ``True``/``False`` hit ``/api/chat/search`` with the
+    ``hyde`` toggle — the chat-domain endpoint that can inject the production
+    ``HyDEExpander`` (``/api/kb/search`` cannot, per the ``kb/ ⇏ chat/``
+    dependency rule). Routing both HyDE conditions through the one chat endpoint
+    makes HyDE the single varied factor; ``hyde=False`` there reproduces
+    ``/api/kb/search``.
 
     ``/api/kb/search`` returns CHUNK-level hits, each carrying the doc_id it
     came from — several of the top-k chunks routinely belong to the same
     document (measured: top-5 averages only ~3.8 unique documents across
-    all three modes, see writing/weekend_fixes_plan.md M9). This function
+    all three modes, see writing/overhaul.md M9). This function
     returns the raw chunk-level list; callers computing Hit Rate@k/MRR@k
     should deduplicate first (see dedup_doc_ids) so "@k" means "top-k
     distinct documents", matching how the metric is defined in §3.5.6/7,
@@ -74,19 +85,34 @@ async def retrieve(
         query: Search query.
         top_k: Number of results to retrieve.
         mode: Retrieval mode ("hybrid", "dense", or "sparse").
+        rerank: Whether the cross-encoder reranker runs. With it on, all
+            three modes are really "mode -> rerank", so the comparison is
+            between reranked variants rather than between the fusion
+            strategies themselves (M10).
 
     Returns:
         List of retrieved doc_ids in ranked (chunk-level) order.
     """
-    async with httpx.AsyncClient(base_url=api_url, timeout=30.0) as client:
-        response = await client.get(
-            "/api/kb/search",
-            params={"q": query, "top_k": top_k, "mode": mode},
-        )
-        if response.status_code != 200:
-            return []
-        results = response.json()
-        return [r.get("doc_id", "") for r in results]
+    params: Dict[str, Any] = {"q": query, "top_k": top_k, "mode": mode, "rerank": str(rerank).lower()}
+    if hyde is None:
+        endpoint = "/api/kb/search"
+    else:
+        endpoint = "/api/chat/search"
+        params["hyde"] = str(hyde).lower()
+    # HyDE adds an LLM generation call per query, so allow more headroom than
+    # the pure-retrieval default.
+    timeout = 30.0 if hyde is None else 120.0
+    try:
+        async with httpx.AsyncClient(base_url=api_url, timeout=timeout) as client:
+            response = await client.get(endpoint, params=params)
+            if response.status_code != 200:
+                return []
+            results = response.json()
+            return [r.get("doc_id", "") for r in results]
+    except httpx.HTTPError:
+        # A slow/failed HyDE call is a retrieval miss for this one query, not a
+        # run-ending crash — a single ReadTimeout used to kill the whole sweep.
+        return []
 
 
 def dedup_doc_ids(doc_ids: List[str]) -> List[str]:
@@ -116,11 +142,13 @@ async def evaluate_mode(
     dataset: List[SubsetARow],
     mode: str,
     top_k: int = 5,
+    rerank: bool = True,
+    hyde: Optional[bool] = None,
 ) -> Tuple[RetrievalMetrics, List[Tuple[SubsetARow, List[str], List[str]]]]:
     """Evaluate a single retrieval mode over the dataset.
 
     Deduplicates each query's chunk-level results to unique documents (M9
-    in writing/weekend_fixes_plan.md) before computing Hit Rate@k/MRR@k, so
+    in writing/overhaul.md) before computing Hit Rate@k/MRR@k, so
     "@k" is measured over document rank, not chunk rank.
 
     Args:
@@ -128,6 +156,7 @@ async def evaluate_mode(
         dataset: List of Subset A rows.
         mode: Retrieval mode ("hybrid", "dense", or "sparse").
         top_k: Number of results to retrieve per query.
+        rerank: Whether the cross-encoder reranker runs (M10).
 
     Returns:
         Tuple of (aggregated RetrievalMetrics computed on deduped doc
@@ -140,10 +169,9 @@ async def evaluate_mode(
     raw_per_query: List[Tuple[SubsetARow, List[str], List[str]]] = []
 
     for i, row in enumerate(dataset, 1):
-        retrieved_ids = await retrieve(api_url, row.question, top_k, mode)
+        retrieved_ids = await retrieve(api_url, row.question, top_k, mode, rerank, hyde)
         deduped_ids = dedup_doc_ids(retrieved_ids)
-        relevant_id = row.source_doc_id
-        results_per_query.append((deduped_ids, [relevant_id] if relevant_id else []))
+        results_per_query.append((deduped_ids, row.gold_doc_ids))
         raw_per_query.append((row, retrieved_ids, deduped_ids))
 
         if i % 10 == 0:
@@ -161,7 +189,7 @@ def compute_per_category(
     (evaluate_mode_per_category), so overall and per-category figures came
     from two independent passes with no guarantee they'd reconcile, and
     Exp2's API/HyDE cost was doubled for no gain (M12 in
-    writing/weekend_fixes_plan.md). This instead regroups the single pass's
+    writing/overhaul.md). This instead regroups the single pass's
     raw per-query results, so per-category numbers are guaranteed
     consistent with the overall figure they're a breakdown of.
 
@@ -174,8 +202,7 @@ def compute_per_category(
     """
     by_category: Dict[str, List[Tuple[List[str], List[str]]]] = defaultdict(list)
     for row, _raw_ids, deduped_ids in raw_per_query:
-        relevant = [row.source_doc_id] if row.source_doc_id else []
-        by_category[row.category].append((deduped_ids, relevant))
+        by_category[row.category].append((deduped_ids, row.gold_doc_ids))
 
     results: List[CategoryResult] = []
     for category, pairs in sorted(by_category.items()):
@@ -255,27 +282,52 @@ async def async_main(args: argparse.Namespace) -> None:
     else:
         modes_to_eval = [args.mode]
 
-    csv_rows = []
-    for mode in modes_to_eval:
-        print(f"\nEvaluating mode: {mode}")
-        overall, raw_per_query = await evaluate_mode(args.api_url, dataset, mode, args.top_k)
-        per_category = compute_per_category(raw_per_query)
-        print_report(mode.upper(), overall, per_category)
+    # M10: report both, so the table separates "which fusion strategy is
+    # better" from "how much of the difference the reranker was absorbing".
+    rerank_conditions: List[bool] = {
+        "both": [True, False],
+        "on": [True],
+        "off": [False],
+    }[args.rerank]
 
-        for row, retrieved_ids, deduped_ids in raw_per_query:
-            relevant = [row.source_doc_id] if row.source_doc_id else []
-            csv_rows.append({
-                "question": row.question,
-                "category": row.category,
-                "mode": mode,
-                "source_doc_id": row.source_doc_id,
-                "retrieved_doc_ids": "|".join(retrieved_ids),
-                "retrieved_doc_ids_dedup": "|".join(deduped_ids),
-                "hit_at_1": hit_rate_at_k(deduped_ids, relevant, 1),
-                "hit_at_3": hit_rate_at_k(deduped_ids, relevant, 3),
-                "hit_at_5": hit_rate_at_k(deduped_ids, relevant, 5),
-                "reciprocal_rank": reciprocal_rank_at_k(deduped_ids, relevant, args.top_k),
-            })
+    # E6 HyDE ablation. None = the original /api/kb/search path (HyDE-off by
+    # construction); True/False route through /api/chat/search so HyDE is the
+    # single varied factor. 'both' reports HyDE off then on on that endpoint.
+    hyde_conditions: List[Optional[bool]] = {
+        "off": [None],
+        "on": [True],
+        "both": [False, True],
+    }[args.hyde]
+
+    csv_rows = []
+    for hyde in hyde_conditions:
+        for rerank in rerank_conditions:
+            for mode in modes_to_eval:
+                hyde_label = "" if hyde is None else f", hyde {'on' if hyde else 'off'}"
+                label = f"{mode} (rerank {'on' if rerank else 'off'}{hyde_label})"
+                print(f"\nEvaluating mode: {label}")
+                overall, raw_per_query = await evaluate_mode(
+                    args.api_url, dataset, mode, args.top_k, rerank, hyde
+                )
+                per_category = compute_per_category(raw_per_query)
+                print_report(label.upper(), overall, per_category)
+
+                for row, retrieved_ids, deduped_ids in raw_per_query:
+                    relevant = row.gold_doc_ids
+                    csv_rows.append({
+                        "question": row.question,
+                        "category": row.category,
+                        "mode": mode,
+                        "rerank": rerank,
+                        "hyde": "" if hyde is None else str(hyde).lower(),
+                        "source_doc_id": row.source_doc_id,
+                        "retrieved_doc_ids": "|".join(retrieved_ids),
+                        "retrieved_doc_ids_dedup": "|".join(deduped_ids),
+                        "hit_at_1": hit_rate_at_k(deduped_ids, relevant, 1),
+                        "hit_at_3": hit_rate_at_k(deduped_ids, relevant, 3),
+                        "hit_at_5": hit_rate_at_k(deduped_ids, relevant, 5),
+                        "reciprocal_rank": reciprocal_rank_at_k(deduped_ids, relevant, args.top_k),
+                    })
 
     write_results_csv(args.output_csv, csv_rows)
 
@@ -302,6 +354,25 @@ def main() -> None:
         default="all",
         choices=["all", "hybrid", "dense", "sparse"],
         help="Retrieval mode to evaluate (default: all)",
+    )
+    parser.add_argument(
+        "--rerank",
+        default="both",
+        choices=["both", "on", "off"],
+        help="Cross-encoder reranker condition. With the reranker on, every mode is "
+        "really 'mode -> rerank', so the ablation compares reranked variants rather "
+        "than the fusion strategies themselves (M10 in writing/overhaul.md). "
+        "Default 'both' reports each mode twice.",
+    )
+    parser.add_argument(
+        "--hyde",
+        default="off",
+        choices=["off", "on", "both"],
+        help="HyDE query-expansion ablation (E6). 'off' (default) uses /api/kb/search "
+        "(HyDE structurally off — the original behaviour). 'on'/'both' route through "
+        "/api/chat/search, which can inject the production HyDEExpander; 'both' reports "
+        "HyDE off then on on that endpoint so HyDE is the single varied factor. Adds one "
+        "LLM call per query when on (temp 0, near-deterministic).",
     )
     parser.add_argument(
         "--output-csv",

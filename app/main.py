@@ -1,4 +1,22 @@
-"""Main application entrypoint."""
+"""FastAPI application entrypoint and composition root of the whole app.
+
+This module assembles the running application:
+    1. Configures structured logging (``app/shared/logging.py``).
+    2. Defines the ``lifespan`` context manager — runs DB schema
+       initialisation (incl. guarded ``ALTER TABLE`` migrations for
+       ltree columns and RAG context/sources JSON columns) and Qdrant
+       collection creation on startup, and gracefully closes the
+       process-lifetime singleton infra clients on shutdown.
+    3. Constructs the :class:`FastAPI` app, registers the
+       :class:`CorrelationIdMiddleware`, and mounts the three routers:
+           - ``app.kb.api``      — KB admin endpoints
+           - ``app.chat.api``    — chat endpoints
+           - ``app.frontend``    — server-rendered HTML pages
+
+Note: importing the domain ``models`` modules has a side effect — it
+registers every ORM table on the shared ``Base.metadata`` so that
+``Base.metadata.create_all`` in ``lifespan`` sees them all.
+"""
 
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
@@ -12,9 +30,11 @@ from app.shared.logging import setup_logging
 from app.shared.middleware import CorrelationIdMiddleware
 from app.shared.db import engine, Base
 
-# Import all models so metadata knows about them
-import app.kb.domain.models  # noqa
-import app.chat.domain.models  # noqa
+# Import all ORM models so their tables register on Base.metadata before
+# create_all runs in lifespan(). Without these imports the metadata would
+# only know about whichever models were imported elsewhere first.
+import app.kb.domain.models  # noqa: F401
+import app.chat.domain.models  # noqa: F401
 
 from app.kb.api import router as kb_router
 from app.chat.api import router as chat_router
@@ -26,11 +46,28 @@ from app.kb.dependency import get_vector_store, get_document_parser, get_reranke
 setup_logging()
 logger = structlog.get_logger(__name__)
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Lifespan context manager for startup and shutdown events."""
+    """Application lifespan: startup schema init + shutdown resource cleanup.
+
+    Startup:
+        - Enables the ``ltree`` Postgres extension (used by ``parent_chunks.path``).
+        - Runs ``create_all`` for fresh databases.
+        - Performs guarded ``ALTER TABLE`` migrations for columns added after
+          the initial schema (ltree hierarchy columns on ``parent_chunks``,
+          RAG ``context``/``sources`` columns on ``messages``) so existing
+          databases are upgraded in place without a separate migration tool.
+        - Ensures the Qdrant collection exists.
+
+    Shutdown:
+        - Closes the ``@lru_cache``-d singleton infra clients from
+          ``app.kb.dependency`` (Qdrant, Unstructured, Infinity reranker,
+          BGE-M3 embedder) — but only those actually instantiated during this
+          process, to avoid loading the BGE-M3 model just to close it.
+    """
     logger.info("application_startup", status="started")
-    
+
     # Initialize DB schema
     async with engine.begin() as conn:
         # Create ltree extension on Postgres (no-op on SQLite)
@@ -114,6 +151,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     logger.info("application_shutdown", status="stopped")
 
+
 app_settings = get_app_settings()
 
 fastapi_app = FastAPI(
@@ -128,7 +166,9 @@ fastapi_app.add_middleware(CorrelationIdMiddleware)
 
 from app.frontend import router as frontend_router
 
-# Include API routes
+# Include API routes — order matters for route matching: kb and chat API
+# routers are mounted before the frontend catch-all so /api/* paths win
+# over the "/" page route.
 fastapi_app.include_router(kb_router)
 fastapi_app.include_router(chat_router)
 fastapi_app.include_router(frontend_router)

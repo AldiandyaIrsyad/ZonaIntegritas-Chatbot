@@ -476,7 +476,7 @@ def token_containment_similarity(text_a: str, text_b: str) -> float:
     reachable threshold, making the Jaccard baseline degenerate into a
     constant classifier (measured: max Jaccard 0.069-0.114 across Subset D
     /D-Hard, both below the 0.15 contradiction threshold it used — see
-    writing/weekend_fixes_plan.md M6). Containment instead asks "how much
+    writing/overhaul.md M6). Containment instead asks "how much
     of the sentence's own vocabulary appears in the context", which stays
     meaningful regardless of the size mismatch (measured mean ~0.88,
     genuine spread from 0.0 to 1.0 on the same data).

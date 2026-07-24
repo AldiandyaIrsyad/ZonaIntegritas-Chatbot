@@ -1,4 +1,15 @@
-"""Logging configuration module using structlog."""
+"""Structured JSON logging configuration using ``structlog``.
+
+Configures two sinks:
+    1. ``stdout`` — human-readable JSON lines (via ``structlog.JSONRenderer``).
+    2. TCP socket — JSON lines shipped to Vector (``observability/vector.yaml``)
+       which forwards to Loki for centralised log aggregation.
+
+The :class:`CorrelationIdMiddleware` in ``app/shared/middleware.py`` binds a
+``request_id`` to ``structlog.contextvars`` per request; the
+``merge_contextvars`` processor here injects it into every log line so a
+single request's logs can be filtered in Loki/Grafana.
+"""
 
 import logging
 import logging.handlers
@@ -10,31 +21,46 @@ from app.shared.config import get_logger_settings
 
 
 class JSONTCPHandler(logging.handlers.SocketHandler):
-    """Sends JSON formatted log records over TCP."""
+    """Sends JSON formatted log records over TCP to Vector.
+
+    Overrides :meth:`makePickle` so that instead of pickling the record
+    (the default ``SocketHandler`` behaviour, which Vector cannot parse),
+    it emits a single UTF-8 JSON line terminated by ``\\n`` — the format
+    Vector's ``tcp`` source expects.
+    """
+
     def makePickle(self, record: logging.LogRecord) -> bytes:
         return (self.format(record) + '\n').encode('utf-8')
 
 
 def setup_logging() -> None:
-    """Configures production-grade structured JSON logging."""
+    """Configure production-grade structured JSON logging.
+
+    Wires up:
+        - The root Python logger (stdout + TCP handler) at the configured level.
+        - ``structlog`` processors: contextvars merge → level filter →
+          logger/level stamping → ISO timestamp → JSON rendering.
+
+    Called once at import time in ``app/main.py``.
+    """
     settings = get_logger_settings()
     log_level = getattr(logging, settings.log_level.upper(), logging.INFO)
-    
+
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,
         level=log_level,
     )
 
-    # Add TCP handler for Vector
+    # Add TCP handler for Vector → Loki pipeline.
     root_logger = logging.getLogger()
     tcp_handler = JSONTCPHandler(settings.vector_host, settings.vector_port)
     tcp_handler.setFormatter(logging.Formatter("%(message)s"))
     root_logger.addHandler(tcp_handler)
 
-
     structlog.configure(
         processors=[
+            # Inject request_id from CorrelationIdMiddleware's contextvars bind.
             structlog.contextvars.merge_contextvars,
             structlog.stdlib.filter_by_level,
             structlog.stdlib.add_logger_name,
@@ -43,7 +69,7 @@ def setup_logging() -> None:
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
-            structlog.processors.JSONRenderer()
+            structlog.processors.JSONRenderer(),
         ],
         context_class=dict,
         logger_factory=structlog.stdlib.LoggerFactory(),

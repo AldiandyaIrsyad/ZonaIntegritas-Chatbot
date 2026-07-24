@@ -25,9 +25,28 @@ from typing import Dict, List, Optional
 import httpx
 import structlog
 
+from app.shared.retry import external_api_retry
 from app.thesis._eval._dataset_gen.config import DatasetGenSettings
 
 logger = structlog.get_logger(__name__)
+
+# How many consecutive verdicts may have EVERY member fail before the panel
+# gives up. A failed call is counted as NO, so during a sustained provider
+# outage every candidate is "rejected" and a builder would burn its whole batch
+# budget generating nothing, then exit successfully with a silently short
+# dataset — worse than crashing, because the result looks like data. Transient
+# blips are already absorbed by the per-call retry in app/shared/retry.py, so
+# reaching this many total failures in a row means the API is genuinely down.
+MAX_CONSECUTIVE_TOTAL_FAILURES = 3
+
+
+class PanelUnavailableError(RuntimeError):
+    """Raised when the panel has failed completely too many times in a row.
+
+    Signals "stop and try again later", not "this item is bad". Builders let
+    this propagate so the run halts with whatever it has already written to
+    disk, which ``--resume`` can then continue from.
+    """
 
 
 @dataclass(frozen=True)
@@ -38,11 +57,16 @@ class PanelVote:
         model: Model identifier.
         vote: The raw vote text from the model.
         parsed: Parsed binary verdict (True = YES/accept, False = NO/reject).
+        provider: The upstream provider OpenRouter actually routed to, when
+            reported. Recorded so "the panel was consistent" is a checkable
+            claim rather than an assumption — a slug can be served by several
+            providers at different quantizations.
     """
 
     model: str
     vote: str
     parsed: bool
+    provider: str = ""
 
 
 @dataclass(frozen=True)
@@ -89,6 +113,10 @@ class PanelVerdict:
         no_count: Number of NO votes.
         accepted: True if yes_count >= acceptance_threshold.
         acceptance_threshold: The threshold used.
+        error_count: How many members failed to return a usable vote (after
+            retries) and were counted as NO. Non-zero means part of this
+            verdict reflects infrastructure rather than the item — see the
+            indeterminate-verdict warning in ``evaluate``.
     """
 
     votes: List[PanelVote]
@@ -96,6 +124,7 @@ class PanelVerdict:
     no_count: int
     accepted: bool
     acceptance_threshold: int
+    error_count: int = 0
 
 
 class EvaluatorPanel:
@@ -117,11 +146,45 @@ class EvaluatorPanel:
         )
         self._models = settings.panel_model_list
         self._threshold = settings.acceptance_threshold
+        # Consecutive verdicts in which every member failed — see
+        # MAX_CONSECUTIVE_TOTAL_FAILURES. Reset by any verdict that gets at
+        # least one real vote.
+        self._consecutive_total_failures = 0
         # Models whose reasoning cannot be disabled — for these we omit
         # reasoning:{enabled:false} (sending it would error). All panel models
         # in the default cost-conscious set support disabling reasoning, so this
         # is empty; add a slug here only if OpenRouter rejects the flag for it.
         self._reasoning_mandatory: set[str] = set()
+
+    def _track_total_failure(self, error_count: int, panel_size: int) -> None:
+        """Trip the circuit breaker after repeated complete panel failures.
+
+        Args:
+            error_count: Members that failed to return a usable vote.
+            panel_size: Members polled.
+
+        Raises:
+            PanelUnavailableError: After MAX_CONSECUTIVE_TOTAL_FAILURES
+                consecutive verdicts in which every member failed. The point is
+                to stop the run rather than let an outage masquerade as a long
+                sequence of rejected candidates.
+        """
+        if panel_size and error_count == panel_size:
+            self._consecutive_total_failures += 1
+            if self._consecutive_total_failures >= MAX_CONSECUTIVE_TOTAL_FAILURES:
+                logger.error(
+                    "panel.unavailable",
+                    consecutive_failures=self._consecutive_total_failures,
+                    detail="every panel member failed repeatedly; stopping so the run can be resumed later",
+                )
+                raise PanelUnavailableError(
+                    f"All {panel_size} panel members failed on "
+                    f"{self._consecutive_total_failures} consecutive items. "
+                    "The API is likely unavailable. Rows accepted so far are already "
+                    "written to the output CSV — rerun with --resume to continue."
+                )
+        else:
+            self._consecutive_total_failures = 0
 
     def _build_payload(
         self,
@@ -140,13 +203,8 @@ class EvaluatorPanel:
             model: Model identifier.
             messages: Chat messages.
             max_tokens: Maximum tokens for the response.
-            session_id: OpenRouter sticky-routing session id. Passing the
-                same id for every panel call belonging to one question (all
-                models × all sentences) keeps them routed to the same
-                upstream provider per model, which is what lets that
-                provider's automatic prompt caching actually hit on the
-                large shared Question/Full-Response/Context prefix instead
-                of each call landing on a cold, differently-routed backend.
+            session_id: Accepted for call-site compatibility but NOT sent —
+                see the measurement note below.
 
         Returns:
             Request payload dict.
@@ -159,8 +217,32 @@ class EvaluatorPanel:
         }
         if model not in self._reasoning_mandatory:
             payload["reasoning"] = {"enabled": False}
-        if session_id:
-            payload["session_id"] = session_id
+
+        # ``session_id`` is deliberately NOT added to the payload. It was
+        # introduced on the belief that it enabled OpenRouter's provider-side
+        # prompt caching, and a cost claim rested on that. Measured directly
+        # (2026-07-22, gemini-2.5-flash, 6 identical ~2.4k-token calls per
+        # condition on a fresh prefix, session_id condition run FIRST so it
+        # could not inherit a warm cache): 3/6 cache hits with it, 2/6
+        # without. Caching is automatic and prefix-driven; the field makes no
+        # difference, and OpenRouter silently drops parameters it does not
+        # recognise, so it never errored. Reproduce with
+        # ``preflight.py --check-session-id``.
+        #
+        # What does help is keeping the varying part of the prompt LAST so the
+        # shared prefix stays byte-identical (already done by the callers),
+        # and pinning the provider below.
+
+        # Pin the upstream provider. A single slug can be served by several
+        # providers at different quantizations, so temperature=0.0 on its own
+        # does not make a panel vote reproducible — a mid-run reroute silently
+        # swaps the rater. Keeping calls on one provider is also what actually
+        # produces prompt-cache hits on the shared prefix.
+        provider: Dict[str, object] = {"allow_fallbacks": self._settings.panel_allow_fallbacks}
+        order = [p.strip() for p in self._settings.panel_provider_order.split(",") if p.strip()]
+        if order:
+            provider["order"] = order
+        payload["provider"] = provider
         return payload
 
     async def evaluate(
@@ -187,6 +269,7 @@ class EvaluatorPanel:
         votes = await asyncio.gather(*tasks, return_exceptions=True)
 
         panel_votes: List[PanelVote] = []
+        error_count = 0
         for model, result in zip(self._models, votes):
             if isinstance(result, Exception):
                 logger.warning(
@@ -195,6 +278,7 @@ class EvaluatorPanel:
                     error=str(result),
                 )
                 # On error, default to NO (fail-closed)
+                error_count += 1
                 panel_votes.append(PanelVote(
                     model=model,
                     vote=f"ERROR: {result}",
@@ -207,10 +291,28 @@ class EvaluatorPanel:
         no_count = len(panel_votes) - yes_count
         accepted = yes_count >= self._threshold
 
+        # A failed call becomes a NO, so enough failures force a rejection no
+        # matter what the item says — with 5 members and a threshold of 4, two
+        # errors cap the achievable score at 3/5. That is infrastructure noise
+        # entering the dataset as a content decision, and it is invisible in
+        # the CSV afterwards. Retries (see _evaluate_single) absorb transient
+        # 429/5xx, so reaching this warning means the errors outlived them.
+        if error_count and error_count > len(panel_votes) - self._threshold:
+            logger.warning(
+                "panel.verdict.indeterminate",
+                error_count=error_count,
+                panel_size=len(panel_votes),
+                threshold=self._threshold,
+                detail="errors alone could force rejection; treat this verdict as unreliable",
+            )
+
+        self._track_total_failure(error_count, len(panel_votes))
+
         logger.info(
             "panel.verdict",
             yes_count=yes_count,
             no_count=no_count,
+            error_count=error_count,
             accepted=accepted,
             threshold=self._threshold,
         )
@@ -221,8 +323,10 @@ class EvaluatorPanel:
             no_count=no_count,
             accepted=accepted,
             acceptance_threshold=self._threshold,
+            error_count=error_count,
         )
 
+    @external_api_retry
     async def _evaluate_single(
         self,
         model: str,
@@ -266,7 +370,12 @@ class EvaluatorPanel:
         # Parse YES/NO
         parsed = self._parse_yes_no(vote_text)
 
-        return PanelVote(model=model, vote=vote_text, parsed=parsed)
+        return PanelVote(
+            model=model,
+            vote=vote_text,
+            parsed=parsed,
+            provider=str(data.get("provider") or ""),
+        )
 
     @staticmethod
     def _parse_yes_no(text: str) -> bool:
@@ -343,6 +452,15 @@ class EvaluatorPanel:
             if v.label:
                 label_counts[v.label] = label_counts.get(v.label, 0) + 1
 
+        # A member that errored produces an empty label, so a total outage
+        # yields no labels at all and every sentence looks unlabelable. Same
+        # circuit breaker as the binary path — stop rather than silently
+        # producing a short dataset. Counted on empty labels rather than on
+        # exceptions alone, since an empty parse is equally unusable here.
+        self._track_total_failure(
+            sum(1 for v in label_votes if not v.label), len(label_votes)
+        )
+
         accepted_label: Optional[str] = None
         accepted = False
         if label_counts:
@@ -367,6 +485,7 @@ class EvaluatorPanel:
             acceptance_threshold=self._threshold,
         )
 
+    @external_api_retry
     async def _evaluate_label_single(
         self,
         model: str,

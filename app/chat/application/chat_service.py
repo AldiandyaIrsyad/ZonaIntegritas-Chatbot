@@ -34,7 +34,43 @@ _TABLE_ROW_RE = re.compile(r'^\s*\|.*\|\s*$')
 MIN_ASSESSABLE_LENGTH = 8
 
 class ChatService:
-    """Orchestrates the chat request pipeline."""
+    """Orchestrates the chat request pipeline (application-layer service).
+
+    ``process_chat_message`` runs the full streaming RAG pipeline for a
+    single user turn, in order:
+
+        1. Persist the incoming user message (and create/rename the session).
+        2. Safety check the combined message+attachment text (IVM).
+        3. Pre-check topical relevance against a shallow KB search (IVM).
+        4. Deep KB retrieval for generation context (top_k=15).
+        5. Build the system/user prompt (with anti-injection delimiter).
+        6. Stream the LLM completion, buffering by sentence/proposition.
+        7. Per-proposition, assess entailment against the retrieved context
+           and append a citation marker (RAM) — skipped in baseline mode.
+        8. Persist the final assistant message alongside its RAG context.
+
+    Collaborators injected at construction (each a port from
+    ``app/chat/domain/interfaces.py`` or a service from another bounded
+    context, wired in ``app/chat/dependency.py::get_chat_service``):
+        - ``chat_repo``: ``IChatRepository`` — session/message persistence.
+        - ``llm_conn``: ``ILLMConnection`` — streaming/non-streaming LLM calls.
+        - ``search_service``: ``app.kb.application.search_service.SearchService``
+          — hybrid KB retrieval (used for both the relevance pre-check and
+          the deep context fetch).
+        - ``ivm_service``: ``app.thesis.ivm.service.IVMService`` — the Input
+          Validation Module; prompt-injection/malicious-content safety gate.
+        - ``relevance_service``: ``app.thesis.ivm.relevance_service.RelevanceService``
+          — the IVM's out-of-domain / topical relevance gate.
+        - ``ram_service``: ``app.thesis.ram.service.RAMService`` — the
+          Response Assessment Module; per-sentence NLI entailment check
+          used to attach hallucination-aware citation markers.
+
+    Each defense can be disabled independently for ablation experiments —
+    ``skip_ivm`` (steps 2-3), ``skip_ram`` (step 7), and ``skip_nonce`` (the
+    delimiter in step 5) — with ``skip_guardrails`` kept as the shorthand that
+    sets the first two together. Retrieval always runs so the LLM has context.
+    See ``process_chat_message``.
+    """
 
     def __init__(
         self,
@@ -47,7 +83,28 @@ class ChatService:
         model_name: str,
         system_prompt: str,
         temperature: float = 0.0,
+        attachment_search_excerpt_chars: int = 4000,
     ):
+        """Wire the pipeline's collaborators and generation settings.
+
+        Args:
+            chat_repo: Session/message persistence port.
+            llm_conn: LLM connection port used for streaming generation.
+            search_service: KB hybrid retrieval service (relevance
+                pre-check + deep context fetch).
+            ivm_service: Safety (prompt-injection) checker.
+            relevance_service: Topical/OOD relevance checker.
+            ram_service: Per-sentence NLI assessment service used to
+                generate citation markers.
+            model_name: LLM model identifier passed to ``llm_conn``.
+            system_prompt: Base system prompt template (see
+                ``app.thesis.prompts.build_prompt``).
+            temperature: Sampling temperature for generation.
+            attachment_search_excerpt_chars: Max characters of an uploaded
+                attachment's text folded into the KB search query (the full
+                text still goes to the LLM prompt) — see
+                ``ChatConfig.attachment_search_excerpt_chars``.
+        """
         self.chat_repo = chat_repo
         self.llm_conn = llm_conn
         self.search_service = search_service
@@ -57,6 +114,7 @@ class ChatService:
         self.model_name = model_name
         self.system_prompt = system_prompt
         self.temperature = temperature
+        self.attachment_search_excerpt_chars = attachment_search_excerpt_chars
 
     async def create_session(self) -> Dict[str, Any]:
         """Create a new chat session."""
@@ -83,6 +141,7 @@ class ChatService:
                     "content": m.content,
                     "context": m.context,
                     "sources": m.sources,
+                    "attachment_filename": m.attachment_filename,
                 }
                 for m in session.messages
             ],
@@ -217,7 +276,7 @@ class ChatService:
         text: str,
         premise: str,
         ram_contexts: List[RAMRetrievedContext],
-        skip_guardrails: bool,
+        skip_ram: bool,
     ) -> str:
         """Run RAM assessment (unless in baseline mode) and format the
         result into a citation marker string (possibly "").
@@ -225,7 +284,7 @@ class ChatService:
         Shared by the per-proposition prose path and the accumulated
         table-block path in ``_handle_complete_proposition``.
         """
-        if skip_guardrails:
+        if skip_ram:
             return ""
         result = await self.ram_service.assess_sentence(text, premise, ram_contexts)
         return self._format_citation(result)
@@ -237,7 +296,7 @@ class ChatService:
         *,
         ram_contexts: List[RAMRetrievedContext],
         premise: str,
-        skip_guardrails: bool,
+        skip_ram: bool,
         table_rows: List[Tuple[str, str]],
     ) -> AsyncGenerator[str, None]:
         """Process one complete (proposition, sep) pair, yielding output
@@ -259,7 +318,7 @@ class ChatService:
         if table_rows:
             table_text = "\n".join(row for row, _ in table_rows)
             table_rows.clear()
-            citation = await self._assess_and_format(table_text, premise, ram_contexts, skip_guardrails)
+            citation = await self._assess_and_format(table_text, premise, ram_contexts, skip_ram)
             if citation:
                 yield "\n" + citation.strip() + "\n\n"
 
@@ -267,21 +326,76 @@ class ChatService:
             prop_text += "."
 
         if len(prop_text) > MIN_ASSESSABLE_LENGTH:
-            citation = await self._assess_and_format(prop_text, premise, ram_contexts, skip_guardrails)
+            citation = await self._assess_and_format(prop_text, premise, ram_contexts, skip_ram)
             prop_text += citation
 
         yield prop_text + sep
 
     async def process_chat_message(
-        self, session_id: str, message_text: str, skip_guardrails: bool = False
+        self,
+        session_id: str,
+        message_text: str,
+        skip_guardrails: bool = False,
+        attachment_text: Optional[str] = None,
+        attachment_filename: Optional[str] = None,
+        skip_ivm: Optional[bool] = None,
+        skip_ram: Optional[bool] = None,
+        skip_nonce: bool = False,
     ) -> AsyncGenerator[str, None]:
         """The main generation pipeline: Safety -> Pre-check -> Context -> Generate -> Assess.
 
-        When ``skip_guardrails`` is True, the IVM safety/relevance checks and
-        the RAM per-sentence assessment are bypassed (baseline mode for
-        Experiment 4). Retrieval still runs so the LLM has context.
+        The three defenses can be disabled independently, which is what lets an
+        experiment attribute an effect to one of them rather than to "guardrails
+        on vs off" as a single block:
+
+        - ``skip_ivm`` bypasses the IVM safety + relevance checks.
+        - ``skip_ram`` bypasses the RAM per-sentence assessment.
+        - ``skip_nonce`` bypasses the anti-injection delimiter (see
+          ``app.thesis.prompts.build_prompt``), which is a structural defense
+          independent of the IVM classifier.
+
+        ``skip_guardrails`` remains as the both-at-once shorthand: it sets
+        ``skip_ivm`` and ``skip_ram`` together unless either is passed
+        explicitly. It does NOT imply ``skip_nonce`` — the delimiter is not
+        part of the IVM/RAM pair, and folding it in would silently change what
+        the existing Experiment 4 baseline measures.
+
+        Retrieval always runs so the LLM has context.
+
+        ``attachment_text`` (the extracted text of a chat-uploaded PDF, if
+        any) is treated as part of the user's prompt for this turn only: it
+        is folded into the same IVM safety check, the same KB search queries,
+        and the same anti-injection delimiter as the typed message, but is
+        never persisted or replayed on later turns (see
+        ``app/chat/infra/pdf_text_extractor.py`` and
+        ``app/chat/application/attachment_service.py``).
         """
-        
+
+        # Resolve the individual switches from the shorthand.
+        skip_ivm = skip_guardrails if skip_ivm is None else skip_ivm
+        skip_ram = skip_guardrails if skip_ram is None else skip_ram
+
+        # Combined text used for safety checking and prompt building: the
+        # attachment is data the user is asking about, so it rides inside
+        # the same trust boundary as the typed message rather than being
+        # treated as separate system-provided context.
+        if attachment_text:
+            combined_text = (
+                f"{message_text}\n\n[Dokumen terlampir: {attachment_filename}]\n{attachment_text}"
+            )
+            # Capped excerpt for KB search queries only (full text still goes
+            # into combined_text above for the IVM check and LLM prompt) —
+            # a short question like "is this against X rules?" alone often
+            # won't retrieve the right KB chunks since the real topic lives
+            # in the attachment, but a full-length document would degrade
+            # embedding/HyDE query quality.
+            search_query_text = (
+                f"{message_text}\n\n{attachment_text[: self.attachment_search_excerpt_chars]}"
+            )
+        else:
+            combined_text = message_text
+            search_query_text = message_text
+
         # 1. Initialize or get session
         session = await self.chat_repo.get_session_by_id(session_id, load_messages=True)
         is_new_session = False
@@ -300,13 +414,20 @@ class ChatService:
         else:
             history = list(session.messages[-10:]) if session and session.messages else []
 
-        # Record user message
-        await self.chat_repo.create_message(session_id, "user", message_text, raw_content=message_text)
+        # Record user message. Only the typed text and the attachment's
+        # filename are persisted — the extracted attachment text itself is
+        # single-turn only and never stored (see docstring above).
+        await self.chat_repo.create_message(
+            session_id, "user", message_text, raw_content=message_text,
+            attachment_filename=attachment_filename,
+        )
 
         try:
-            # 2. Safety Check (IVM)
-            if not skip_guardrails:
-                await self.ivm_service.check_malicious(message_text)
+            # 2. Safety Check (IVM) — scans the combined message + attachment
+            # text, since an attached PDF is just as capable of carrying a
+            # prompt injection as typed text.
+            if not skip_ivm:
+                await self.ivm_service.check_malicious(combined_text)
 
             # 3. Pre-check Relevance (IVM + KB)
             # NOTE: We intentionally do NOT pass session_id here. The chat
@@ -314,17 +435,17 @@ class ChatService:
             # KB chunks are ingested without a session_id and the Qdrant
             # filter would return zero results if we passed the chat
             # session ID.
-            precheck_contexts = await self.search_service.search(message_text, top_k=3)
-            if not skip_guardrails:
+            precheck_contexts = await self.search_service.search(search_query_text, top_k=3)
+            if not skip_ivm:
                 if not precheck_contexts:
                     raise IrrelevantQueryException("No relevant contexts found in the knowledge base.")
 
                 context_chunks = [ctx.text for ctx in precheck_contexts]
                 context_scores = [ctx.score for ctx in precheck_contexts]
-                await self.relevance_service.check_relevance(message_text, context_chunks, context_scores)
+                await self.relevance_service.check_relevance(search_query_text, context_chunks, context_scores)
 
             # 4. Deep Context Retrieval (KB)
-            full_contexts = await self.search_service.search(message_text, top_k=15)
+            full_contexts = await self.search_service.search(search_query_text, top_k=15)
             
             # Map KB contexts to RAM contexts (preserve breadcrumbs + hierarchy)
             ram_contexts = [
@@ -345,7 +466,9 @@ class ChatService:
             # cryptographically random per-request delimiter wrapping the
             # raw user message, as an additional defense against system
             # prompt injection on top of the IVM safety check above).
-            bundle = build_prompt(message_text, ram_contexts, self.system_prompt)
+            bundle = build_prompt(
+                combined_text, ram_contexts, self.system_prompt, use_nonce=not skip_nonce
+            )
 
             messages = [{"role": "system", "content": bundle.system_prompt}]
             # Add history (up to last 5 messages to avoid blowing up context window)
@@ -414,7 +537,7 @@ class ChatService:
                         for prop, sep in propositions[:-1]:
                             async for out in self._handle_complete_proposition(
                                 prop, sep, ram_contexts=ram_contexts, premise=premise,
-                                skip_guardrails=skip_guardrails, table_rows=table_rows,
+                                skip_ram=skip_ram, table_rows=table_rows,
                             ):
                                 final_output += out
                                 yield json.dumps({"type": "chunk", "content": out}) + "\n"
@@ -426,7 +549,7 @@ class ChatService:
                 for prop, sep in self._split_propositions(buffer.strip()):
                     async for out in self._handle_complete_proposition(
                         prop, sep, ram_contexts=ram_contexts, premise=premise,
-                        skip_guardrails=skip_guardrails, table_rows=table_rows,
+                        skip_ram=skip_ram, table_rows=table_rows,
                     ):
                         final_output += out
                         yield json.dumps({"type": "chunk", "content": out}) + "\n"
@@ -438,7 +561,7 @@ class ChatService:
             if table_rows:
                 table_text = "\n".join(row for row, _ in table_rows)
                 table_rows.clear()
-                citation = await self._assess_and_format(table_text, premise, ram_contexts, skip_guardrails)
+                citation = await self._assess_and_format(table_text, premise, ram_contexts, skip_ram)
                 if citation:
                     out = "\n" + citation.strip() + "\n\n"
                     final_output += out

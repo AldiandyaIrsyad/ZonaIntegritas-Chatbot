@@ -7,6 +7,16 @@ This module provides three adapters that implement the
 2. :class:`OllamaVLMClient` — Local VLM via Ollama (LLaVA, Qwen-VL).
 3. :class:`FallbackVLMClient` — No VLM; uses PyMuPDF drawing analysis
    for text-only heuristic descriptions.
+
+Fulfills: ``app/thesis/vlm/interfaces.py::IVLMEnricher`` (all three classes).
+Wired in: ``app/kb/dependency.py::get_vlm_enricher``, which selects one of
+the three at runtime based on config (API key presence, Ollama base URL,
+falling back to :class:`FallbackVLMClient` when neither is configured).
+
+Unlike the rest of ``thesis/`` (``chunking``, ``ivm``, ``ram``, ``prompts``),
+this module is the one deliberate exception to the stdlib-only purity rule:
+it calls ``httpx`` directly against OpenRouter/Ollama (see
+``docs/02-arsitektur.md`` §2.2).
 """
 
 from __future__ import annotations
@@ -40,6 +50,10 @@ class OpenRouterVLMClient(IVLMEnricher):
 
     Sends a base64-encoded image to the OpenRouter chat completions
     endpoint with a vision-capable model. Requires an API key.
+
+    Fulfills: ``app/thesis/vlm/interfaces.py::IVLMEnricher``.
+    Wired in: ``app/kb/dependency.py::get_vlm_enricher`` (the default when
+    an OpenRouter API key is configured).
     """
 
     def __init__(self, api_key: str, model: str, base_url: str, timeout: float = 120.0) -> None:
@@ -98,7 +112,7 @@ class OpenRouterVLMClient(IVLMEnricher):
         try:
             response = await self._post_chat_completions(payload)
             data = response.json()
-            description = data["choices"][0]["message"]["content"].strip()
+            description = (data["choices"][0]["message"]["content"] or "").strip()
             logger.info("vlm.cloud.success", model=self._model, image=image_path, desc_len=len(description))
             return description
         except Exception as exc:
@@ -120,6 +134,10 @@ class OllamaVLMClient(IVLMEnricher):
 
     Sends a base64-encoded image to the local Ollama instance. No API
     key required — runs entirely on local hardware.
+
+    Fulfills: ``app/thesis/vlm/interfaces.py::IVLMEnricher``.
+    Wired in: ``app/kb/dependency.py::get_vlm_enricher`` (selected when no
+    OpenRouter API key is configured but an Ollama base URL is).
     """
 
     def __init__(self, base_url: str, model: str, timeout: float = 120.0) -> None:
@@ -160,7 +178,7 @@ class OllamaVLMClient(IVLMEnricher):
             response = await self._client.post("/api/generate", json=payload)
             response.raise_for_status()
             data = response.json()
-            description = data.get("response", "").strip()
+            description = (data.get("response") or "").strip()
             logger.info("vlm.local.success", model=self._model, image=image_path, desc_len=len(description))
             return description
         except Exception as exc:
@@ -180,6 +198,10 @@ class FallbackVLMClient(IVLMEnricher):
 
     The description is less rich than a true VLM but preserves structural
     information (e.g. "flowchart with 15 drawing elements and 3 annotations").
+
+    Fulfills: ``app/thesis/vlm/interfaces.py::IVLMEnricher``.
+    Wired in: ``app/kb/dependency.py::get_vlm_enricher`` (the fallback when
+    neither an OpenRouter API key nor an Ollama base URL is configured).
     """
 
     def __init__(self, pdf_path: Optional[str] = None) -> None:

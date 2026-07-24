@@ -22,8 +22,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import random
 import re
 import sys
+import time
+from urllib.parse import urlencode
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -66,7 +70,7 @@ CITATION_PATTERN = re.compile(
 # chapter4.md §4.6.3's description of the same mechanism for the relevance
 # judge). Measured on data/results/exp4_end_to_end_qwen3-32b.csv: 48/98
 # full-pipeline and 67/98 baseline responses match this (writing/
-# weekend_fixes_plan.md M1). This is a DETECTOR, not a text-repair tool —
+# writing/overhaul.md M1). This is a DETECTOR, not a text-repair tool —
 # there is no structural signal in the NDJSON stream that separates
 # reasoning from real content (confirmed: both are emitted as the same
 # "chunk" event type), so guessing where the real answer starts risks
@@ -99,7 +103,7 @@ def strip_citation_markup(text: str) -> str:
     BERTScore should measure similarity of the substantive answer to the
     reference, not of machine-generated markup — measured citation markup
     is 49.8-53.0% of full-pipeline response characters (M2 in
-    writing/weekend_fixes_plan.md), while the baseline condition has 0%,
+    writing/overhaul.md), while the baseline condition has 0%,
     so leaving it in made the two conditions' BERTScore not comparable.
 
     Args:
@@ -123,7 +127,7 @@ class PipelineResult:
         abstained: Whether the system genuinely refused/warned (an IVM
             block or explicit pipeline rejection — the "error" NDJSON
             event). Distinct from ``errored`` (M4 in
-            writing/weekend_fixes_plan.md): a request timeout or non-200
+            writing/overhaul.md): a request timeout or non-200
             response used to also set this to True, which credited
             infrastructure failures as correct out-of-domain refusals.
         errored: Whether the request itself failed (timeout, non-200) —
@@ -139,6 +143,10 @@ class PipelineResult:
             of whether guardrails ran, so faithfulness can be computed
             post-hoc for pipeline runs where RAM didn't run live — see
             compute_posthoc_faithfulness.
+        latency_s: Wall-clock seconds for the streaming request. RQ4 asks
+            about overall performance, and the guardrails cost real time (an
+            IVM judge call plus one NLI call per sentence), so the quality
+            numbers are only half the trade-off without this.
     """
 
     question: str
@@ -150,6 +158,7 @@ class PipelineResult:
     category: str = ""
     ground_truth: str = ""
     retrieved_context: str = ""
+    latency_s: float = 0.0
 
 
 @dataclass
@@ -162,7 +171,7 @@ class E2EMetrics:
         bertscore_f1_ci: Bootstrap CI for BERTScore F1.
         faithfulness_score: PRIMARY faithfulness metric — post-hoc NLI
             check over every sentence, computed the same way for both
-            pipeline conditions (M3 in writing/weekend_fixes_plan.md; see
+            pipeline conditions (M3 in writing/overhaul.md; see
             compute_posthoc_faithfulness). Populated by the caller
             (async_main), not by compute_e2e_metrics itself, since it
             requires an NLI client shared across both conditions.
@@ -188,6 +197,13 @@ class E2EMetrics:
         contamination_rate: Fraction of in-domain scored responses flagged
             by detect_reasoning_contamination (M1) — reported for
             transparency; see --exclude-contaminated.
+        latency_mean_s: Mean wall-clock seconds per query, over non-errored
+            queries. The cost side of RQ4's trade-off: guardrails buy their
+            quality/safety gains with an IVM judge call plus one NLI call per
+            generated sentence.
+        latency_p50_s: Median latency — reported alongside the mean because a
+            few slow queries skew the mean badly at this n.
+        latency_p95_s: 95th-percentile latency.
         total_queries: Total number of queries evaluated.
         out_of_domain_count: Number of out-of-domain queries.
     """
@@ -204,6 +220,9 @@ class E2EMetrics:
     false_refusal_ci: CI = field(default_factory=lambda: CI(0.0, 0.0, 0.0))
     error_rate: float = 0.0
     contamination_rate: float = 0.0
+    latency_mean_s: float = 0.0
+    latency_p50_s: float = 0.0
+    latency_p95_s: float = 0.0
     total_queries: int = 0
     out_of_domain_count: int = 0
 
@@ -256,6 +275,8 @@ async def run_pipeline(
     row: SubsetARow,
     session_id: Optional[str] = None,
     skip_guardrails: bool = False,
+    skip_ivm: Optional[bool] = None,
+    skip_ram: Optional[bool] = None,
 ) -> PipelineResult:
     """Run the full RAG pipeline on a single query via the chat API.
 
@@ -263,11 +284,17 @@ async def run_pipeline(
         api_url: Base URL of the running application.
         row: Subset A row with question and ground truth.
         session_id: Optional session ID for the chat.
-        skip_guardrails: If True, append ``?skip_guardrails=true`` to bypass
-            IVM + RAM (baseline mode for Experiment 4).
+        skip_guardrails: If True, bypass IVM + RAM together (the original
+            baseline arm).
+        skip_ivm: If set, bypass only the IVM safety/relevance checks.
+        skip_ram: If set, bypass only the RAM per-sentence assessment.
+            Together with skip_ivm this makes the guardrail conditions a
+            4-cell ablation (none / IVM-only / RAM-only / both) rather than a
+            single on-off block, which is what lets an effect be attributed
+            to one of the two modules.
 
     Returns:
-        PipelineResult with response and parsed citations.
+        PipelineResult with response, parsed citations, and elapsed latency.
     """
     async with httpx.AsyncClient(base_url=api_url, timeout=120.0) as client:
         # Create a session
@@ -281,8 +308,17 @@ async def run_pipeline(
 
         # Send the message to the streaming endpoint
         stream_url = f"/api/chat/sessions/{session_id}/stream"
+        params: Dict[str, str] = {}
         if skip_guardrails:
-            stream_url += "?skip_guardrails=true"
+            params["skip_guardrails"] = "true"
+        if skip_ivm is not None:
+            params["skip_ivm"] = str(skip_ivm).lower()
+        if skip_ram is not None:
+            params["skip_ram"] = str(skip_ram).lower()
+        if params:
+            stream_url += "?" + urlencode(params)
+
+        started = time.perf_counter()
         try:
             resp = await client.post(
                 stream_url,
@@ -291,7 +327,7 @@ async def run_pipeline(
             )
             if resp.status_code != 200:
                 # Infra/HTTP failure, not a pipeline verdict — errored, not
-                # abstained (M4 in writing/weekend_fixes_plan.md: crediting
+                # abstained (M4 in writing/overhaul.md: crediting
                 # this as a correct out-of-domain refusal was inflating
                 # Abstention Accuracy on infrastructure noise).
                 return PipelineResult(
@@ -300,6 +336,7 @@ async def run_pipeline(
                     errored=True,
                     category=row.category,
                     ground_truth=row.ground_truth_answer,
+                    latency_s=time.perf_counter() - started,
                 )
 
             # The response is an NDJSON stream
@@ -327,6 +364,7 @@ async def run_pipeline(
                                 abstained=True,
                                 category=row.category,
                                 ground_truth=row.ground_truth_answer,
+                                latency_s=time.perf_counter() - started,
                             )
                         elif chunk_type == "done":
                             break
@@ -344,6 +382,7 @@ async def run_pipeline(
                 errored=True,
                 category=row.category,
                 ground_truth=row.ground_truth_answer,
+                latency_s=time.perf_counter() - started,
             )
 
     citations = parse_citations(response_text)
@@ -356,6 +395,7 @@ async def run_pipeline(
         category=row.category,
         ground_truth=row.ground_truth_answer,
         retrieved_context=retrieved_context,
+        latency_s=time.perf_counter() - started,
     )
 
 
@@ -390,7 +430,7 @@ def compute_e2e_metrics(
     NOTE: this does NOT set the primary faithfulness_score/faithfulness_ci
     — those come from compute_posthoc_faithfulness, run uniformly over
     both pipeline conditions by the caller (M3 in
-    writing/weekend_fixes_plan.md). This function only populates the
+    writing/overhaul.md). This function only populates the
     citation-based citation_faithfulness_score as a secondary/diagnostic
     number.
 
@@ -426,6 +466,14 @@ def compute_e2e_metrics(
     # --- Error rate (all rows) ---
     if results:
         metrics.error_rate = sum(1 for r in results if r.errored) / len(results)
+
+    # --- Latency (non-errored rows: a timeout's 120s says nothing about how
+    # long the pipeline takes when it works) ---
+    latencies = sorted(r.latency_s for r in results if not r.errored and r.latency_s > 0)
+    if latencies:
+        metrics.latency_mean_s = sum(latencies) / len(latencies)
+        metrics.latency_p50_s = latencies[len(latencies) // 2]
+        metrics.latency_p95_s = latencies[min(len(latencies) - 1, int(len(latencies) * 0.95))]
 
     # --- BERTScore F1 (in-domain only, citation markup stripped — M2) ---
     if in_domain:
@@ -504,7 +552,7 @@ async def compute_posthoc_faithfulness(
     Originally written only for the no-guardrail baseline (which skips RAM
     entirely, so citation-based faithfulness is always 0.0/undefined for
     it — see compute_e2e_metrics's citation_faithfulness_score). Since M3
-    in writing/weekend_fixes_plan.md, this is now called for BOTH pipeline
+    in writing/overhaul.md, this is now called for BOTH pipeline
     conditions and used as the headline faithfulness_score: the
     citation-based measure only scores the ~17% of full-pipeline sentences
     that happened to carry a citation marker (measured on
@@ -554,9 +602,61 @@ async def compute_posthoc_faithfulness(
     return mean_score, ci, per_question
 
 
+def compute_per_category(
+    results: List[PipelineResult],
+    per_row: Dict[str, Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Break the in-domain scores down by question category.
+
+    RQ4 asks how the system performs answering questions about JDIH documents;
+    Subset A already labels each question factual / procedural / multi-hop, but
+    only the aggregate was ever reported, so "multi-hop questions do worse" was
+    not a statement the results could support or refute. Regroups the
+    already-computed per-row scores rather than recomputing anything.
+
+    Args:
+        results: Pipeline results for one condition.
+        per_row: The per-question score map from compute_e2e_metrics plus
+            add_posthoc_faithfulness (bertscore_f1, faithfulness_score).
+
+    Returns:
+        Mapping of category -> {n, bertscore_f1, faithfulness_score,
+        latency_mean_s}, where a score is None if no row in that category had
+        one.
+    """
+    by_category: Dict[str, List[PipelineResult]] = defaultdict(list)
+    for r in results:
+        if r.category in ("out-of-domain", "out_of_domain"):
+            continue
+        by_category[r.category].append(r)
+
+    def _mean(values: List[float]) -> Optional[float]:
+        return sum(values) / len(values) if values else None
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for category, rows in sorted(by_category.items()):
+        bert = [
+            v for v in (per_row.get(r.question, {}).get("bertscore_f1") for r in rows)
+            if v is not None
+        ]
+        faith = [
+            v for v in (per_row.get(r.question, {}).get("faithfulness_score") for r in rows)
+            if v is not None
+        ]
+        latencies = [r.latency_s for r in rows if not r.errored and r.latency_s > 0]
+        out[category] = {
+            "n": len(rows),
+            "bertscore_f1": _mean(bert),
+            "faithfulness_score": _mean(faith),
+            "latency_mean_s": _mean(latencies),
+        }
+    return out
+
+
 def print_report(
     system_name: str,
     metrics: E2EMetrics,
+    per_category: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
     """Print a formatted end-to-end evaluation report.
 
@@ -587,10 +687,77 @@ def print_report(
           f"[{metrics.false_refusal_ci.lower:.4f}, {metrics.false_refusal_ci.upper:.4f}]"
           f"  (in-domain, wrongly refused)")
     print()
+    print(f"  Latency (mean/p50/p95): {metrics.latency_mean_s:.2f}s / "
+          f"{metrics.latency_p50_s:.2f}s / {metrics.latency_p95_s:.2f}s  (non-errored queries)")
     print(f"  Error Rate:          {metrics.error_rate:.4f}  (request failed — timeout/non-200, no verdict)")
     print(f"  Contamination Rate:  {metrics.contamination_rate:.4f}  (responses flagged by "
           f"detect_reasoning_contamination — see --exclude-contaminated)")
+
+    if per_category:
+        print()
+        print(f"  Per Category (in-domain):")
+        print(f"  {'Category':<20} {'N':>5} {'BERTScore':>12} {'Faithfulness':>14} {'Latency':>10}")
+        print(f"  {'-' * 64}")
+        for category, stats in per_category.items():
+            bert = f"{stats['bertscore_f1']:.4f}" if stats["bertscore_f1"] is not None else "—"
+            faith = f"{stats['faithfulness_score']:.4f}" if stats["faithfulness_score"] is not None else "—"
+            lat = f"{stats['latency_mean_s']:.2f}s" if stats["latency_mean_s"] is not None else "—"
+            print(f"  {category:<20} {stats['n']:>5} {bert:>12} {faith:>14} {lat:>10}")
     print()
+
+
+def stratified_sample(
+    dataset: List[SubsetARow], limit: int, seed: int
+) -> List[SubsetARow]:
+    """Take ~``limit`` rows spread as evenly as possible across categories.
+
+    The lean RQ4 run (``--limit``) trades the full sweep for a fixed budget,
+    but a blind head-N sample would skew toward whichever category leads the
+    CSV and could drop a category (e.g. out-of-domain) entirely — which would
+    silently disable the abstention metric. This allocates the budget
+    round-robin over the category labels so each keeps representation in both
+    the quantitative anchor and the per-category breakdown. Deterministic in
+    (dataset order, ``seed``): rows are shuffled within each category so the
+    pick isn't biased by CSV order.
+
+    Args:
+        dataset: Rows to sample from.
+        limit: Target sample size. ``<= 0`` or ``>= len(dataset)`` returns the
+            full dataset unchanged.
+        seed: RNG seed for the within-category shuffle.
+
+    Returns:
+        The sampled rows, grouped by category (categories in sorted order).
+    """
+    if limit <= 0 or limit >= len(dataset):
+        return list(dataset)
+
+    by_cat: Dict[str, List[SubsetARow]] = defaultdict(list)
+    for row in dataset:
+        by_cat[row.category].append(row)
+
+    rng = random.Random(seed)
+    cats = sorted(by_cat)
+    for cat in cats:
+        rng.shuffle(by_cat[cat])
+
+    selected: List[SubsetARow] = []
+    cursors = {cat: 0 for cat in cats}
+    while len(selected) < limit:
+        progressed = False
+        for cat in cats:
+            if len(selected) >= limit:
+                break
+            idx = cursors[cat]
+            if idx < len(by_cat[cat]):
+                selected.append(by_cat[cat][idx])
+                cursors[cat] = idx + 1
+                progressed = True
+        if not progressed:
+            break  # every category exhausted before reaching the limit
+
+    selected.sort(key=lambda r: cats.index(r.category))
+    return selected
 
 
 async def async_main(args: argparse.Namespace) -> None:
@@ -607,6 +774,14 @@ async def async_main(args: argparse.Namespace) -> None:
 
     print(f"Loaded {len(dataset)} samples from Subset A")
 
+    if args.limit and args.limit > 0:
+        dataset = stratified_sample(dataset, args.limit, args.seed)
+        n_cats = len({r.category for r in dataset})
+        print(
+            f"Stratified sample (lean RQ4): {len(dataset)} rows across "
+            f"{n_cats} categories (limit={args.limit}, seed={args.seed})"
+        )
+
     csv_rows: List[Dict[str, Any]] = []
 
     def add_csv_rows(results: List[PipelineResult], condition: str, per_row: Dict[str, Dict[str, Any]]) -> None:
@@ -620,6 +795,7 @@ async def async_main(args: argparse.Namespace) -> None:
                 "abstained": r.abstained,
                 "errored": r.errored,
                 "reasoning_contaminated": r.reasoning_contaminated,
+                "latency_s": round(r.latency_s, 3),
                 "faithfulness_score": row_data.get("faithfulness_score"),
                 "citation_faithfulness_score": row_data.get("citation_faithfulness_score"),
                 "bertscore_f1_contribution": row_data.get("bertscore_f1"),
@@ -649,47 +825,65 @@ async def async_main(args: argparse.Namespace) -> None:
         for question, s in per_question.items():
             per_row.setdefault(question, {})["faithfulness_score"] = s
 
+    # Guardrail conditions. "full" and "baseline" keep their original names and
+    # meaning so runs stay comparable with the committed results; "ivm_only"
+    # and "ram_only" are the two cells that let an effect be attributed to one
+    # module instead of to the pair (the word "ganda" in RQ4).
+    ALL_CONDITIONS: Dict[str, Dict[str, bool]] = {
+        "full": {"skip_ivm": False, "skip_ram": False},
+        "ivm_only": {"skip_ivm": False, "skip_ram": True},
+        "ram_only": {"skip_ivm": True, "skip_ram": False},
+        "baseline": {"skip_ivm": True, "skip_ram": True},
+    }
+    CONDITION_LABELS = {
+        "full": "Full Pipeline (IVM + RAM)",
+        "ivm_only": "IVM only (RAM disabled)",
+        "ram_only": "RAM only (IVM disabled)",
+        "baseline": "Baseline (no guardrails)",
+    }
+
+    if args.conditions == "all":
+        selected = list(ALL_CONDITIONS)
+    elif args.conditions == "ablation":
+        selected = ["full", "ivm_only", "ram_only", "baseline"]
+    else:
+        selected = [c.strip() for c in args.conditions.split(",") if c.strip()]
+
+    # Back-compat with the original flags.
+    if args.baseline_only:
+        selected = ["baseline"]
+    elif args.no_baseline:
+        selected = [c for c in selected if c != "baseline"]
+
+    unknown = [c for c in selected if c not in ALL_CONDITIONS]
+    if unknown:
+        print(f"ERROR: unknown condition(s): {', '.join(unknown)}", file=sys.stderr)
+        sys.exit(1)
+
     nli_client = EvalNLIClient(args.infinity_url, args.nli_model)
     try:
-        if not args.baseline_only:
-            # --- Full pipeline (with guardrails) ---
-            print("\nRunning full RAG pipeline (IVM → retrieval → generation → RAM)...")
-            full_results: List[PipelineResult] = []
+        for condition in selected:
+            switches = ALL_CONDITIONS[condition]
+            label = CONDITION_LABELS[condition]
+            print(f"\nRunning condition: {label}...")
+
+            results: List[PipelineResult] = []
             for i, row in enumerate(dataset, 1):
-                result = await run_pipeline(args.api_url, row)
-                full_results.append(result)
+                result = await run_pipeline(args.api_url, row, **switches)
+                results.append(result)
                 if i % 10 == 0:
                     print(f"  Processed {i}/{len(dataset)} queries...")
 
-            full_metrics, full_per_row = compute_e2e_metrics(full_results, exclude_contaminated=args.exclude_contaminated)
-            print("Computing full-pipeline Faithfulness post-hoc (primary metric, M3)...")
-            await add_posthoc_faithfulness(full_results, full_metrics, full_per_row, nli_client)
-            print_report("Full Pipeline (with IVM + RAM guardrails)", full_metrics)
-            add_csv_rows(full_results, "full", full_per_row)
-
-            if args.no_baseline:
-                write_results_csv(args.output_csv, csv_rows)
-                return
-
-        # --- No-guardrail baseline ---
-        print("\nRunning no-guardrail baseline pipeline...")
-        baseline_results: List[PipelineResult] = []
-        for i, row in enumerate(dataset, 1):
-            result = await run_no_guardrail_pipeline(args.api_url, row)
-            baseline_results.append(result)
-            if i % 10 == 0:
-                print(f"  Processed {i}/{len(dataset)} queries...")
-
-        baseline_metrics, baseline_per_row = compute_e2e_metrics(
-            baseline_results, exclude_contaminated=args.exclude_contaminated
-        )
-        print("Computing baseline Faithfulness post-hoc (primary metric)...")
-        await add_posthoc_faithfulness(baseline_results, baseline_metrics, baseline_per_row, nli_client)
+            metrics, per_row = compute_e2e_metrics(
+                results, exclude_contaminated=args.exclude_contaminated
+            )
+            print(f"Computing {condition} Faithfulness post-hoc (primary metric, M3)...")
+            await add_posthoc_faithfulness(results, metrics, per_row, nli_client)
+            per_category = compute_per_category(results, per_row)
+            print_report(label, metrics, per_category)
+            add_csv_rows(results, condition, per_row)
     finally:
         await nli_client.aclose()
-
-    print_report("Baseline (no guardrails)", baseline_metrics)
-    add_csv_rows(baseline_results, "baseline", baseline_per_row)
 
     write_results_csv(args.output_csv, csv_rows)
 
@@ -719,10 +913,18 @@ def main() -> None:
         "--exclude-contaminated",
         action="store_true",
         help="Exclude responses flagged by detect_reasoning_contamination (M1 in "
-        "writing/weekend_fixes_plan.md — an English chain-of-thought preamble that "
+        "writing/overhaul.md — an English chain-of-thought preamble that "
         "should have been Indonesian) from BERTScore and Faithfulness aggregates. "
         "Off by default so the default run doesn't silently change which rows are "
         "scored; contamination_rate is always reported regardless of this flag.",
+    )
+    parser.add_argument(
+        "--conditions",
+        default="full,baseline",
+        help="Guardrail conditions to run: 'ablation' (or 'all') for the 4-cell "
+        "full/ivm_only/ram_only/baseline ablation, or a comma-separated subset of "
+        "those names. Defaults to 'full,baseline' — the original two-arm comparison — "
+        "so an unflagged run stays comparable with the committed results.",
     )
     parser.add_argument(
         "--no-baseline",
@@ -735,6 +937,20 @@ def main() -> None:
         help="Skip the full (with-guardrails) pipeline and only run the no-guardrail baseline — "
         "for re-running just the baseline after a fix that only affects its measurement "
         "(e.g. Faithfulness), without re-paying for the already-valid guardrail pipeline's LLM calls.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="If >0, run on a stratified sample of ~N rows spread evenly across "
+        "question categories (the lean RQ4 run — a small quantitative anchor "
+        "rather than the full sweep). 0 (default) uses the whole dataset.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="RNG seed for the --limit stratified sample (deterministic).",
     )
     parser.add_argument(
         "--output-csv",

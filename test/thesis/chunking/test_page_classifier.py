@@ -167,6 +167,73 @@ class TestClassifyPageVisual:
 
 
 # ---------------------------------------------------------------------------
+# classify_page — native_text_len scan-only override
+# ---------------------------------------------------------------------------
+
+class TestClassifyPageNativeTextLen:
+    """A near-empty native PDF text layer forces VISUAL even when
+    Unstructured's own OCR noise slips past the garbage-ratio check by
+    surfacing as real-word-shaped (but mis-read) text elements rather than
+    as the image element's own text — a real corpus failure mode where a
+    2-page scan-only "Keputusan Rektor" decree (0 native chars/page, 1 image
+    each) produced chunks like "PNRIMA PENGHARGAAN DESAIN LOGO PINGATAN..."
+    (55 chars, mostly alphanumeric — too long/dense for the length+density
+    heuristic) sitting alongside a kept empty-text Image element, diluting
+    image_ratio below 0.5 and keeping the page out of VISUAL.
+    """
+
+    def test_scan_only_page_forced_visual_despite_real_looking_ocr_noise(self) -> None:
+        elements = [
+            _make_el("Image", ""),
+            _make_el("NarrativeText", "PNRIMA PENGHARGAAN DESAIN LOGO PINGATAN DIES NATALIS U"),
+        ]
+        # Without the native-text signal: image_ratio=0.5, garbage_ratio=1.0
+        # (the Image's own text is empty) — already VISUAL by ratio alone in
+        # this 2-element case, so widen it to make the ratio-based path fail
+        # on its own, isolating the native_text_len signal.
+        elements += [_make_el("NarrativeText", "Baris OCR keliru lainnya.") for _ in range(3)]
+        cls_without_signal = classify_page(elements, page_number=1)
+        assert cls_without_signal.page_type != PageType.VISUAL  # confirms ratio path alone fails here
+
+        cls_with_signal = classify_page(elements, page_number=1, native_text_len=0)
+        assert cls_with_signal.page_type == PageType.VISUAL
+
+    def test_native_text_len_none_preserves_prior_behavior(self) -> None:
+        """Default (no PDF-level signal available) is unaffected."""
+        elements = [
+            _make_el("Image", "Deskripsi gambar yang cukup panjang") for _ in range(6)
+        ] + [_make_el("NarrativeText", "Teks.") for _ in range(4)]
+        cls = classify_page(elements, page_number=1, native_text_len=None)
+        assert cls.page_type != PageType.VISUAL
+
+    def test_native_text_len_above_threshold_does_not_force_visual(self) -> None:
+        """A real text-rich page with one legitimate embedded figure isn't
+        misclassified just because it happens to have an image element."""
+        elements = [
+            _make_el("NarrativeText", "Paragraf isi dokumen yang panjang.") for _ in range(5)
+        ] + [_make_el("Image", "Grafik pendukung dengan keterangan jelas.")]
+        cls = classify_page(elements, page_number=1, native_text_len=500)
+        assert cls.page_type != PageType.VISUAL
+
+    def test_native_text_len_requires_at_least_one_image(self) -> None:
+        """Near-zero native text with no image element shouldn't force
+        VISUAL — there'd be nothing for the VLM to render/extract from."""
+        elements = [_make_el("NarrativeText", "x")]
+        cls = classify_page(elements, page_number=1, native_text_len=0)
+        assert cls.page_type != PageType.VISUAL
+
+    def test_native_text_len_at_threshold_boundary(self) -> None:
+        elements = [_make_el("Image", "")] + [
+            _make_el("NarrativeText", "Teks OCR keliru yang cukup panjang untuk lolos.") for _ in range(3)
+        ]
+        at_threshold = classify_page(elements, page_number=1, native_text_len=30)
+        assert at_threshold.page_type == PageType.VISUAL
+
+        above_threshold = classify_page(elements, page_number=1, native_text_len=31)
+        assert above_threshold.page_type != PageType.VISUAL
+
+
+# ---------------------------------------------------------------------------
 # classify_page — MIXED pages
 # ---------------------------------------------------------------------------
 
