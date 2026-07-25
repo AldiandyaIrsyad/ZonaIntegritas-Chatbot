@@ -3,18 +3,11 @@
 Generates boundary relevance queries (in-domain and out-of-domain) using
 the Generator-Evaluator architecture.
 
-Skripsi §3.2.1, Tabel 3.5.
-
 Pipeline:
-    1. Generator (DeepSeek V4) produces draft boundary queries per subtype
-    2. Panel (5 models) labels each query as in_domain or out_of_domain
+    1. Generator produces draft boundary queries per subtype
+    2. Panel labels each query as in_domain or out_of_domain
     3. Accept if ≥4/5 panel members agree on the label
-    4. Output CSV matching Tabel 3.5 schema
-
-Usage:
-    python -m app.thesis._eval._dataset_gen.build_subset_c \\
-        --output data/subset_c.csv \\
-        --count 60
+    4. Output CSV with columns: query, label, subtype, panel_yes, panel_size
 """
 
 from __future__ import annotations
@@ -41,15 +34,11 @@ logger = structlog.get_logger(__name__)
 SUBTYPES = [
     # (subtype, expected_label, count) — total 200, balanced 100 in / 100 out.
     #
-    # The previous targets (15/15/10/10/10) left near_miss_government at n=6
-    # delivered, whose 95% interval spans 53 percentage points — one row moved
-    # it by 17pp, so no per-subtype conclusion was possible (and Exp1b now
-    # compares six methods against it). Every subtype here clears roughly
-    # ±14pp; the in-domain pair clears ±11pp.
-    #
-    # The in/out split is held at 100/100 because Exp1b reports Accuracy over
-    # the whole set: a 80/120 split would let the majority class drive the
-    # headline number without that being visible in the table.
+    # Every subtype clears roughly ±14pp (the in-domain pair clears ±11pp), so
+    # per-subtype conclusions are possible. The in/out split is held at 100/100
+    # because Exp1b reports Accuracy over the whole set: an uneven split would
+    # let the majority class drive the headline number without that being
+    # visible in the table.
     ("direct_upi", "in_domain", 50),
     ("indirect_upi", "in_domain", 50),
     ("near_miss_government", "out_of_domain", 34),
@@ -100,9 +89,6 @@ async def build_subset_c(
     """Build Subset C (boundary relevance queries) and save to CSV.
 
     Args:
-        settings: Dataset generation settings.
-        output_path: Path to output CSV file.
-        count: Target number of accepted items.
         resume: Continue an interrupted run, keeping rows already written to
             ``output_path`` and rebuilding the per-subtype counters from them.
     """
@@ -112,7 +98,7 @@ async def build_subset_c(
 
     generator = DatasetGenerator(settings)
     panel = EvaluatorPanel(settings)
-    blind_tracker = BlindInjectionTracker()
+    blind_tracker = BlindInjectionTracker(min_count=20)
 
     accepted_items: List[Dict[str, str]] = list(
         resume_rows(output_path, ["query", "label", "subtype", "panel_yes", "panel_size"]) if resume else []
@@ -131,12 +117,9 @@ async def build_subset_c(
     #
     # Why: near_miss_government is *defined* as borderline ("shares vocabulary
     # with UPI's documents but is not one of them"), so a strict >=4/5 rule
-    # fights the subtype's own definition. On the previous run it delivered 6
-    # of 10 — not because the budget ran out on cost, but because the panel
-    # genuinely could not reach 4/5 on items whose whole purpose is to sit near
-    # the boundary. That silently starved the most informative subtype, which
-    # is the same failure the M5 audit finding describes for Subset D, in a
-    # subset the audit treated as safe.
+    # fights the subtype's own definition — the panel genuinely cannot reach
+    # 4/5 on items whose whole purpose is to sit near the boundary, which would
+    # silently starve the most informative subtype.
     #
     # Panel agreement is recorded per row as ``panel_yes`` rather than baked
     # into a boolean, so any threshold can be applied after the fact and Exp1b
@@ -260,8 +243,8 @@ async def build_subset_c(
                                 context=validation_context,
                             )
                         except PanelUnavailableError:
-                            # The API is down, not this candidate. Let it propagate so the
-                            # run stops with its output intact instead of burning the batch
+                            # The API is down, not this candidate. Propagating stops the
+                            # run with its output intact instead of burning the batch
                             # budget marking every item rejected; --resume continues it.
                             raise
                         except Exception as e:

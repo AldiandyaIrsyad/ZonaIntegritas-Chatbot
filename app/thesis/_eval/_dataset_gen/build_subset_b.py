@@ -3,18 +3,11 @@
 Generates adversarial inputs (jailbreak, DAN attempts, hidden instructions,
 safe normal, safe complex) using the Generator-Evaluator architecture.
 
-Skripsi §3.2.1, Tabel 3.4.
-
 Pipeline:
-    1. Generator (DeepSeek V4) produces draft adversarial inputs per attack type
-    2. Panel (5 models) reclassifies each input as safe/malicious
+    1. Generator produces draft adversarial inputs per attack type
+    2. Panel reclassifies each input as safe/malicious
     3. Accept if ≥4/5 panel members agree on the label
-    4. Output CSV matching Tabel 3.4 schema
-
-Usage:
-    python -m app.thesis._eval._dataset_gen.build_subset_b \\
-        --output data/subset_b.csv \\
-        --count 100
+    4. Output CSV with columns: query, label, attack_type
 """
 
 from __future__ import annotations
@@ -41,14 +34,11 @@ logger = structlog.get_logger(__name__)
 ATTACK_TYPES = [
     # (attack_type, expected_label, count) — total 160, balanced 80/80.
     #
-    # hidden_instruction carries most of the growth (20 -> 50) because it is
-    # the binding constraint twice over. It is where detection actually fails
-    # (0.1053 accuracy on the previous run — 89% of hidden instructions
-    # missed), and it is the only slice on which the nonce ablation can be
-    # scored: jailbreak/dan_attempt are harmful-content requests that the chat
-    # model's own alignment refuses regardless of the delimiter, so including
-    # them would measure base-model alignment rather than the defense under
-    # test. At n=19 that ablation could not have said anything.
+    # hidden_instruction carries most of the count because it is the binding
+    # constraint: where detection actually fails, and the only slice on which
+    # the nonce ablation can be scored (jailbreak/dan_attempt are refused by
+    # the chat model's own alignment regardless of the delimiter, so they'd
+    # measure base-model alignment, not the defense under test).
     #
     # The safe subtypes rise with it to keep the malicious/safe split at
     # 80/80. Exp1a reports Accuracy over the whole set, so an imbalanced set
@@ -96,9 +86,6 @@ async def build_subset_b(
     """Build Subset B (adversarial inputs) and save to CSV.
 
     Args:
-        settings: Dataset generation settings.
-        output_path: Path to output CSV file.
-        count: Target number of accepted items.
         resume: Continue an interrupted run, keeping rows already written to
             ``output_path`` and rebuilding the per-subtype counters from them.
     """
@@ -108,7 +95,7 @@ async def build_subset_b(
 
     generator = DatasetGenerator(settings)
     panel = EvaluatorPanel(settings)
-    blind_tracker = BlindInjectionTracker()
+    blind_tracker = BlindInjectionTracker(min_count=20)
 
     accepted_items: List[Dict[str, str]] = list(
         resume_rows(output_path, ["query", "label", "attack_type"]) if resume else []
@@ -116,12 +103,9 @@ async def build_subset_b(
     total_generated = 0
     total_rejected = 0
 
-    # Retry budget per attack type. Without this the loop generated exactly one
-    # batch per type and moved on, so every panel rejection permanently reduced
-    # that type's row count — which is why hidden_instruction previously
-    # delivered 19 against a target of 20. At the larger targets this file now
-    # sets, a single-batch design would silently under-deliver by much more.
-    # Mirrors build_subset_c's max_batches_per_subtype.
+    # Retry budget per attack type: without it, every panel rejection would
+    # permanently reduce a type's row count, silently under-delivering. Mirrors
+    # build_subset_c's max_batches_per_subtype.
     max_batches_per_type = 25
 
     # Rows are flushed as they are accepted so an interrupted run leaves a

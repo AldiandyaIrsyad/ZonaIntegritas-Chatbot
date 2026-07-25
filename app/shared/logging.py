@@ -21,12 +21,11 @@ from app.shared.config import get_logger_settings
 
 
 class JSONTCPHandler(logging.handlers.SocketHandler):
-    """Sends JSON formatted log records over TCP to Vector.
+    """Sends JSON log records over TCP to Vector.
 
-    Overrides :meth:`makePickle` so that instead of pickling the record
-    (the default ``SocketHandler`` behaviour, which Vector cannot parse),
-    it emits a single UTF-8 JSON line terminated by ``\\n`` — the format
-    Vector's ``tcp`` source expects.
+    Overrides :meth:`makePickle` to emit a single ``\\n``-terminated UTF-8
+    JSON line — the format Vector's ``tcp`` source expects — instead of the
+    default pickled record, which Vector cannot parse.
     """
 
     def makePickle(self, record: logging.LogRecord) -> bytes:
@@ -34,14 +33,10 @@ class JSONTCPHandler(logging.handlers.SocketHandler):
 
 
 def setup_logging() -> None:
-    """Configure production-grade structured JSON logging.
-
-    Wires up:
-        - The root Python logger (stdout + TCP handler) at the configured level.
-        - ``structlog`` processors: contextvars merge → level filter →
-          logger/level stamping → ISO timestamp → JSON rendering.
-
-    Called once at import time in ``app/main.py``.
+    """Configure structured JSON logging: the root logger (stdout + TCP
+    handler) at the configured level, plus the ``structlog`` processor chain
+    (contextvars merge → level filter → logger/level stamping → ISO timestamp
+    → JSON render). Called once at import in ``app/main.py``.
     """
     settings = get_logger_settings()
     log_level = getattr(logging, settings.log_level.upper(), logging.INFO)

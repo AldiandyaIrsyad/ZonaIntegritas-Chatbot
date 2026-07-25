@@ -1,17 +1,13 @@
 """Shared retry policy for outbound calls to rate-limited third-party APIs.
 
-Used by clients that call external services with real rate limits
-(Unstructured Cloud, OpenRouter) where a transient 429/5xx/timeout would
-otherwise permanently fail whatever operation triggered it — relevant at
-bulk-ingestion scale where hundreds of documents each make several such
-calls.
+For clients calling external services with real rate limits (Unstructured
+Cloud, OpenRouter), a transient 429/5xx/timeout would otherwise permanently
+fail the triggering operation — significant at bulk-ingestion scale where
+hundreds of documents each make several such calls.
 
-Cross-cutting infrastructure (``shared/``, see ``docs/02-arsitektur.md``
-§2.1): consumed by ``app/kb/infra/unstructured_client.py`` and by
-``app/thesis/vlm/client.py::OpenRouterVLMClient``. The latter is the one
-case where ``shared/`` is imported from inside ``thesis/`` — allowed
-because ``thesis/vlm`` is the documented exception to the research core's
-stdlib-only purity rule (it already depends on ``httpx`` directly).
+Consumed by ``app/kb/infra/unstructured_client.py`` and
+``app/thesis/vlm/client.py::OpenRouterVLMClient`` (the one ``thesis/`` module
+allowed to import ``shared/``, since it already depends on ``httpx``).
 """
 
 import httpx

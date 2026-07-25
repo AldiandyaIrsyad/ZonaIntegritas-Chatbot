@@ -1,10 +1,8 @@
-"""
-Dependency injection for the Chat module.
+"""Dependency injection for the Chat module.
 
-This is the composition root where ``chat/infra`` adapters are injected into
-KB-domain services (e.g. HyDEExpander → SearchService). This file may import
-from both ``chat/`` and ``kb/`` modules — it is the boundary where the
-dependency inversion is resolved.
+Composition root where ``chat/infra`` adapters are injected into KB-domain
+services (e.g. HyDEExpander → SearchService). May import from both ``chat/``
+and ``kb/`` — the boundary where dependency inversion is resolved.
 """
 
 from typing import Optional
@@ -51,12 +49,11 @@ def get_llm_connection() -> LLMConnection:
     return LLMConnection(base_url=config.llm_base_url, api_key=config.llm_api_key)
 
 def get_prompt_guard_client() -> PromptGuardClient:
-    """Provides the local Prompt Guard adapter.
+    """Provide the local Prompt Guard adapter.
 
-    Points at ``prompt_guard_url`` — the dedicated guard server — rather than
-    the shared inference server, so swapping the off-the-shelf classifier for
-    its Indonesian fine-tune restarts one small container instead of reloading
-    the reranker and NLI models alongside it.
+    Points at the dedicated ``prompt_guard_url`` rather than the shared
+    inference server, so swapping the classifier for its fine-tune restarts one
+    small container instead of reloading the reranker and NLI models too.
     """
     config = get_chat_config()
     return PromptGuardClient(
@@ -66,12 +63,11 @@ def get_prompt_guard_client() -> PromptGuardClient:
     )
 
 def get_safety_model() -> ISafetyModel:
-    """Provides ``ISafetyModel`` (IVM), selected by ``ChatConfig.safety_backend``.
+    """Provide ``ISafetyModel`` (IVM), selected by ``ChatConfig.safety_backend``.
 
-    Mirrors ``get_relevance_checker``: one environment variable swaps the
-    adapter, so the off-the-shelf classifier, its Indonesian fine-tune (same
-    adapter, different ``prompt_guard_model``) and a hosted generative guard can
-    be compared without a code change.
+    One env var swaps the adapter, so the off-the-shelf classifier, its
+    fine-tune (same adapter, different ``prompt_guard_model``), and a hosted
+    generative guard can be compared without a code change.
     """
     config = get_chat_config()
 
@@ -114,13 +110,10 @@ def get_attachment_service(
 def get_relevance_checker(
     nli_client: NLIClient = Depends(get_nli_client),
 ) -> IRelevanceChecker:
-    """Overrides ``app.kb.dependency.get_relevance_checker`` (registered via
-    ``app.main``'s ``dependency_overrides``) since the LLM-as-judge relevance
-    check needs a cloud LLM (``chat/infra``) that ``kb/`` is not allowed to
-    import.
-
-    Branches on ``ChatConfig.ood_method`` to select the active
-    IRelevanceChecker backend (see app/thesis/ivm/checkers.py).
+    """Override ``app.kb.dependency.get_relevance_checker`` (via
+    ``app.main``'s ``dependency_overrides``) since the LLM-as-judge check needs
+    a cloud LLM (``chat/infra``) that ``kb/`` may not import. Branches on
+    ``ChatConfig.ood_method`` to select the IRelevanceChecker backend.
     """
     config = get_chat_config()
 
@@ -152,11 +145,11 @@ def get_query_expander(
     llm_conn: LLMConnection = Depends(get_llm_connection),
     repo: PostgresKBRepository = Depends(get_kb_repo),
 ) -> Optional[IQueryExpander]:
-    """Build a HyDEExpander if HyDE is enabled in ChatConfig.
+    """Build a HyDEExpander if HyDE is enabled in ChatConfig, else None.
 
-    Overrides the default ``None`` provider in ``kb/dependency.py``. This is
-    the composition layer where ``chat/infra`` adapters are legally injected
-    into KB-domain services.
+    Overrides the default ``None`` provider in ``kb/dependency.py`` — the
+    composition layer where ``chat/infra`` adapters are injected into
+    KB-domain services.
     """
     config = get_chat_config()
     if not config.hyde_enabled:

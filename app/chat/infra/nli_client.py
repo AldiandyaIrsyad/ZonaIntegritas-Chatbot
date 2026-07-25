@@ -1,12 +1,10 @@
 """Natural Language Inference (NLI) infrastructure adapter.
 
-Infra adapter for the RAM (Response Assessment Module) research core. Calls
-an Infinity-hosted NLI model (indo-roberta-indonli) to classify the
-entailment relationship between a generated sentence and retrieved KB
-context, enabling per-sentence hallucination detection.
-
-Fulfills: ``app/thesis/ram/interfaces.py::INLIModel``.
-Wired in: ``app/chat/dependency.py::get_nli_client``.
+Calls an Infinity-hosted NLI model (indo-roberta-indonli) to classify the
+entailment relation between a generated sentence and retrieved KB context,
+enabling per-sentence hallucination detection. Fulfills
+``app/thesis/ram/interfaces.py::INLIModel``; wired in
+``app/chat/dependency.py::get_nli_client``.
 """
 
 import httpx
@@ -24,8 +22,7 @@ LABEL_NEUTRAL = "neutral"
 LABEL_CONTRADICTION = "contradiction"
 
 # Infinity returns either human-readable labels or HF-style "label_0/1/2"
-# depending on the model; normalize both to the canonical strings the RAM
-# service expects.
+# depending on the model; normalize both to the RAM service's canonical strings.
 _LABEL_MAP: dict[str, str] = {
     "entailment": LABEL_ENTAILMENT,
     "neutral": LABEL_NEUTRAL,
@@ -37,33 +34,20 @@ _LABEL_MAP: dict[str, str] = {
 
 
 class NLIClient(INLIModel):
-    """Infrastructure adapter for NLI inference via the Infinity HTTP server.
-
-    Fulfills: ``app/thesis/ram/interfaces.py::INLIModel``.
-    """
+    """NLI inference via the Infinity HTTP server."""
 
     # indo-roberta-indonli has a 514-position embedding table, but Infinity's
-    # `truncation=True` doesn't reliably clip to that (the model's tokenizer
-    # config leaves model_max_length at the HF default sentinel, effectively
-    # infinite), so an oversized input crashes the batch worker mid-request
-    # instead of erroring cleanly — and that crash hangs every other request
-    # queued behind it on the shared Infinity server (batch_size=2). A
-    # char-count heuristic isn't a safe proxy for token count here: dense
-    # Indonesian legal text (hyphenated document numbers, dates) tokenizes
-    # close to 1 token/char, far denser than ordinary prose. Truncate by
-    # actual token count instead, leaving margin under 514 for whatever
-    # special tokens Infinity's own tokenizer adds.
+    # truncation doesn't reliably clip to it, so an oversized input crashes the
+    # batch worker mid-request (hanging queued requests on the shared server).
+    # Char count isn't a safe token proxy for dense Indonesian legal text, so
+    # truncate by actual token count, leaving margin under 514 for special
+    # tokens.
     _MAX_TOTAL_TOKENS = 500
     _MAX_HYPOTHESIS_TOKENS = 150
 
     def __init__(self, base_url: str, model: str):
-        """Configure the Infinity HTTP client and load the model's tokenizer.
-
-        Args:
-            base_url: Base URL of the Infinity server hosting the NLI model.
-            model: HF model identifier (also used to select the NLI
-                separator style and to load a matching tokenizer for
-                token-accurate truncation).
+        """Configure the Infinity client and load the model's tokenizer (used
+        both to pick the NLI separator style and for token-accurate truncation).
         """
         self.model = model
         self._nli_sep = " </s></s> " if "roberta" in model.lower() else " [SEP] "
@@ -71,11 +55,9 @@ class NLIClient(INLIModel):
         self._tokenizer: Optional[Tokenizer] = None
         try:
             self._tokenizer = Tokenizer.from_pretrained(model)
-            # tokenizer.json for this model ships its own truncation config
-            # (max_length=128) that silently overrides any max_length we'd
-            # pass to .encode() — disable it so our explicit token budgets
-            # below (which target the model's real 514-position limit, not
-            # this arbitrary default) actually take effect.
+            # The model's tokenizer.json ships a truncation config (max_length=
+            # 128) that would override our explicit budgets; disable it so the
+            # budgets targeting the real 514-position limit take effect.
             self._tokenizer.no_truncation()
         except Exception as e:
             logger.warning("chat.nli.tokenizer_load_failed", error=str(e))
@@ -98,14 +80,13 @@ class NLIClient(INLIModel):
         return self._tokenizer.decode(ids[:max_tokens])
 
     async def check(self, premise: str, hypothesis: str) -> NLIResult:
-        """Fulfills ``INLIModel.check``: classify the entailment relation
-        between ``premise`` (retrieved KB context) and ``hypothesis`` (a
-        generated sentence), truncating both to fit the model's token
-        budget before calling Infinity's ``/classify`` endpoint.
+        """Classify the entailment relation between ``premise`` (retrieved KB
+        context) and ``hypothesis`` (a generated sentence), truncating both to
+        the model's token budget before calling Infinity's ``/classify``.
 
-        Falls back to a neutral ``NLIResult`` (rather than raising) if the
-        request fails, so a transient NLI outage degrades to "no citation"
-        instead of breaking the chat stream.
+        Falls back to a neutral result (rather than raising) on request failure,
+        so a transient NLI outage degrades to "no citation" instead of breaking
+        the chat stream.
         """
         if self._tokenizer is not None:
             hypothesis = self._truncate_to_tokens(hypothesis, self._MAX_HYPOTHESIS_TOKENS)
@@ -113,8 +94,7 @@ class NLIClient(INLIModel):
             premise_budget = max(0, self._MAX_TOTAL_TOKENS - reserved)
             premise = self._truncate_to_tokens(premise, premise_budget)
         else:
-            # Tokenizer unavailable (e.g. no network at startup) — fall back
-            # to a conservative char cap as a last-resort safety net.
+            # No tokenizer (e.g. no network at startup): conservative char cap.
             hypothesis = hypothesis[:400]
             max_premise_chars = max(0, 1000 - len(hypothesis) - len(self._nli_sep))
             premise = premise[:max_premise_chars]

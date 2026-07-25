@@ -32,18 +32,13 @@ class PDFDocument(Base):
 
 
 class ParentChunk(Base):
-    """Stores full-text parent chunks for the Small-to-Big retrieval strategy.
+    """Full-text parent chunks for the Small-to-Big retrieval strategy.
 
-    Child chunks (sentence-level) are indexed in Qdrant for retrieval precision.
-    When a child chunk matches a query, the corresponding parent chunk's full
-    text is fetched from this table to provide broader context to the LLM.
-
-    Attributes:
-        content_type: The structural type of this chunk's content
-            (text, table, figure, hybrid). Used for citation attribution
-            and retrieval filtering.
-        element_metadata: Preserved metadata from the source element
-            (e.g. raw HTML for tables, image path for figures, table summary).
+    Sentence-level child chunks are indexed in Qdrant for precision; when a
+    child matches, its parent's full text is fetched here for broader LLM
+    context. ``content_type`` (text/table/figure/hybrid) drives citation
+    attribution and filtering; ``element_metadata`` preserves source metadata
+    (raw table HTML, figure image path, table summary).
     """
     __tablename__ = "parent_chunks"
 
@@ -87,19 +82,13 @@ class ParentChunk(Base):
 
 
 class ChildChunk(Base):
-    """Stores sentence-level child chunks for vector search.
+    """Sentence-level child chunks — the unit of vector search in Qdrant.
 
-    Child chunks are the unit of vector search in Qdrant. When a child
-    matches a query, its parent's full text is retrieved for LLM context
-    (Small-to-Big retrieval). Persisting child text in Postgres enables
-    chunk-level cross-encoder reranking and sibling/cross-ref lookups
-    without a Qdrant round-trip.
-
-    Attributes:
-        parent_chunk_id: FK to the parent chunk this child belongs to.
-        ordinal: Position within the parent chunk.
-        path: ltree-style dot path (parent path + ".c" + ordinal).
-        content_type: Structural type inherited from the parent.
+    When a child matches, its parent's full text is retrieved for LLM context
+    (Small-to-Big). Persisting child text in Postgres enables chunk-level
+    cross-encoder reranking and sibling/cross-ref lookups without a Qdrant
+    round-trip. ``path`` is an ltree-style dot path (parent path + ".c" +
+    ordinal); ``content_type`` is inherited from the parent.
     """
     __tablename__ = "child_chunks"
     __table_args__ = (

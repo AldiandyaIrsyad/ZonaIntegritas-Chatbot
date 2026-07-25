@@ -1,18 +1,11 @@
 """In-process BGE-M3 dense+sparse embedding adapter.
 
-Runs BGE-M3 in-process rather than over HTTP via Infinity (the other
-embedding/reranking server this app uses, see ``infinity_embeddings.py``):
-Infinity's own model list documents ``BAAI/bge-m3`` as dense-only ("no
-sparse") — this is a server limitation, not a misconfiguration (confirmed
-against open, unresolved upstream GitHub issues on the Infinity project).
-This adapter replaces Infinity for embeddings specifically, using BAAI's own
-reference implementation (``FlagEmbedding.BGEM3FlagModel``), which is the
-only path that actually computes BGE-M3's lexical (sparse) weights alongside
-the dense vector. See ``docs/02-arsitektur.md`` §2.1 for the broader
-architecture context.
-
-Fulfills: ``app/kb/domain/interfaces.py::ITextEmbedder``.
-Wired in: ``app/kb/dependency.py::get_text_embedder``.
+Runs BGE-M3 in-process rather than over HTTP via Infinity because Infinity
+serves ``BAAI/bge-m3`` as dense-only (a server limitation). This uses BAAI's
+reference implementation (``FlagEmbedding.BGEM3FlagModel``), the only path that
+computes BGE-M3's lexical (sparse) weights alongside the dense vector. Fulfills
+``app/kb/domain/interfaces.py::ITextEmbedder``; wired in
+``app/kb/dependency.py::get_text_embedder``.
 """
 
 import asyncio
@@ -27,11 +20,10 @@ from app.kb.domain.interfaces import ITextEmbedder, EmbeddingResult
 
 logger = structlog.get_logger(__name__)
 
-# Retries transient CUDA OOM (e.g. a momentary VRAM spike from another
-# process sharing the GPU) — not a network error, so this doesn't reuse
-# app.shared.retry.external_api_retry, which targets httpx exceptions.
-# Clears the CUDA cache before each retry attempt since simply retrying
-# without freeing anything would likely OOM again.
+# Retries transient CUDA OOM (e.g. a VRAM spike from another process). Not a
+# network error, so it doesn't reuse app.shared.retry (which targets httpx).
+# Clears the CUDA cache before each attempt, since retrying without freeing
+# memory would likely OOM again.
 def _clear_cuda_cache_before_retry(retry_state) -> None:
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -48,11 +40,9 @@ _cuda_oom_retry = retry(
 
 @lru_cache(maxsize=1)
 def _load_model(model_name: str, use_fp16: bool, device: str):
-    """Load BGEM3FlagModel once as a process-lifetime singleton.
-
-    Model load takes several seconds and several GB of VRAM/RAM, so this
-    must not be repeated per-request — every BGEM3Embeddings instance
-    sharing the same (model_name, use_fp16, device) reuses this one model.
+    """Load BGEM3FlagModel once as a process-lifetime singleton. Loading takes
+    seconds and several GB, so every instance sharing the same (model_name,
+    use_fp16, device) reuses this one model rather than reloading per request.
     """
     from FlagEmbedding import BGEM3FlagModel
 
@@ -63,10 +53,7 @@ def _load_model(model_name: str, use_fp16: bool, device: str):
 
 
 class BGEM3Embeddings(ITextEmbedder):
-    """Dense + sparse text embedding adapter backed by an in-process BGE-M3.
-
-    Fulfills: ``app/kb/domain/interfaces.py::ITextEmbedder``.
-    """
+    """Dense + sparse text embedding backed by an in-process BGE-M3."""
 
     def __init__(
         self,
@@ -75,8 +62,9 @@ class BGEM3Embeddings(ITextEmbedder):
         use_fp16: bool = True,
         batch_size: int = 12,
     ) -> None:
-        """Store model config; the model itself is loaded lazily (and once
-        per process) by :func:`_load_model` on first ``embed_texts`` call."""
+        """Store model config; the model loads lazily (once per process) via
+        :func:`_load_model` on the first ``embed_texts`` call.
+        """
         self.model_name = model_name
         self.device = device
         self.use_fp16 = use_fp16
@@ -89,9 +77,10 @@ class BGEM3Embeddings(ITextEmbedder):
         )
 
     async def embed_texts(self, texts: List[str]) -> List[EmbeddingResult]:
-        """Encode texts via the shared BGE-M3 model, returning dense vectors
-        and lexical (sparse) weights for each. Retries once-transient CUDA
-        OOM through :data:`_cuda_oom_retry` on the inner :meth:`_encode` call."""
+        """Encode texts via the shared BGE-M3 model, returning dense vectors and
+        lexical (sparse) weights for each. Transient CUDA OOM is retried via
+        :data:`_cuda_oom_retry` on the inner :meth:`_encode` call.
+        """
         if not texts:
             return []
 

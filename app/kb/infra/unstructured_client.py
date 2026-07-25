@@ -23,23 +23,14 @@ class UnstructuredClient(IDocumentParser):
     Unstructured Platform (cloud, job-based), selected by whether ``api_key``
     is set.
 
-    Fulfills: ``app/kb/domain/interfaces.py::IDocumentParser``.
-
-    When ``extract_images=True``, the parser sends
-    ``extract_image_block_types=["Image", "Table"]`` to the unstructured
-    API, which causes it to return ``Image`` elements with image paths
-    in their metadata. These are later enriched by a VLM during ingestion.
+    With ``extract_images=True``, requests Image/Table block extraction so
+    ``Image`` elements come back with image paths in metadata for later VLM
+    enrichment.
     """
 
     def __init__(self, base_url: str, extract_images: bool = True, api_key: str = "") -> None:
-        """Configure the HTTP client for either local or cloud Unstructured.
-
-        Args:
-            base_url: Base URL of the unstructured-api container, or the
-                Unstructured Platform API when ``api_key`` is set.
-            extract_images: Whether to request Image/Table block extraction.
-            api_key: Unstructured Cloud API key; empty string selects the
-                local self-hosted parsing path instead.
+        """Configure the HTTP client for local or cloud Unstructured. An empty
+        ``api_key`` selects the local self-hosted parsing path.
         """
         headers: dict[str, str] = {"accept": "application/json"}
         if api_key:
@@ -61,11 +52,11 @@ class UnstructuredClient(IDocumentParser):
 
     async def parse_pdf(self, file_path: str) -> List[ParsedElement]:
         """Parse a PDF into typed elements via local or cloud Unstructured
-        (dispatched on whether an API key was configured).
+        (dispatched on whether an API key is configured).
 
         Image elements are kept even with empty text (for later VLM
-        enrichment); Table elements prefer ``text_as_html`` over plain text
-        when available; any other element with empty text is dropped.
+        enrichment); Table elements prefer ``text_as_html`` over plain text;
+        any other empty-text element is dropped.
         """
         resolved = os.path.realpath(file_path)
         if not os.path.isfile(resolved):
@@ -145,15 +136,8 @@ class UnstructuredClient(IDocumentParser):
     async def _parse_pdf_local(
         self, resolved: str, filename: str, log: structlog.BoundLogger
     ) -> list:
-        """Parse PDF using local Docker Unstructured API (synchronous).
-
-        Args:
-            resolved: Absolute path to the PDF file.
-            filename: Base name of the file.
-            log: Bound structlog logger.
-
-        Returns:
-            List of raw element dicts from the Unstructured API.
+        """Parse a PDF via the local Docker Unstructured API (synchronous).
+        Returns the raw element dicts.
         """
         strategy = "hi_res"
         form_data: dict[str, str] = {"strategy": strategy}
@@ -184,20 +168,9 @@ class UnstructuredClient(IDocumentParser):
     async def _parse_pdf_cloud(
         self, resolved: str, filename: str, log: structlog.BoundLogger
     ) -> list:
-        """Parse PDF using Unstructured Platform API (job-based async).
-
-        Implements the 3-step job pattern:
-        1. POST /jobs/ to create a partitioning job.
-        2. Poll GET /jobs/{job_id} until status is COMPLETED.
-        3. Download results from GET /jobs/{job_id}/download?file_id={file_id}.
-
-        Args:
-            resolved: Absolute path to the PDF file.
-            filename: Base name of the file.
-            log: Bound structlog logger.
-
-        Returns:
-            List of raw element dicts from the Unstructured Platform API.
+        """Parse a PDF via the Unstructured Platform API (job-based async):
+        create a partitioning job (POST /jobs/), poll GET /jobs/{job_id} until
+        COMPLETED, then download results. Returns the raw element dicts.
         """
         # Step 1: Create the job
         settings: dict = {"strategy": "hi_res"}

@@ -1,13 +1,9 @@
 """Server-rendered HTML page routes (Jinja2 templates).
 
-These routes serve the browser UI and are excluded from the OpenAPI schema
-(``include_in_schema=False``) so they don't clutter ``/docs``. They are
-mounted last in ``app/main.py`` so the ``/api/*`` JSON routers match first.
+Serves the browser UI. Excluded from the OpenAPI schema and mounted last in
+``app/main.py`` so the ``/api/*`` JSON routers match first.
 
-Pages:
-    - ``/``       — chat UI for end users.
-    - ``/admin/`` — KB admin UI for uploading/managing documents.
-    - ``/demo/``  — demo/evaluation UI.
+Pages: ``/`` (chat UI), ``/admin/`` (KB admin), ``/demo/`` (demo/eval UI).
 """
 
 from fastapi import APIRouter, Request

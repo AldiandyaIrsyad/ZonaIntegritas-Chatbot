@@ -1,13 +1,11 @@
 """Raw per-row result export for evaluation scripts.
 
-Every exp*_*.run script prints only an aggregate report to stdout — no
-per-row data survives the process exiting. This makes every claim in
-Chapter 4 ("the SLM caught this attack", "RAM found this sentence
-unsupported") unverifiable without rerunning the whole experiment, and cost
-a full Exp4 rerun this session when its raw per-query data was needed after
-the process had already exited. ``write_results_csv`` gives every script a
-one-line way to persist its per-row (input, ground truth, prediction,
-scores) data for independent inspection.
+Every exp*_*.run script prints only an aggregate report to stdout, so no
+per-row data survives the process exiting — which leaves every per-row claim
+("the SLM caught this attack", "RAM found this sentence unsupported")
+unverifiable without rerunning the whole experiment. ``write_results_csv``
+gives every script a one-line way to persist its per-row (input, ground truth,
+prediction, scores) data for independent inspection.
 """
 
 from __future__ import annotations
@@ -20,10 +18,8 @@ from typing import Any, Dict, List
 def write_results_csv(path: str, rows: List[Dict[str, Any]]) -> None:
     """Write per-row evaluation results to a CSV file.
 
-    Args:
-        path: Output file path. Parent directories are created if needed.
-        rows: List of row dicts. The header is taken from the first row's
-            keys; every row must have the same keys.
+    Parent directories of ``path`` are created if needed. The header is taken
+    from the first row's keys; every row must have the same keys.
     """
     if not rows:
         return

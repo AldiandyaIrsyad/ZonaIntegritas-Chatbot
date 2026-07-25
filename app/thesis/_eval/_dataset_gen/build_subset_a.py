@@ -4,21 +4,14 @@ Generates RAG QA triplets (question, category, ground_truth_answer,
 source_doc_id, source_context) from the knowledge base using the
 Generator-Evaluator architecture.
 
-Skripsi §3.2.1, Tabel 3.3.
-
 Pipeline:
     1. Load KB documents from the running application
-    2. Generator (DeepSeek V4) produces draft QA triplets from each document
-    3. Panel (5 models) validates: is the question answerable from the context?
-       Is the ground_truth_answer hallucination-free?
+    2. Generator produces draft QA triplets from each document
+    3. Panel validates: is the question answerable from the context? Is the
+       ground_truth_answer hallucination-free?
     4. Accept if ≥4/5 panel members agree
-    5. Output CSV matching Tabel 3.3 schema
-
-Usage:
-    python -m app.thesis._eval._dataset_gen.build_subset_a \\
-        --api-url http://localhost:8000 \\
-        --output data/subset_a.csv \\
-        --count 100
+    5. Output CSV with columns: question, category, ground_truth_answer,
+       source_doc_id, source_context
 """
 
 from __future__ import annotations
@@ -87,14 +80,7 @@ Answer with ONLY 'YES' or 'NO'.
 
 
 async def fetch_kb_documents(api_url: str) -> List[Dict[str, Any]]:
-    """Fetch all active PDF documents from the KB API.
-
-    Args:
-        api_url: Base URL of the running application.
-
-    Returns:
-        List of document metadata dicts.
-    """
+    """Fetch all active PDF documents from the KB API."""
     async with httpx.AsyncClient(base_url=api_url, timeout=30.0) as client:
         response = await client.get("/api/admin/pdfs")
         response.raise_for_status()
@@ -108,15 +94,7 @@ async def fetch_document_text(api_url: str, doc_id: str, doc_title: str) -> str:
     Uses the document's own title as the search query (domain-agnostic) and
     post-filters by ``doc_id`` to ensure only this document's chunks are
     joined. ``top_k`` is set to the API maximum (100) to maximise coverage.
-
-    Args:
-        api_url: Base URL of the running application.
-        doc_id: Document ID (used as a post-filter).
-        doc_title: Document title (used as the search query).
-
-    Returns:
-        Concatenated text from the document's chunks, or empty string on
-        failure.
+    Returns empty string on failure.
     """
     if not doc_title:
         return ""
@@ -145,10 +123,6 @@ async def build_subset_a(
     """Build Subset A (RAG QA triplets) and save to CSV.
 
     Args:
-        settings: Dataset generation settings.
-        api_url: Base URL of the running application.
-        output_path: Path to output CSV file.
-        count: Target number of accepted items.
         seed: RNG seed for the document shuffle — recorded in the provenance
             sidecar so a run can be reproduced.
         max_items_per_doc: Cap on accepted doc-bound items per source document.
@@ -171,13 +145,7 @@ async def build_subset_a(
     logger.info("datagen.subset_a.docs_found", count=len(docs))
 
     # Shuffle so document selection does not depend on the KB API's return
-    # order. Previously this loop walked ``docs`` in API order and generated up
-    # to 5 items per category per document, so it exited once the per-category
-    # targets filled — around document 11 — and never reached document 12. The
-    # committed data/subset_a.csv drew its 98 questions from 11 of 922
-    # documents (1.2% of the corpus), which caps the external validity of
-    # Exp2's Hit Rate@k and of RQ4's claim about "dokumen-dokumen JDIH".
-    # Seeded so a run stays reproducible.
+    # order. Seeded so a run stays reproducible.
     #
     # ``max_items_per_doc`` defaults to 1 — one question per source document.
     # The reason is statistical rather than aesthetic: Exp2 makes a
@@ -187,10 +155,10 @@ async def build_subset_a(
     # poor chunking, scan-only pages, an undistinctive title — tends to make
     # both of its questions miss together, so the effective sample size for
     # Hit Rate@k tracks the number of distinct documents, not the number of
-    # questions. One question per document makes those two counts equal.
-    # It also doubles corpus coverage for the same question budget, and gives
-    # Chapter 3 a sampling rule that needs no defending ("each question is
-    # drawn from a distinct document") rather than an arbitrary cap.
+    # questions. One question per document makes those two counts equal. It
+    # also doubles corpus coverage for the same question budget, and gives a
+    # sampling rule that needs no defending ("each question is drawn from a
+    # distinct document") rather than an arbitrary cap.
     docs = list(docs)
     random.Random(seed).shuffle(docs)
 
@@ -208,14 +176,12 @@ async def build_subset_a(
     # Per-category targets (total 150). Scaled proportionally when --count
     # differs from that total.
     #
-    # Sizing rationale (95% Wilson intervals at the rates Chapter 4 reports):
-    # out-of-domain was 10 and delivered 11, giving Exp4's Abstention Accuracy
-    # a 47pp-wide interval [0.43, 0.90] — the least informative number in the
-    # thesis. 35 narrows it to roughly ±14pp. multi-hop rose likewise so Exp2
-    # can say anything per-category (23 gave ±17pp). factual/procedural barely
-    # moved: they feed BERTScore, whose interval is already ±0.024 at n≈87, so
-    # the binding constraints here are all proportions on small slices, not the
-    # continuous metrics.
+    # Sizing rationale (95% Wilson intervals): out-of-domain and multi-hop are
+    # the proportions on small slices that drive the widest intervals, so they
+    # are sized to roughly ±14pp. factual/procedural feed BERTScore, whose
+    # interval is already narrow at n≈87, so they need not grow. The binding
+    # constraints are all proportions on small slices, not the continuous
+    # metrics.
     CATEGORY_TARGETS = {"factual": 40, "procedural": 40, "multi-hop": 35, "out-of-domain": 35}
     _target_total = sum(CATEGORY_TARGETS.values())
     scale = count / _target_total if count != _target_total else 1.0
@@ -240,8 +206,8 @@ async def build_subset_a(
 
     # Rows are written to the CSV as they are accepted, so an interruption
     # (outage, Ctrl-C, closed laptop) leaves a valid partial dataset on disk
-    # that --resume can continue from, instead of discarding hours of work and
-    # the API spend behind it.
+    # that --resume can continue from, instead of discarding the API spend
+    # behind it.
     writer_ctx = IncrementalCSVWriter(output_path, ["question", "category", "ground_truth_answer", "source_doc_id", "source_context"], resume=resume)
     try:
         with writer_ctx as row_writer:

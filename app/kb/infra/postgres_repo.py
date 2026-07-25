@@ -20,10 +20,7 @@ logger = structlog.get_logger(__name__)
 
 
 class PostgresKBRepository(IKBRepository):
-    """Database operations for the Knowledge Base domain.
-
-    Fulfills: ``app/kb/domain/interfaces.py::IKBRepository``.
-    """
+    """Database operations for the Knowledge Base domain."""
 
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -94,13 +91,8 @@ class PostgresKBRepository(IKBRepository):
         return list(result.scalars().all())
 
     async def get_pdfs_by_ids(self, pdf_ids: List[str]) -> List[PDFDocument]:
-        """Fetch multiple PDF documents by their IDs in a single query.
-
-        Args:
-            pdf_ids: List of PDFDocument primary key strings.
-
-        Returns:
-            List[PDFDocument]: All found documents (order not guaranteed).
+        """Fetch multiple documents by ID in a single query (order not
+        guaranteed).
         """
         if not pdf_ids:
             return []
@@ -160,17 +152,15 @@ class PostgresKBRepository(IKBRepository):
         return list(result.scalars().all())
 
     async def get_chunks_by_path_prefix(self, path_prefix: str) -> List[ParentChunk]:
-        """Fetch parent chunks whose path contains the given segment as a
-        complete label (e.g. "pasal_5"), plus anything nested beneath it.
+        """Fetch parent chunks whose path contains the given segment as a whole
+        label (e.g. "pasal_5"), plus anything nested beneath it.
 
-        Real paths are rooted at the document UUID (e.g.
+        Paths are rooted at the document UUID (e.g.
         ``<uuid>.bab_i_ketentuan_umum.pasal_1``), so a left-anchored
-        ``LIKE 'pasal_5%'`` can never match. A naive ``LIKE '%pasal_5%'``
-        would also false-positive on ``pasal_50``/``pasal_51`` as substrings.
-        Uses the ``ltree`` extension (already created at startup, see
-        ``app/main.py``) via an in-query cast — the ``path`` column itself is
-        plain ``VARCHAR``, so no migration is required — to match
-        ``path_prefix`` as a whole ltree label, guaranteeing segment-boundary
+        ``LIKE 'pasal_5%'`` never matches, and ``LIKE '%pasal_5%'`` would
+        false-positive on ``pasal_50``/``pasal_51``. Instead this casts to
+        ``ltree`` in-query (the column stays plain ``VARCHAR``, so no migration)
+        to match ``path_prefix`` as a whole label, guaranteeing segment-boundary
         correctness.
         """
         if not path_prefix:

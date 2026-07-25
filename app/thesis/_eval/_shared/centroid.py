@@ -1,4 +1,4 @@
-"""Corpus-centroid out-of-domain detector (Exp1b, Metode 4).
+"""Corpus-centroid out-of-domain detector (Exp1b).
 
 A cheap, LLM-free relevance signal: embed the query with the same model the
 corpus was embedded with, and measure how far it sits from the corpus. An
@@ -34,11 +34,9 @@ MAHALANOBIS = "mahalanobis"
 class CentroidModel:
     """A fitted corpus centroid and (optionally) a whitening matrix.
 
-    Attributes:
-        centroid: Mean corpus vector, shape (d,).
-        precision: Inverse shrinkage-covariance for Mahalanobis, shape (d, d),
-            or None when only cosine scoring is needed.
-        n: Number of corpus vectors the model was fitted on.
+    ``centroid`` is the mean corpus vector, shape (d,); ``precision`` is the
+    inverse shrinkage-covariance for Mahalanobis, shape (d, d), or None when
+    only cosine scoring is needed; ``n`` is the number of corpus vectors fitted.
     """
 
     centroid: np.ndarray
@@ -60,9 +58,6 @@ def fit_centroid(
             regularising the covariance. Higher = more regularised. bge-m3's
             covariance is rank-deficient unless n >> d, so a non-zero value is
             required for the inverse to exist.
-
-    Returns:
-        A fitted ``CentroidModel``.
 
     Raises:
         ValueError: If ``vectors`` is empty.
@@ -88,16 +83,10 @@ def fit_centroid(
 
 
 def score(model: CentroidModel, query: np.ndarray, metric: str = COSINE) -> float:
-    """Score one query against the corpus centre.
+    """Score one query embedding (shape (d,)) against the corpus centre.
 
-    Args:
-        model: A fitted ``CentroidModel``.
-        query: Query embedding, shape (d,).
-        metric: ``COSINE`` (higher = more in-domain) or ``MAHALANOBIS``
-            (lower = more in-domain).
-
-    Returns:
-        The requested distance/similarity as a float.
+    ``metric`` is ``COSINE`` (higher = more in-domain) or ``MAHALANOBIS``
+    (lower = more in-domain).
 
     Raises:
         ValueError: For an unknown metric, or Mahalanobis without a precision
@@ -118,16 +107,10 @@ def score(model: CentroidModel, query: np.ndarray, metric: str = COSINE) -> floa
 
 
 def is_in_domain(value: float, threshold: float, metric: str = COSINE) -> bool:
-    """Turn a score into an in-domain decision.
+    """Turn a score from :func:`score` into an in-domain decision.
 
-    Args:
-        value: The score from :func:`score`.
-        threshold: Decision boundary.
-        metric: Sets the comparison direction — cosine is in-domain **at or
-            above** the threshold; Mahalanobis is in-domain **at or below** it.
-
-    Returns:
-        True when the query is judged in-domain.
+    ``metric`` sets the comparison direction — cosine is in-domain **at or
+    above** the threshold; Mahalanobis is in-domain **at or below** it.
     """
     if metric == COSINE:
         return value >= threshold

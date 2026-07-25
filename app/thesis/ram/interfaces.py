@@ -1,18 +1,13 @@
 """Ports (Protocol interfaces) for the Response Assessment Module (RAM).
 
-The RAM validates generated LLM sentences against retrieved KB context
-using Natural Language Inference (NLI) to detect hallucinations per
-sentence. It is part of the pure ``thesis`` research core and defines its
-own ports so it never imports chat/kb infra directly (Dependency Inversion).
+The RAM validates generated LLM sentences against retrieved KB context using
+NLI to detect per-sentence hallucinations. Part of the pure ``thesis`` core,
+it defines its own ports so it never imports chat/kb infra directly.
 
-Ports → adapters map:
-    - :class:`INLIModel`       → ``app/chat/infra/nli_client.py::NLIClient``
-                                (Infinity-hosted NLI model; wired in
-                                ``app/chat/dependency.py::get_nli_client``)
-    - :class:`IRerankerModel`  → ``app/kb/infra/infinity_reranker.py::InfinityReranker``
-                                (the same adapter fulfills the KB
-                                ``IReranker`` port; this is a narrower view
-                                for the RAM's reverse-mapping step)
+Ports → adapters: :class:`INLIModel` → ``app/chat/infra/nli_client.py::NLIClient``;
+:class:`IRerankerModel` → ``app/kb/infra/infinity_reranker.py::InfinityReranker``
+(the same adapter fulfills the KB ``IReranker`` port; this is a narrower view
+for the RAM's reverse-mapping step).
 """
 
 from dataclasses import dataclass
@@ -21,21 +16,11 @@ from typing import List, Optional, Protocol
 
 @dataclass(frozen=True)
 class NLIResult:
-    """Outcome of a single Natural Language Inference call.
-
-    Attributes:
-        label: Canonical verdict ("entailment", "neutral", or "contradiction").
-        entailment_score: Confidence that the hypothesis is entailed by the premise (0.0–1.0).
-        contradiction_score: Confidence that the hypothesis contradicts the premise (0.0–1.0).
-        neutral_score: Confidence that the hypothesis is neutral to the premise (0.0–1.0).
-        source_title: Display name of the PDF that provided the best-matching context chunk.
-        page: Page number of the best-matching context chunk, if available.
-        doc_id: ID of the source PDF document, for downloading the original file.
-        evidence_snippet: The exact reranker-matched sub-passage of the
-            context that the NLI check was run against, sanitized and
-            truncated for display. Lets a user see which specific part of
-            the retrieved context backed a given sentence, without needing
-            to re-run generation.
+    """Outcome of a single NLI call: the canonical label
+    (entailment/neutral/contradiction) with per-class confidence scores, plus
+    the best-matching source's title/page/doc_id and a sanitized
+    ``evidence_snippet`` — the exact reranker-matched sub-passage the check ran
+    against, so a user can see which part of the context backed a sentence.
     """
     label: str
     entailment_score: float = 0.0
@@ -49,17 +34,9 @@ class NLIResult:
 
 @dataclass(frozen=True)
 class RetrievedContext:
-    """A retrieved context block from the knowledge base.
-
-    Attributes:
-        text: The full parent chunk text.
-        source_title: Display name of the source document.
-        page: Page number of the chunk, if available.
-        breadcrumbs: Hierarchical section path (e.g. ["BAB I", "Pasal 5"]).
-        content_type: Structural type ("text", "table", "figure").
-        chunk_id: UUID of the child chunk that matched the query.
-        path: ltree-style dot path of the parent chunk.
-        doc_id: ID of the source PDF document, for downloading the original file.
+    """A retrieved context block from the knowledge base: the full parent chunk
+    text with its source title, page, hierarchical breadcrumbs, structural type,
+    matching child chunk id, ltree path, and source doc id.
     """
     text: str
     source_title: str
@@ -72,33 +49,21 @@ class RetrievedContext:
 
 
 class INLIModel(Protocol):
-    """Port for Natural Language Inference adapters in the research core.
-
-    Implemented by: ``app/chat/infra/nli_client.py::NLIClient``
-    (an Infinity-hosted NLI model; wired in
-    ``app/chat/dependency.py::get_nli_client``).
+    """Port for NLI adapters in the research core. Implemented by
+    ``app/chat/infra/nli_client.py::NLIClient``.
     """
 
     async def check(self, premise: str, hypothesis: str) -> NLIResult:
-        """Compare a hypothesis against a reference premise using NLI.
-
-        Args:
-            premise: Reference context (e.g. a KB parent chunk).
-            hypothesis: Statement to verify against the premise.
-
-        Returns:
-            NLIResult with the canonical label and per-class scores.
+        """Compare a hypothesis against a reference premise (e.g. a KB parent
+        chunk), returning an ``NLIResult`` with the label and per-class scores.
         """
         ...
 
 
 @dataclass(frozen=True)
 class RerankResult:
-    """Result of a reranking operation.
-
-    Attributes:
-        index: Original position of the document in the input list.
-        score: Relevance score assigned by the reranker (higher = more relevant).
+    """A reranking result: the document's original index and its relevance
+    score (higher = more relevant).
     """
 
     index: int
@@ -106,11 +71,9 @@ class RerankResult:
 
 
 class IRerankerModel(Protocol):
-    """Port for reranker adapters in the research core.
-
-    Implemented by: ``app/kb/infra/infinity_reranker.py::InfinityReranker``
-    (the same adapter fulfills the KB ``IReranker`` port; wired in
-    ``app/kb/dependency.py::get_reranker``).
+    """Port for reranker adapters in the research core. Implemented by
+    ``app/kb/infra/infinity_reranker.py::InfinityReranker`` (the same adapter
+    fulfills the KB ``IReranker`` port).
     """
 
     async def rerank(

@@ -1,13 +1,10 @@
-"""
-Application service for chat PDF attachments.
+"""Application service for chat PDF attachments.
 
-Extracts text from an uploaded PDF and runs it through the same IVM safety
-check (``IVMService.check_malicious``) that the typed chat message goes
-through, since attachment text becomes part of the LLM prompt just like the
-message does. This is a fail-fast UX check — the authoritative check happens
-again inside ``ChatService.process_chat_message`` against the combined
-message+attachment text before generation, so a client cannot bypass safety
-scanning by tampering with the extracted text between the two requests.
+Extracts text from an uploaded PDF and runs the same IVM safety check
+(``IVMService.check_malicious``) the typed message gets, since attachment text
+joins the LLM prompt. This is a fail-fast UX check; the authoritative check
+runs again in ``ChatService.process_chat_message`` on the combined text, so a
+client can't bypass scanning by tampering between the two requests.
 """
 from dataclasses import dataclass
 
@@ -21,15 +18,8 @@ logger = structlog.get_logger(__name__)
 
 @dataclass(frozen=True)
 class AttachmentResult:
-    """Outcome of processing one chat attachment upload.
-
-    Attributes:
-        filename: Original uploaded filename (display only).
-        text: Extracted (possibly truncated) PDF text, already safety-checked.
-        page_count: Number of pages in the source PDF.
-        char_count: Length of ``text`` in characters.
-        truncated: True if ``text`` was cut short to respect a char cap.
-    """
+    """Outcome of one attachment upload: the safety-checked, possibly
+    truncated PDF text plus page/char counts and a truncation flag."""
 
     filename: str
     text: str
@@ -45,33 +35,18 @@ class AttachmentService:
     """
 
     def __init__(self, extractor: IAttachmentExtractor, ivm_service: IVMService):
-        """Wire the extraction and safety-check collaborators.
-
-        Args:
-            extractor: Port for extracting text from the uploaded PDF
-                (``IAttachmentExtractor``, e.g. ``PdfTextExtractor``).
-            ivm_service: Safety checker reused from the main chat pipeline
-                so the attachment text goes through the same
-                prompt-injection scan as typed messages.
+        """Wire the extraction port and the safety checker (reused from the
+        main pipeline so attachment text gets the same prompt-injection scan).
         """
         self.extractor = extractor
         self.ivm_service = ivm_service
 
     async def process_upload(self, filename: str, file_bytes: bytes) -> AttachmentResult:
-        """Extract text from the PDF and scan it for malicious content.
-
-        Args:
-            filename: The original uploaded filename (for display only).
-            file_bytes: The raw PDF file content.
-
-        Returns:
-            An AttachmentResult with the extracted (possibly truncated) text.
+        """Extract PDF text and scan it for malicious content.
 
         Raises:
-            PdfExtractionError: If the file can't be parsed, has too many
-                pages, or has no extractable text (see pdf_text_extractor.py).
-            MaliciousPromptException: If the extracted text fails the IVM
-                safety check.
+            PdfExtractionError: Unparseable, too many pages, or no text.
+            MaliciousPromptException: Extracted text fails the IVM check.
         """
         extracted = self.extractor.extract(file_bytes)
 

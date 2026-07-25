@@ -1,16 +1,8 @@
 """Human-Machine Concordance Rate helper.
 
-Implements the concordance measurement defined in skripsi §3.2.1c:
     - Inject 5/5-consensus items blindly into the researcher's verification queue
     - Compute concordance rate (target ≥95%)
     - If concordance < 95%, regenerate the affected subset
-
-Usage:
-    concordance = ConcordanceTracker()
-    concordance.record(machine_label="supported", human_label="supported")
-    rate = concordance.concordance_rate()
-    if rate < 0.95:
-        print("WARNING: Concordance below 95%, regenerate subset")
 """
 
 from __future__ import annotations
@@ -33,54 +25,39 @@ BLIND_INJECTION_SEED = 42
 class BlindInjectionTracker:
     """Tracks 5/5-consensus items for blind injection into human verification.
 
-    Per skripsi §3.2.1d, ~20% of the items shown to the human verifier are
-    "blind injections" — items where all 5 panel models unanimously agreed
-    (5/5 consensus). The human verifies these without knowing their status.
-    If the human agrees with the panel on >=95% of these, the pipeline is
-    deemed reliable.
-
-    Attributes:
-        candidates: Items with 5/5 unanimous panel agreement.
-        selected: Items chosen for blind injection (~20% of candidates).
-        injection_ratio: Fraction of candidates to inject (default 0.20).
+    ~20% of the items shown to the human verifier are "blind injections" —
+    items where all 5 panel models unanimously agreed. The human verifies
+    these without knowing their status. If the human agrees with the panel on
+    >=95% of these, the pipeline is deemed reliable.
     """
 
     candidates: List[Dict[str, Any]] = field(default_factory=list)
     selected: List[Dict[str, Any]] = field(default_factory=list)
     injection_ratio: float = 0.20
+    min_count: int | None = None
+    max_count: int | None = None
 
     def add_candidate(self, item: Dict[str, Any]) -> None:
-        """Record a 5/5-unanimous panel item as a blind-injection candidate.
-
-        Args:
-            item: The accepted dataset row (must include the panel verdict).
-        """
+        """Record a 5/5-unanimous panel item as a blind-injection candidate."""
         self.candidates.append(item)
 
     def select_for_injection(self) -> List[Dict[str, Any]]:
-        """Randomly select ~20% of candidates for blind injection.
-
-        Uses a fixed seed for reproducibility.
-
-        Returns:
-            List of selected items (also stored in ``self.selected``).
-        """
+        """Randomly select items for blind injection (fixed seed, clamped to bounds)."""
         if not self.candidates:
             self.selected = []
             return []
         rng = random.Random(BLIND_INJECTION_SEED)
         n_select = max(1, int(len(self.candidates) * self.injection_ratio))
+        if self.min_count is not None:
+            n_select = max(n_select, self.min_count)
+        if self.max_count is not None:
+            n_select = min(n_select, self.max_count)
         n_select = min(n_select, len(self.candidates))
         self.selected = rng.sample(self.candidates, n_select)
         return self.selected
 
     def write_sidecar(self, path: str, fieldnames: List[str]) -> None:
-        """Write the blind-injection items to a sidecar CSV.
-
-        Args:
-            path: Output CSV path.
-            fieldnames: Column names for the CSV.
-        """
+        """Write the blind-injection items to a sidecar CSV."""
         if not self.selected:
             self.select_for_injection()
         output = Path(path)
@@ -101,42 +78,24 @@ class BlindInjectionTracker:
 
 @dataclass
 class ConcordanceTracker:
-    """Tracks human-machine agreement for dataset quality control.
-
-    Attributes:
-        pairs: List of (machine_label, human_label) tuples.
-        target_rate: Minimum acceptable concordance rate (default 0.95).
-    """
+    """Tracks human-machine agreement for dataset quality control."""
 
     pairs: List[Tuple[str, str]] = field(default_factory=list)
     target_rate: float = 0.95
 
     def record(self, machine_label: str, human_label: str) -> None:
-        """Record a single machine-human label pair.
-
-        Args:
-            machine_label: Label assigned by the panel.
-            human_label: Label assigned by the human researcher.
-        """
+        """Record a single machine-human label pair."""
         self.pairs.append((machine_label.lower().strip(), human_label.lower().strip()))
 
     def concordance_rate(self) -> float:
-        """Compute the concordance rate.
-
-        Returns:
-            Proportion of matching labels.
-        """
+        """Compute the proportion of matching labels."""
         if not self.pairs:
             return 0.0
         matches = sum(1 for m, h in self.pairs if m == h)
         return matches / len(self.pairs)
 
     def is_acceptable(self) -> bool:
-        """Check if concordance meets the target rate.
-
-        Returns:
-            True if concordance_rate >= target_rate.
-        """
+        """Check if concordance meets the target rate."""
         rate = self.concordance_rate()
         acceptable = rate >= self.target_rate
         if not acceptable:
@@ -149,11 +108,7 @@ class ConcordanceTracker:
         return acceptable
 
     def disagreement_examples(self) -> List[Tuple[str, str, int]]:
-        """Get examples where machine and human disagreed.
-
-        Returns:
-            List of (machine_label, human_label, count) tuples.
-        """
+        """Get (machine_label, human_label, count) tuples for disagreements."""
         from collections import Counter
         disagreements = Counter(
             (m, h) for m, h in self.pairs if m != h
@@ -161,11 +116,7 @@ class ConcordanceTracker:
         return [(m, h, c) for (m, h), c in disagreements.most_common()]
 
     def summary(self) -> str:
-        """Generate a human-readable summary.
-
-        Returns:
-            Summary string.
-        """
+        """Generate a human-readable summary."""
         rate = self.concordance_rate()
         total = len(self.pairs)
         matches = sum(1 for m, h in self.pairs if m == h)

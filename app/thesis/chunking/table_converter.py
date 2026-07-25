@@ -1,23 +1,18 @@
 """HTML-to-Markdown table converter for the chunking pipeline.
 
-Converts raw HTML table strings (produced by the Unstructured parser's
-``text_as_html`` field) into clean Markdown table syntax. Markdown tables
-are substantially more compact than HTML and produce much better dense
-vector embeddings (BGE-M3) because the model can focus on the cell content
-rather than parsing HTML tags.
+Converts raw HTML table strings (the parser's ``text_as_html`` field) into
+Markdown table syntax. Markdown tables are far more compact and embed better
+(BGE-M3) since the model focuses on cell content rather than HTML tags.
 
-Design decisions:
-- Uses BeautifulSoup for robust HTML parsing (handles malformed HTML from OCR).
+Design:
+- BeautifulSoup for robust parsing (handles malformed HTML from OCR).
 - Merges multi-line cell text into single lines for Markdown compatibility.
-- Skips ``colspan`` / ``rowspan`` cells gracefully (outputs a ``[merged]``
-  placeholder to signal merged cells without corrupting the table structure).
-- Falls back to the original HTML string if parsing fails, so the pipeline
-  never loses data.
-- Does NOT attempt to render pixel-perfect tables — the goal is semantic
-  fidelity for embedding, not visual reproduction.
+- Renders ``colspan``/``rowspan`` cells as a ``[merged]`` placeholder rather
+  than corrupting the structure.
+- Falls back to the original HTML if parsing fails, so no data is lost.
+- Aims for semantic fidelity for embedding, not pixel-perfect rendering.
 
-This module is pure Python with one allowed external dependency:
-``beautifulsoup4`` (already installed in the project).
+Pure Python plus one allowed dependency, ``beautifulsoup4``.
 """
 
 from __future__ import annotations
@@ -32,30 +27,20 @@ logger = structlog.get_logger(__name__)
 # Placeholder rendered for visually merged cells (colspan/rowspan > 1)
 _MERGED_CELL_PLACEHOLDER = "[merged]"
 
-# Maximum character width of a single cell before truncation.
-# Very long cells (e.g. full paragraphs in a table cell) are truncated
-# to keep the Markdown table readable. The full text is preserved in
-# the parent chunk HTML; this is only used for the child chunk embedding.
+# Max character width of a single cell before truncation, to keep the Markdown
+# table readable. The full text is preserved in the parent chunk HTML; this
+# only affects the child chunk embedding.
 _MAX_CELL_CHARS = 300
 
 
 def html_table_to_markdown(html: str) -> str:
     """Convert an HTML table string to a Markdown table.
 
-    Parses the HTML using BeautifulSoup, extracts rows from ``<thead>``
-    and ``<tbody>`` (falling back to all ``<tr>`` elements), and renders
-    them as a GFM Markdown table with a separator row after the header.
-
-    If no header row (``<th>`` elements) is found, the first data row is
-    treated as the header.
-
-    Args:
-        html: Raw HTML string containing a ``<table>`` element. May be
-            malformed (e.g. from OCR-based table detection).
-
-    Returns:
-        Markdown table string, or the original ``html`` string if conversion
-        fails or the table contains no data rows.
+    Parses with BeautifulSoup, extracts rows from ``<thead>``/``<tbody>``
+    (falling back to all ``<tr>``), and renders a GFM table with a separator
+    row after the header. If no ``<th>`` header is found, the first data row
+    becomes the header. ``html`` may be malformed (e.g. OCR table detection).
+    Returns the original ``html`` if conversion fails or there are no data rows.
     """
     if not html or not html.strip():
         return html
@@ -72,14 +57,7 @@ def html_table_to_markdown(html: str) -> str:
 
 
 def _convert(html: str) -> str:
-    """Internal conversion logic (raises on error for caller to catch).
-
-    Args:
-        html: HTML string to convert.
-
-    Returns:
-        Markdown table string.
-    """
+    """Internal conversion logic (raises on error for the caller to catch)."""
     soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table")
 

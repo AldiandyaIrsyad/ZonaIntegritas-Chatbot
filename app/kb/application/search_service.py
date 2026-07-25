@@ -57,27 +57,15 @@ class SearchService:
     ) -> List[RetrievedContext]:
         """Search the Knowledge Base using the 6-step retrieval pipeline.
 
-        When a :class:`IQueryExpander` is configured, HyDE (Hypothetical
-        Document Embeddings) is applied: the raw query is first expanded
-        into a hypothetical answer document, and *that* document is embedded
-        and used for vector search instead of the raw query. This improves
-        retrieval recall by matching on answer-like semantics rather than
-        question-like phrasing.
+        When an :class:`IQueryExpander` is configured, HyDE applies: the raw
+        query is expanded into a hypothetical answer document, which is embedded
+        and searched instead of the raw query, matching on answer-like semantics
+        for better recall.
 
-        Args:
-            query: The search query text.
-            top_k: Maximum number of final results to return.
-            session_id: Optional session scope filter.
-            mode: Retrieval mode — "hybrid" (default), "dense", or "sparse".
-            rerank: When False, skip the cross-encoder rerank step and keep
-                the fusion ranking. For retrieval ablations: with the reranker
-                on, all three modes are really "mode → rerank", so the table
-                compares reranked variants rather than the fusion strategies
-                themselves (M10 in writing/overhaul.md). Production
-                callers leave this True.
-
-        Returns:
-            List of RetrievedContext ordered by relevance.
+        ``rerank=False`` skips the cross-encoder step and keeps the fusion
+        ranking — for ablations comparing the fusion strategies themselves
+        rather than three reranked variants of them. Production callers leave it
+        True.
         """
         if not query.strip():
             return []

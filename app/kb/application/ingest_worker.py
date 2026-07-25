@@ -67,22 +67,10 @@ class IngestWorker:
     ):
         """Wire the pipeline's collaborators (all injected ports/adapters).
 
-        Args:
-            db: Async DB session, committed at each pipeline stage boundary
-                so partial progress survives a later failure.
-            document_parser: :class:`IDocumentParser` — PDF → elements.
-            text_embedder: :class:`ITextEmbedder` — children → dense+sparse.
-            vector_store: :class:`IVectorStore` — Qdrant upsert target.
-            kb_repo: :class:`IKBRepository` — Postgres persistence.
-            vlm_enricher: Optional VLM for figure/visual-page description;
-                None disables enrichment (figures are dropped or, in
-                fallback mode, heuristically described upstream).
-            image_dir: Directory for page images extracted during routing.
-            page_image_ratio_threshold: Passed through to :func:`classify_page`.
-            page_garbage_ratio_threshold: Passed through to :func:`classify_page`.
-            image_description_prompt: VLM prompt for single-figure enrichment.
-            page_extraction_prompt: VLM prompt for full-page VISUAL extraction.
-            on_stage: See the inline comment on ``self.on_stage`` below.
+        ``db`` is committed at each stage boundary so partial progress survives
+        a later failure. ``vlm_enricher=None`` disables figure enrichment
+        (figures are dropped, or heuristically described in fallback mode).
+        ``on_stage`` is an optional research/visualization hook (see below).
         """
         self.db = db
         self.document_parser = document_parser
@@ -95,11 +83,10 @@ class IngestWorker:
         self.page_garbage_ratio_threshold = page_garbage_ratio_threshold
         self.image_description_prompt = image_description_prompt
         self.page_extraction_prompt = page_extraction_prompt
-        # Optional research/visualization hook, invoked at each documented
-        # pipeline stage with whatever data is already on hand. Defaults to
-        # None so every existing caller (real ingestion) is unaffected; set
-        # by tools.visualize.production_ingestion_viz to capture the
-        # real page-classifier/VLM routing decisions for documentation.
+        # Optional research/visualization hook invoked at each pipeline stage
+        # with the data on hand. Defaults to None so production ingestion is
+        # unaffected; set by tools.visualize.production_ingestion_viz to capture
+        # real routing decisions for documentation.
         self.on_stage = on_stage
 
     def _emit(self, stage: str, data: dict) -> None:
@@ -275,18 +262,10 @@ class IngestWorker:
           per-element VLM enrichment, TABLE elements get HTML→Markdown
           conversion, TEXT elements are kept as-is.
 
-        Elements with empty text after processing are filtered out.
-        Breadcrumbs are preserved — they are built later by
-        :func:`create_parent_chunks` from the heading hierarchy.
-
-        Args:
-            elements: Parsed elements from the document parser.
-            pdf_path: Path to the source PDF (for page image extraction).
-            doc_id: Document UUID for logging.
-
-        Returns:
-            Processed elements list with figures enriched, tables converted,
-            and empty-text elements removed.
+        Elements with empty text after processing are filtered out. Breadcrumbs
+        are preserved — built later by :func:`create_parent_chunks` from the
+        heading hierarchy. Returns the processed elements with figures
+        enriched, tables converted, and empty-text elements removed.
         """
         if not elements:
             return elements
@@ -417,15 +396,8 @@ class IngestWorker:
           metadata. This makes the table embeddable and splittable.
         - **TEXT** (NarrativeText, Title, etc.): Keep as-is.
 
-        Args:
-            page_elements: Elements belonging to a single page (or the
-                ``page_number is None`` bucket).
-            pdf_path: Path to the source PDF (for page image extraction).
-            doc_id: Document UUID for logging.
-
         Returns:
-            Tuple of (processed elements, figures_enriched delta,
-            tables_converted delta).
+            (processed elements, figures_enriched delta, tables_converted delta).
         """
         result_elements: list[ParsedElement] = []
         enriched_count = 0
@@ -531,22 +503,12 @@ class IngestWorker:
     ) -> Optional[ParsedElement]:
         """Run a single full-page VLM extraction for a page classified VISUAL.
 
-        Always renders the page fresh via :meth:`_extract_page_image` rather
-        than reusing any element's ``image_path`` metadata — on VISUAL pages
-        that metadata (when present) is typically a small, unreliable crop,
-        while the full-page extraction prompt needs the whole page rendered.
-
-        Fail-closed: returns ``None`` (page's visual content is dropped) if
-        no VLM is configured, page image extraction fails, the VLM call
-        raises, or the VLM returns empty text.
-
-        Args:
-            page_number: 1-indexed page number.
-            pdf_path: Path to the source PDF.
-            doc_id: Document UUID for logging.
-
-        Returns:
-            A single consolidated FIGURE ``ParsedElement``, or ``None``.
+        Renders the page fresh via :meth:`_extract_page_image` rather than
+        reusing an element's ``image_path`` — on VISUAL pages that metadata is
+        typically a small, unreliable crop, while the full-page prompt needs the
+        whole page. Fail-closed: returns ``None`` (visual content dropped) if no
+        VLM is configured, image extraction fails, the VLM call raises, or the
+        VLM returns empty text.
         """
         if self.vlm_enricher is None:
             logger.debug(
@@ -613,21 +575,12 @@ class IngestWorker:
     ) -> Optional[int]:
         """Length of a PDF page's native (embedded) text layer via PyMuPDF.
 
-        Feeds ``classify_page``'s scan-only detection (see
-        ``NATIVE_TEXT_LEN_THRESHOLD``) — near-zero native text combined with
-        at least one image element is a much more reliable scan-only signal
-        than Unstructured's per-element garbage-OCR ratio, which misses
-        pages where Unstructured's own OCR pass emits mis-read-but-real-word
-        text as separate text elements rather than as the image's text.
-
-        Args:
-            pdf_path: Path to the source PDF.
-            page_number: 1-indexed page number.
-
-        Returns:
-            Character count of the page's native text, or ``None`` if the
-            PDF couldn't be opened or the page is out of range (classify_page
-            treats ``None`` as "signal unavailable", not "zero text").
+        Feeds ``classify_page``'s scan-only detection: near-zero native text
+        plus at least one image element is a more reliable scan-only signal than
+        Unstructured's per-element garbage-OCR ratio, which misses pages whose
+        OCR emits mis-read-but-real-word text as separate text elements.
+        Returns ``None`` if the PDF can't be opened or the page is out of range
+        (treated as "signal unavailable", not "zero text").
         """
         try:
             import fitz  # PyMuPDF
@@ -655,15 +608,8 @@ class IngestWorker:
         page_number: int,
         doc_id: str,
     ) -> Optional[str]:
-        """Extract a PDF page as a PNG image using PyMuPDF.
-
-        Args:
-            pdf_path: Path to the source PDF.
-            page_number: 1-indexed page number.
-            doc_id: Document UUID (for naming the output file).
-
-        Returns:
-            Path to the extracted PNG, or None if extraction failed.
+        """Extract a PDF page as a PNG via PyMuPDF. Returns the PNG path, or
+        None if extraction failed.
         """
         try:
             import fitz  # PyMuPDF

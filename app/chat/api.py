@@ -28,11 +28,9 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     """Request body for ``POST /api/chat/sessions/{session_id}/stream``.
 
-    ``attachment_text``/``attachment_filename`` carry the client-held result
-    of a prior ``/api/chat/attachments/extract`` call (see
-    ``extract_attachment`` below) — the attachment itself is never
-    persisted server-side, so it must be resent by the client each turn it
-    should apply to.
+    ``attachment_text``/``attachment_filename`` carry the client-held result of
+    a prior ``/api/chat/attachments/extract`` call; the attachment is never
+    persisted server-side, so the client resends it each turn it applies to.
     """
 
     message: str
@@ -77,15 +75,11 @@ async def chat_stream(
 ) -> Any:
     """Stream a chat response from the LLM, passing through IVM and RAM.
 
-    The three defenses can be bypassed independently so an experiment can
-    attribute an effect to one of them rather than to "guardrails on vs off"
-    as a single block: ``skip_ivm`` (safety + relevance), ``skip_ram``
-    (per-sentence assessment), and ``skip_nonce`` (the anti-injection
-    delimiter, a structural defense separate from the IVM classifier).
-
-    ``skip_guardrails`` is the both-at-once shorthand for ``skip_ivm`` +
-    ``skip_ram``; passing either explicitly overrides it. It does not imply
-    ``skip_nonce``. Retrieval always runs so the LLM has context.
+    The defenses bypass independently so an experiment can attribute an effect
+    to one of them: ``skip_ivm`` (safety + relevance), ``skip_ram``
+    (per-sentence assessment), ``skip_nonce`` (the anti-injection delimiter).
+    ``skip_guardrails`` is the shorthand for ``skip_ivm`` + ``skip_ram``; an
+    explicit value overrides it, and it never implies ``skip_nonce``.
     """
     return StreamingResponse(
         service.process_chat_message(
@@ -109,13 +103,10 @@ async def extract_attachment(
 ) -> Any:
     """Extract text from an uploaded PDF for use as chat context.
 
-    This is a stateless, session-independent endpoint: it does not persist
-    anything. The client is expected to hold the returned text in memory and
-    include it (as ``attachment_text``/``attachment_filename``) in the
-    subsequent call to the ``/stream`` endpoint, where the combined message +
-    attachment text is re-scanned by the IVM safety check before generation
-    regardless of what happens here — this endpoint's own safety check below
-    is purely a fast-feedback UX nicety, not the authoritative gate.
+    Stateless and session-independent — persists nothing. The client holds the
+    returned text in memory and includes it in the subsequent ``/stream`` call,
+    where the combined text is re-scanned by IVM before generation. The safety
+    check here is a fast-feedback UX nicety, not the authoritative gate.
     """
     filename = file.filename or "upload.pdf"
     if not filename.lower().endswith(".pdf") and file.content_type != "application/pdf":
@@ -174,18 +165,15 @@ async def chat_search(
     reranker=Depends(get_reranker),
     expander: Optional[IQueryExpander] = Depends(get_query_expander),
 ) -> List[SearchResultItem]:
-    """Retrieval endpoint with a per-request HyDE toggle (Experiment 2 HyDE ablation).
+    """Retrieval endpoint with a per-request HyDE toggle (Experiment 2 ablation).
 
     Identical to ``/api/kb/search`` except it can inject the chat pipeline's
-    ``HyDEExpander`` — which ``/api/kb/search`` structurally cannot, because
-    ``kb/`` must not import ``chat/infra`` (see ``kb/dependency.py``). Living in
-    the chat domain (which legally composes ``chat/infra`` into KB-domain
-    services) makes HyDE the single toggled variable on one otherwise-identical
-    retrieval path: ``hyde=false`` here reproduces ``/api/kb/search``.
-
-    HyDE only actually engages when ``CHAT_HYDE_ENABLED`` is set (then
-    ``get_query_expander`` yields a ``HyDEExpander``); with ``hyde=false`` the
-    expander is dropped so the raw query is embedded.
+    ``HyDEExpander`` — which ``/api/kb/search`` structurally cannot, since
+    ``kb/`` must not import ``chat/infra``. Living in the chat domain makes HyDE
+    the single toggled variable on an otherwise-identical path: ``hyde=false``
+    reproduces ``/api/kb/search``. HyDE engages only when ``CHAT_HYDE_ENABLED``
+    is set; with ``hyde=false`` the expander is dropped and the raw query is
+    embedded.
     """
     search_service = SearchService(
         text_embedder=embedder,

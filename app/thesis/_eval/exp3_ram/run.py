@@ -4,8 +4,6 @@ Evaluates the NLI-based hallucination detection (indo-roberta) against
 Subset D (sentence-level annotations). Compares against a token-containment
 similarity baseline.
 
-Skripsi §3.3.4, Tabel 3.10.
-
 The NLI pipeline:
     1. For each (sentence, retrieved_context) pair, run NLI classification
     2. Map 4-label annotations → 3-class NLI labels:
@@ -17,11 +15,9 @@ The NLI pipeline:
 
 Baseline: token-containment similarity with threshold (high containment →
 entailment, low → contradiction, mid → neutral) — see
-run_containment_baseline for why this replaced an earlier token-Jaccard
-baseline (M6 in writing/overhaul.md: Jaccard's union-denominator
-made every score on this dataset land below any reachable threshold).
+run_containment_baseline for why containment is used rather than token-Jaccard.
 
-Metrics (§3.4): Accuracy, Precision, Recall, F1 (macro), Cohen's Kappa + CI.
+Metrics: Accuracy, Precision, Recall, F1 (macro), Cohen's Kappa + CI.
 
 Usage:
     python -m app.thesis._eval.exp3_ram.run \\
@@ -67,13 +63,7 @@ NLI_LABELS: List[str] = ["entailment", "neutral", "contradiction"]
 
 @dataclass
 class EvalResult:
-    """Results of a single evaluation run.
-
-    Attributes:
-        system_name: Name of the system being evaluated.
-        metrics: Multi-class metrics.
-        kappa_ci: Bootstrap CI for Cohen's Kappa.
-    """
+    """Results of a single evaluation run."""
 
     system_name: str
     metrics: MultiClassMetrics
@@ -82,9 +72,6 @@ class EvalResult:
 
 def filter_dataset(dataset: List[SubsetDRow]) -> Tuple[List[SubsetDRow], List[str]]:
     """Filter out 'no_source_needed' rows and map labels to NLI classes.
-
-    Args:
-        dataset: Full Subset D rows.
 
     Returns:
         Tuple of (filtered_rows, mapped_ground_truth_labels).
@@ -106,12 +93,7 @@ async def run_nli_classification(
 ) -> List[str]:
     """Run NLI classification on all (sentence, context) pairs.
 
-    Args:
-        client: Configured NLI model client.
-        dataset: Filtered Subset D rows.
-
-    Returns:
-        List of predicted NLI labels.
+    Returns the list of predicted NLI labels.
     """
     predictions: List[str] = []
     for i, row in enumerate(dataset, 1):
@@ -131,17 +113,14 @@ async def run_ram_classification(
 ) -> List[str]:
     """Classify each sentence with the *production* RAM (windowing + rerank + NLI).
 
-    This is the system the thesis actually ships (§3.2.7): rather than running
-    NLI once over the whole ``retrieved_context`` (which makes indo-roberta
-    default to ``neutral`` on long premises — see run_nli_classification, kept as
-    the no-windowing ablation), it splits the context into ~3-sentence windows,
-    reranks them against the sentence, and runs NLI on the best candidates. Each
-    row's flat ``retrieved_context`` is wrapped as a single ``RetrievedContext``
-    so ``assess_sentence`` windows over it exactly as in production.
-
-    Args:
-        ram: A production ``RAMService`` (NLI client + reranker).
-        dataset: Filtered Subset D rows.
+    This is the system the thesis actually ships: rather than running NLI once
+    over the whole ``retrieved_context`` (which makes indo-roberta default to
+    ``neutral`` on long premises — see run_nli_classification, kept as the
+    no-windowing ablation), it splits the context into ~3-sentence windows,
+    reranks them against the sentence, and runs NLI on the best candidates.
+    Each row's flat ``retrieved_context`` is wrapped as a single
+    ``RetrievedContext`` so ``assess_sentence`` windows over it exactly as in
+    production.
 
     Returns:
         List of predicted NLI labels (entailment/neutral/contradiction).
@@ -167,35 +146,27 @@ def run_containment_baseline(
 ) -> List[str]:
     """Run token-containment similarity baseline.
 
-    Replaces the earlier token-Jaccard baseline (M6 in
-    writing/overhaul.md): Jaccard's union-of-both-texts
+    Uses containment rather than token-Jaccard: Jaccard's union-of-both-texts
     denominator is dominated by the 4,000-22,000-token retrieved context
     almost regardless of a ~20-token sentence's overlap with it, so every
-    Jaccard score on this dataset landed in roughly [0, 0.1] — below the
-    0.15 contradiction threshold the old defaults used, making the
-    "baseline" a constant classifier (measured: it predicted
-    ``contradiction`` for 83/83 Subset D rows). Containment
-    (``|sentence ∩ context| / |sentence|``) instead measures how much of
-    the sentence's own vocabulary appears in the context, which stays
-    meaningful regardless of the length mismatch (measured mean ~0.88,
+    Jaccard score on this dataset lands in roughly [0, 0.1] — below any
+    reachable contradiction threshold, making a Jaccard baseline a constant
+    classifier. Containment (``|sentence ∩ context| / |sentence|``) instead
+    measures how much of the sentence's own vocabulary appears in the context,
+    which stays meaningful regardless of the length mismatch (mean ~0.88,
     genuine 0.0-1.0 spread on the same data).
 
     The thresholds below are picked to be reachable given that measured
     distribution, not tuned against Subset D's ground truth (whose
-    contradiction/partially_supported classes have only 2-4 examples each —
-    see M5 in writing/overhaul.md — too few to calibrate a
-    threshold against without overfitting to noise). Recalibrate once
-    Subset D is rebuilt with a less degenerate label distribution.
+    contradiction/partially_supported classes have only 2-4 examples each — too
+    few to calibrate a threshold against without overfitting to noise).
+    Recalibrate once Subset D is rebuilt with a less degenerate label
+    distribution.
 
     Classification rules:
         - containment ≥ entail_threshold → entailment
         - containment < contradiction_threshold → contradiction
         - otherwise → neutral
-
-    Args:
-        dataset: Filtered Subset D rows.
-        entail_threshold: Threshold for entailment classification.
-        contradiction_threshold: Threshold for contradiction classification.
 
     Returns:
         List of predicted NLI labels.
@@ -213,11 +184,7 @@ def run_containment_baseline(
 
 
 def print_confusion_matrix(metrics: MultiClassMetrics) -> None:
-    """Print a formatted confusion matrix.
-
-    Args:
-        metrics: Multi-class metrics with confusion matrix.
-    """
+    """Print a formatted confusion matrix."""
     labels = metrics.labels
     col_width = 14
     actual_vs_pred = "Actual \\ Pred"
@@ -234,11 +201,7 @@ def print_confusion_matrix(metrics: MultiClassMetrics) -> None:
 
 
 def print_report(result: EvalResult) -> None:
-    """Print a formatted evaluation report.
-
-    Args:
-        result: Evaluation result.
-    """
+    """Print a formatted evaluation report."""
     m = result.metrics
     print(f"\n{'=' * 70}")
     print(f"  {result.system_name}")
@@ -274,13 +237,10 @@ def slice_breakdown(
     Powers the dual reporting the hardened Subset D enables: macro-F1 on the
     balanced ``core`` versus the realistic ``natural`` base rate (``split``), and
     accuracy on the adversarially-hard rows (``difficulty_band``). Rows whose
-    attribute is empty (a legacy pre-rebuild file) form no group, so the block is
-    simply skipped for old datasets.
+    attribute is empty (a dataset without the column) form no group, so the
+    block is simply skipped for such datasets.
 
     Args:
-        filtered: Scored rows (``no_source_needed`` already removed).
-        ground_truths: NLI-mapped ground truth, aligned with ``filtered``.
-        preds: Predicted NLI labels, aligned with ``filtered``.
         attr: The ``SubsetDRow`` attribute to slice on (``split`` / ``difficulty_band``).
 
     Returns:
@@ -315,11 +275,7 @@ def print_slice_breakdown(title: str, rows: List[Tuple[str, int, float, float]])
 
 
 async def async_main(args: argparse.Namespace) -> None:
-    """Async entry point for Experiment 3.
-
-    Args:
-        args: Parsed command-line arguments.
-    """
+    """Async entry point for Experiment 3."""
     try:
         dataset = load_subset_d(args.dataset)
     except FileNotFoundError as exc:
@@ -406,7 +362,7 @@ async def async_main(args: argparse.Namespace) -> None:
         samples.sort()
         return CI(point=metrics.cohen_kappa, lower=samples[25], upper=samples[974])
 
-    # --- Production RAM (NLI + windowing + rerank) — the system under test (§3.2.7) ---
+    # --- Production RAM (NLI + windowing + rerank) — the system under test ---
     nli_client = EvalNLIClient(base_url=args.infinity_url, model=args.nli_model)
     reranker = InfinityReranker(base_url=args.infinity_url, model=args.reranker_model)
     ram = RAMService(nli_model=nli_client, reranker_model=reranker, enabled=True)
@@ -437,7 +393,7 @@ async def async_main(args: argparse.Namespace) -> None:
     # Dual reporting on the hardened Subset D: the balanced core is where macro-F1
     # is meaningful; the natural slice is the realistic base rate; the NLI-hard
     # band is the adversarial stress slice. All three are silently skipped on a
-    # legacy file whose rows carry no split/band.
+    # dataset whose rows carry no split/band.
     print_slice_breakdown(
         "RAM (NLI) by split (core = balanced diagnostic, natural = base rate):",
         slice_breakdown(filtered, ground_truths, nli_preds, "split"),
@@ -476,8 +432,8 @@ def main() -> None:
         type=float,
         default=0.7,
         help="Containment threshold for entailment (baseline; default 0.7, "
-        "reachable given the observed containment distribution — unlike "
-        "the old Jaccard default, see run_containment_baseline)",
+        "reachable given the observed containment distribution — see "
+        "run_containment_baseline)",
     )
     parser.add_argument(
         "--contradiction-threshold",

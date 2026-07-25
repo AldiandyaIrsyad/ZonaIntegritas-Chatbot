@@ -1,13 +1,9 @@
 """Dense + sparse text embedding adapter over the Infinity HTTP server.
 
-Fulfills: ``app/kb/domain/interfaces.py::ITextEmbedder``.
-Not currently wired into ``app/kb/dependency.py`` — production ingestion
-and search use ``bge_m3_embeddings.py::BGEM3Embeddings`` instead, because
-Infinity's own model list registers ``BAAI/bge-m3`` as dense-only (see
-that module's docstring and ``docs/02-arsitektur.md`` §2.1). This adapter
-is kept as the HTTP-backed alternative implementation the interface
-docstring references, and remains usable for any Infinity-hosted embedding
-model that does support sparse output.
+Fulfills ``app/kb/domain/interfaces.py::ITextEmbedder``. Not currently wired in
+— production uses ``bge_m3_embeddings.py::BGEM3Embeddings`` because Infinity
+serves ``BAAI/bge-m3`` as dense-only. Kept as the HTTP-backed alternative for
+any Infinity-hosted model that does support sparse output.
 """
 
 import httpx
@@ -19,18 +15,11 @@ from app.kb.domain.interfaces import ITextEmbedder, EmbeddingResult
 logger = structlog.get_logger(__name__)
 
 class InfinityEmbeddings(ITextEmbedder):
-    """HTTP adapter for the Infinity embedding server.
-
-    Fulfills: ``app/kb/domain/interfaces.py::ITextEmbedder``.
-    """
+    """HTTP adapter for the Infinity embedding server."""
 
     def __init__(self, base_url: str, model: str, batch_size: int = 8) -> None:
-        """Open an HTTP client for the Infinity server.
-
-        Args:
-            base_url: Infinity server base URL.
-            model: Model identifier registered with Infinity.
-            batch_size: Max texts sent per ``/embeddings`` request.
+        """Open an HTTP client for the Infinity server. ``batch_size`` caps the
+        texts sent per ``/embeddings`` request.
         """
         self.model = model
         self.batch_size = batch_size

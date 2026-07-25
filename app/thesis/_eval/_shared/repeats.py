@@ -23,13 +23,9 @@ async def repeat_passes(
 ) -> List[List[T]]:
     """Run one classification pass ``repeats`` times over identical input.
 
-    Args:
-        run_once: Async callable returning one pass's per-row results.
-        repeats: How many identical passes to make.
-        label: Human-readable name printed with each pass number.
-
-    Returns:
-        One result list per pass, in order.
+    ``run_once`` is an async callable returning one pass's per-row results;
+    ``label`` is the human-readable name printed with each pass number.
+    Returns one result list per pass, in order.
     """
     runs: List[List[T]] = []
     for attempt in range(repeats):
@@ -41,12 +37,9 @@ async def repeat_passes(
 def self_agreement(runs: Sequence[Sequence[T]]) -> Tuple[float, List[int]]:
     """Measure how often the passes agree row by row.
 
-    Args:
-        runs: One result list per pass, all the same length.
-
-    Returns:
-        (share of rows labelled identically in every pass, per-row count of
-        distinct labels — 1 means stable, >1 means the row flipped).
+    ``runs`` is one result list per pass, all the same length. Returns (share
+    of rows labelled identically in every pass, per-row count of distinct
+    labels — 1 means stable, >1 means the row flipped).
     """
     if not runs:
         return 0.0, []

@@ -1,20 +1,13 @@
 """Re-split and re-label an existing Subset D-family CSV.
 
-Corrective tool for the citation-marker sentence-splitting bug fixed in
-``build_subset_d.split_sentences()`` (it used to split on periods inside
-inline citation markers like "M.Ag.", corrupting ``sentence_text`` for a
-large fraction of rows — see the investigation this fixes).
+Corrective tool for the citation-marker sentence-splitting bug in
+``build_subset_d.split_sentences()`` (splitting on periods inside inline
+citation markers like "M.Ag." corrupted ``sentence_text``).
 
 Since ``full_response`` and ``retrieved_context`` are already stored
 correctly (verbatim) per question in the existing CSV, this re-derives
-sentences from them with the FIXED splitter and re-runs ONLY the panel
-labeling step — it does NOT re-invoke the live chat pipeline, avoiding the
-cost/time of regenerating responses that were never actually wrong.
-
-Usage:
-    python -m app.thesis._eval._dataset_gen.relabel_subset_d \\
-        --input data/subset_d.csv \\
-        --output data/subset_d.csv
+sentences from them with the fixed splitter and re-runs ONLY the panel
+labeling step — it does NOT re-invoke the live chat pipeline.
 """
 
 from __future__ import annotations
@@ -42,14 +35,7 @@ FIELDNAMES = [
 
 
 def load_unique_questions(path: str) -> List[Tuple[str, str, str, str]]:
-    """Recover one (question_id, question, full_response, retrieved_context) tuple per question.
-
-    Args:
-        path: Path to an existing Subset D-family CSV.
-
-    Returns:
-        List of unique per-question tuples, in first-seen order.
-    """
+    """Recover one (question_id, question, full_response, retrieved_context) tuple per question."""
     seen: Dict[str, Tuple[str, str, str, str]] = {}
     with open(path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
@@ -64,13 +50,7 @@ async def relabel(
     input_path: str,
     output_path: str,
 ) -> None:
-    """Re-split and re-label an existing Subset D-family CSV.
-
-    Args:
-        settings: Dataset generation settings.
-        input_path: Path to the existing (buggy) CSV.
-        output_path: Path to write the corrected CSV to.
-    """
+    """Re-split and re-label an existing Subset D-family CSV."""
     if not settings.openrouter_api_key:
         logger.error("datagen.relabel_subset_d.missing_api_key")
         sys.exit(1)

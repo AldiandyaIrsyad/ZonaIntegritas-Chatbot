@@ -1,22 +1,16 @@
 """Vision-Language Model adapters for figure enrichment.
 
-This module provides three adapters that implement the
-:class:`IVLMEnricher` protocol from ``thesis/vlm/interfaces.py``:
+Three adapters implement :class:`IVLMEnricher`:
 
-1. :class:`OpenRouterVLMClient` — Cloud VLM via OpenRouter (Gemini, GPT-4o).
-2. :class:`OllamaVLMClient` — Local VLM via Ollama (LLaVA, Qwen-VL).
-3. :class:`FallbackVLMClient` — No VLM; uses PyMuPDF drawing analysis
-   for text-only heuristic descriptions.
+1. :class:`OpenRouterVLMClient` — cloud VLM via OpenRouter (Gemini, GPT-4o).
+2. :class:`OllamaVLMClient` — local VLM via Ollama (LLaVA, Qwen-VL).
+3. :class:`FallbackVLMClient` — no VLM; PyMuPDF drawing analysis for text-only
+   heuristic descriptions.
 
-Fulfills: ``app/thesis/vlm/interfaces.py::IVLMEnricher`` (all three classes).
-Wired in: ``app/kb/dependency.py::get_vlm_enricher``, which selects one of
-the three at runtime based on config (API key presence, Ollama base URL,
-falling back to :class:`FallbackVLMClient` when neither is configured).
-
-Unlike the rest of ``thesis/`` (``chunking``, ``ivm``, ``ram``, ``prompts``),
-this module is the one deliberate exception to the stdlib-only purity rule:
-it calls ``httpx`` directly against OpenRouter/Ollama (see
-``docs/02-arsitektur.md`` §2.2).
+Wired in ``app/kb/dependency.py::get_vlm_enricher``, which selects one at
+runtime (API key presence, Ollama base URL, else :class:`FallbackVLMClient`).
+Unlike the rest of ``thesis/``, this module is the deliberate exception to the
+stdlib-only purity rule: it calls ``httpx`` directly against OpenRouter/Ollama.
 """
 
 from __future__ import annotations
@@ -46,14 +40,9 @@ DEFAULT_VLM_PROMPT = (
 
 
 class OpenRouterVLMClient(IVLMEnricher):
-    """Cloud VLM adapter using OpenRouter API (Gemini, GPT-4o).
-
-    Sends a base64-encoded image to the OpenRouter chat completions
-    endpoint with a vision-capable model. Requires an API key.
-
-    Fulfills: ``app/thesis/vlm/interfaces.py::IVLMEnricher``.
-    Wired in: ``app/kb/dependency.py::get_vlm_enricher`` (the default when
-    an OpenRouter API key is configured).
+    """Cloud VLM adapter using the OpenRouter API (Gemini, GPT-4o). Sends a
+    base64-encoded image to the chat completions endpoint with a vision-capable
+    model; requires an API key. The default when an OpenRouter key is configured.
     """
 
     def __init__(self, api_key: str, model: str, base_url: str, timeout: float = 120.0) -> None:
@@ -72,15 +61,8 @@ class OpenRouterVLMClient(IVLMEnricher):
     async def describe_image(self, image_path: str, prompt: str = DEFAULT_VLM_PROMPT) -> str:
         """Generate a text description of an image using a cloud VLM.
 
-        Args:
-            image_path: Path to the image file (PNG/JPEG).
-            prompt: Instruction for the VLM.
-
-        Returns:
-            Text description of the image content.
-
         Raises:
-            Exception: If the API call fails or the image cannot be read.
+            Exception: The API call fails or the image can't be read.
         """
         if not os.path.isfile(image_path):
             raise FileNotFoundError(f"Image not found: {image_path}")
@@ -130,14 +112,9 @@ class OpenRouterVLMClient(IVLMEnricher):
 
 
 class OllamaVLMClient(IVLMEnricher):
-    """Local VLM adapter using Ollama API (LLaVA, Qwen-VL).
-
-    Sends a base64-encoded image to the local Ollama instance. No API
-    key required — runs entirely on local hardware.
-
-    Fulfills: ``app/thesis/vlm/interfaces.py::IVLMEnricher``.
-    Wired in: ``app/kb/dependency.py::get_vlm_enricher`` (selected when no
-    OpenRouter API key is configured but an Ollama base URL is).
+    """Local VLM adapter using the Ollama API (LLaVA, Qwen-VL). Sends a
+    base64-encoded image to the local Ollama instance; no API key required.
+    Selected when no OpenRouter key is configured but an Ollama base URL is.
     """
 
     def __init__(self, base_url: str, model: str, timeout: float = 120.0) -> None:
@@ -151,15 +128,8 @@ class OllamaVLMClient(IVLMEnricher):
     async def describe_image(self, image_path: str, prompt: str = DEFAULT_VLM_PROMPT) -> str:
         """Generate a text description of an image using a local VLM.
 
-        Args:
-            image_path: Path to the image file.
-            prompt: Instruction for the VLM.
-
-        Returns:
-            Text description of the image content.
-
         Raises:
-            Exception: If the Ollama API call fails.
+            Exception: The Ollama API call fails.
         """
         if not os.path.isfile(image_path):
             raise FileNotFoundError(f"Image not found: {image_path}")
@@ -192,16 +162,10 @@ class OllamaVLMClient(IVLMEnricher):
 class FallbackVLMClient(IVLMEnricher):
     """Text-only fallback VLM adapter using PyMuPDF drawing analysis.
 
-    When no VLM is available (no API key, no local model), this adapter
-    analyses the PDF page structure (vector drawings, text blocks, images)
-    to produce a heuristic description. It does not call any external API.
-
-    The description is less rich than a true VLM but preserves structural
-    information (e.g. "flowchart with 15 drawing elements and 3 annotations").
-
-    Fulfills: ``app/thesis/vlm/interfaces.py::IVLMEnricher``.
-    Wired in: ``app/kb/dependency.py::get_vlm_enricher`` (the fallback when
-    neither an OpenRouter API key nor an Ollama base URL is configured).
+    When no VLM is available, analyses the PDF page structure (vector drawings,
+    text blocks, images) to produce a heuristic description without any external
+    API call. Less rich than a true VLM but preserves structural information.
+    The fallback when neither an OpenRouter key nor an Ollama URL is configured.
     """
 
     def __init__(self, pdf_path: Optional[str] = None) -> None:
@@ -210,32 +174,17 @@ class FallbackVLMClient(IVLMEnricher):
         logger.info("FallbackVLMClient initialized (no VLM — heuristic mode)")
 
     def set_pdf_path(self, pdf_path: str) -> None:
-        """Set the source PDF path for drawing analysis.
-
-        Must be called before :meth:`describe_image` if not provided
-        in the constructor.
-
-        Args:
-            pdf_path: Path to the source PDF file.
+        """Set the source PDF path for drawing analysis. Must be called before
+        :meth:`describe_image` if not provided in the constructor.
         """
         self._pdf_path = pdf_path
 
     async def describe_image(self, image_path: str, prompt: str = DEFAULT_VLM_PROMPT) -> str:
         """Generate a heuristic text description using PyMuPDF drawing analysis.
 
-        Extracts the page number from the image filename (expects
-        ``page_N.png`` format) and analyses the corresponding PDF page.
-
-        Args:
-            image_path: Path to the extracted page image.
-            prompt: Unused in fallback mode (kept for protocol compliance).
-
-        Returns:
-            Heuristic text description of the visual content.
-
-        Raises:
-            ValueError: If no PDF path is set or page number cannot be
-                extracted from the filename.
+        Extracts the page number from the image filename (expects ``page_N.png``)
+        and analyses the corresponding PDF page. ``prompt`` is unused in
+        fallback mode (kept for protocol compliance).
         """
         if not self._pdf_path:
             return (
@@ -257,13 +206,8 @@ class FallbackVLMClient(IVLMEnricher):
         return description
 
     def _extract_page_number(self, filename: str) -> Optional[int]:
-        """Extract the page number from a filename like ``page_3.png``.
-
-        Args:
-            filename: The image filename.
-
-        Returns:
-            The page number as an integer, or None if not found.
+        """Extract the page number from a filename like ``page_3.png``, or None
+        if not found.
         """
         import re
 

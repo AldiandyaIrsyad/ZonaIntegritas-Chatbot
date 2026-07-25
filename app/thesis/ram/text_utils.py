@@ -1,43 +1,32 @@
 """Shared text-splitting helpers for the Response Assessment Module.
 
 Used both to decide what generated text to run NLI on
-(``ChatService._split_propositions``) and to window the retrieved KB text
-for reverse-mapping the exact NLI premise (``RAMService.assess_sentence``).
-
-Pure Python (stdlib ``re`` + the sibling ``thesis.chunking.table_converter``
-module) — no infra imports, per the ``thesis/`` purity rule (see
-``docs/02-arsitektur.md`` §2.2).
+(``ChatService._split_propositions``) and to window the retrieved KB text for
+reverse-mapping the exact NLI premise (``RAMService.assess_sentence``). Pure
+Python (stdlib ``re`` + ``thesis.chunking.table_converter``) — no infra
+imports, per the ``thesis/`` purity rule.
 """
 import re
 from typing import List, Tuple
 
 from app.thesis.chunking.table_converter import is_markdown_table, split_markdown_table_lines
 
-# A digit-preceded ".", "?" or "!" is almost always a markdown list marker
-# (e.g. "1.", "2.") rather than a sentence end, so the negative lookbehind
-# excludes it. Newlines already delimit markdown list items/paragraphs
-# unambiguously, so they're treated as boundaries in their own right instead
-# of being flattened to spaces first. Wrapped in one capturing group so
-# split() also returns the exact separator text (e.g. "\n\n" for a
-# paragraph break vs. " " for a plain sentence gap).
+# A digit-preceded "."/"?"/"!" is almost always a markdown list marker (e.g.
+# "1.", "2."), not a sentence end, so the negative lookbehind excludes it.
+# Newlines delimit list items/paragraphs unambiguously, so they're boundaries
+# in their own right. One capturing group makes split() also return the exact
+# separator (e.g. "\n\n" for a paragraph break vs. " " for a sentence gap).
 _SENTENCE_BOUNDARY = re.compile(r'((?:(?<!\d[.?!])(?<=[.?!])\s+)|(?:\n+))')
 
 
 def split_sentences_with_seps(text: str) -> List[Tuple[str, str]]:
     """Split text into (sentence, trailing_separator) pairs.
 
-    The trailing separator is the exact whitespace that followed the
-    sentence in the source text (e.g. "\\n\\n" for a paragraph break),
-    so callers can reconstruct the original formatting instead of always
-    joining fragments with a single space.
-
-    Args:
-        text: Input text (may contain markdown list markers and newlines).
-
-    Returns:
-        Non-empty, stripped sentence fragments paired with the separator
-        that followed them ("" for the trailing, not-yet-terminated
-        fragment, if any).
+    The trailing separator is the exact whitespace that followed the sentence
+    (e.g. "\\n\\n" for a paragraph break), so callers can reconstruct the
+    original formatting instead of always joining with a single space. Returns
+    non-empty stripped fragments paired with their separator ("" for a trailing
+    unterminated fragment).
     """
     raw = _SENTENCE_BOUNDARY.split(text)
     pairs: List[Tuple[str, str]] = []
@@ -50,14 +39,7 @@ def split_sentences_with_seps(text: str) -> List[Tuple[str, str]]:
 
 
 def split_sentences(text: str) -> List[str]:
-    """Split text into sentence-like units.
-
-    Args:
-        text: Input text (may contain markdown list markers and newlines).
-
-    Returns:
-        Non-empty, stripped sentence fragments.
-    """
+    """Split text into non-empty, stripped sentence-like units."""
     return [s for s, _ in split_sentences_with_seps(text)]
 
 
@@ -68,29 +50,16 @@ def split_table_windows(
 ) -> List[str]:
     """Split a Markdown table into overlapping row-group windows.
 
-    Unlike ``split_sentences``, which treats every newline as a boundary
-    (shredding a table into headerless row fragments after the first
-    window), this keeps the header + separator row prepended to *every*
-    window, mirroring the header-repetition strategy already used for
-    child-chunk embedding
-    (``app.thesis.chunking.table_converter``/``logic._split_markdown_table_rows``)
-    — but sized for reranker/NLI windows, not embedding-sized chunks.
+    Unlike ``split_sentences`` (which treats every newline as a boundary,
+    shredding a table into headerless fragments after the first window), this
+    prepends the header + separator row to *every* window — the same
+    header-repetition used for child-chunk embedding, but sized for
+    reranker/NLI windows. ``row_step`` < ``rows_per_window`` yields overlap.
 
-    Args:
-        text: Raw context text (e.g. ``RetrievedContext.text`` for a
-            ``content_type == "table"`` context).
-        rows_per_window: Number of data rows grouped per window.
-        row_step: Sliding step between window start rows. A step smaller
-            than ``rows_per_window`` produces overlapping windows.
-
-    Returns:
-        List of ``"<header>\\n<separator>\\n<row>...\\n<row>"`` window
-        strings. No synthetic trailing period is appended (unlike
-        ``split_sentences`` windows) — appending punctuation after a
-        row's closing ``|`` would corrupt the row. Returns ``[]`` if
-        ``text`` isn't a parseable Markdown table (e.g. raw HTML that
-        failed conversion at ingest time) — callers should fall back to
-        ``split_sentences`` in that case.
+    Returns ``"<header>\\n<separator>\\n<row>..."`` strings with no synthetic
+    trailing period (punctuation after a row's closing ``|`` would corrupt it).
+    Returns ``[]`` if ``text`` isn't a parseable Markdown table — callers fall
+    back to ``split_sentences``.
     """
     if not is_markdown_table(text):
         return []

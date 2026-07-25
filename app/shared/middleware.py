@@ -14,19 +14,13 @@ import structlog
 
 
 class CorrelationIdMiddleware(BaseHTTPMiddleware):
-    """Assigns a unique request ID to each incoming HTTP request.
+    """Stamps each request with a correlation ID.
 
-    The ID is taken from the ``X-Request-ID`` request header if present
-    (allowing upstream proxies/gateways to propagate their own trace ID),
-    otherwise a fresh UUID4 is generated.
-
-    The ID is then:
-        1. Bound to ``structlog.contextvars`` — the ``merge_contextvars``
-           processor in ``app/shared/logging.py`` injects it into every
-           log line produced during this request.
-        2. Stored on ``request.state.request_id`` for ad-hoc access.
-        3. Echoed back in the ``X-Request-ID`` response header so clients
-           can correlate a response with their logs.
+    Uses the ``X-Request-ID`` request header when present (so upstream
+    proxies can propagate their trace ID), else a fresh UUID4. The ID is bound
+    to ``structlog.contextvars`` (injected into every log line by the
+    ``merge_contextvars`` processor), stored on ``request.state.request_id``,
+    and echoed in the ``X-Request-ID`` response header.
     """
 
     async def dispatch(

@@ -1,22 +1,16 @@
 """Domain ports (Protocol interfaces) for the Knowledge Base bounded context.
 
-This module defines the abstract contracts the KB application layer depends
-on. Per the Dependency Inversion Principle, the application and domain
-layers import only these Protocols; the concrete adapters live in
-``app/kb/infra/`` and are injected at the composition root
+The KB application/domain layers import only these Protocols; concrete adapters
+live in ``app/kb/infra/`` and are injected at the composition root
 (``app/kb/dependency.py``).
 
-Ports → adapters map:
-    - :class:`IDocumentParser` → ``app/kb/infra/unstructured_client.py::UnstructuredClient``
-    - :class:`ITextEmbedder`   → ``app/kb/infra/bge_m3_embeddings.py::BGEM3Embeddings``
-                                (or ``infinity_embeddings.py::InfinityEmbeddings``)
-    - :class:`IQueryExpander`  → ``app/chat/infra/hyde_expander.py::HyDEExpander``
-                                (note: implemented in the *chat* context and
-                                injected across the boundary by
-                                ``app/chat/dependency.py``)
-    - :class:`IReranker`       → ``app/kb/infra/infinity_reranker.py::InfinityReranker``
-    - :class:`IVectorStore`    → ``app/kb/infra/qdrant_store.py::QdrantStore``
-    - :class:`IKBRepository`   → ``app/kb/infra/postgres_repo.py::PostgresKBRepository``
+Ports → adapters: :class:`IDocumentParser` → ``unstructured_client.UnstructuredClient``;
+:class:`ITextEmbedder` → ``bge_m3_embeddings.BGEM3Embeddings`` (or
+``infinity_embeddings.InfinityEmbeddings``); :class:`IQueryExpander` →
+``app/chat/infra/hyde_expander.HyDEExpander`` (implemented in the chat context,
+injected across the boundary); :class:`IReranker` → ``infinity_reranker.InfinityReranker``;
+:class:`IVectorStore` → ``qdrant_store.QdrantStore``; :class:`IKBRepository` →
+``postgres_repo.PostgresKBRepository``.
 """
 
 from typing import Protocol, List, Optional, Any, Dict
@@ -26,20 +20,13 @@ from app.thesis.chunking.models import ParsedElement
 
 
 class IDocumentParser(Protocol):
-    """Port for parsing unstructured PDFs into semantic elements.
-
-    Implemented by: ``app/kb/infra/unstructured_client.py::UnstructuredClient``
-    (wired in ``app/kb/dependency.py::get_document_parser``).
+    """Port for parsing unstructured PDFs into semantic elements. Implemented
+    by ``app/kb/infra/unstructured_client.py::UnstructuredClient``.
     """
 
     async def parse_pdf(self, file_path: str) -> List[ParsedElement]:
-        """Parse a PDF into a list of typed semantic elements.
-
-        Args:
-            file_path: Absolute path to the PDF on disk.
-
-        Returns:
-            Ordered list of :class:`ParsedElement` (text, tables, figures).
+        """Parse a PDF into an ordered list of :class:`ParsedElement` (text,
+        tables, figures).
         """
         ...
 
@@ -50,12 +37,8 @@ class IDocumentParser(Protocol):
 
 @dataclass
 class EmbeddingResult:
-    """Result of an embedding operation.
-
-    Attributes:
-        dense: Dense float vector (BGE-M3, 1024-dim).
-        sparse_indices: BM25-style sparse term indices.
-        sparse_values: Sparse term weights aligned with ``sparse_indices``.
+    """Result of an embedding operation: a dense float vector (BGE-M3,
+    1024-dim) plus BM25-style sparse term indices and aligned weights.
     """
 
     dense: List[float]
@@ -64,22 +47,14 @@ class EmbeddingResult:
 
 
 class ITextEmbedder(Protocol):
-    """Port for generating text embeddings (dense + sparse).
-
-    Implemented by: ``app/kb/infra/bge_m3_embeddings.py::BGEM3Embeddings``
-    (in-process model; wired in ``app/kb/dependency.py::get_text_embedder``).
-    An alternative HTTP-backed implementation lives at
-    ``app/kb/infra/infinity_embeddings.py::InfinityEmbeddings``.
+    """Port for generating text embeddings (dense + sparse). Implemented by
+    ``app/kb/infra/bge_m3_embeddings.py::BGEM3Embeddings`` (in-process); an
+    HTTP-backed alternative is ``infinity_embeddings.py::InfinityEmbeddings``.
     """
 
     async def embed_texts(self, texts: List[str]) -> List[EmbeddingResult]:
-        """Embed a batch of texts into dense + sparse vectors.
-
-        Args:
-            texts: Texts to embed.
-
-        Returns:
-            One :class:`EmbeddingResult` per input text, in order.
+        """Embed a batch of texts, returning one :class:`EmbeddingResult` per
+        input in order.
         """
         ...
 
@@ -89,25 +64,16 @@ class ITextEmbedder(Protocol):
 
 
 class IQueryExpander(Protocol):
-    """Port for query expansion (e.g. HyDE).
-
-    Implementations generate a hypothetical document from the user's raw
-    query. The expanded text is then embedded instead of the raw query to
-    improve retrieval recall (HyDE — Hypothetical Document Embeddings).
-
-    Implemented by: ``app/chat/infra/hyde_expander.py::HyDEExpander``
-    (wired in ``app/chat/dependency.py::get_query_expander`` and injected
-    across the chat→kb boundary into ``SearchService``).
+    """Port for query expansion (e.g. HyDE). Implementations generate a
+    hypothetical document from the raw query, which is embedded instead of the
+    query to improve recall. Implemented by
+    ``app/chat/infra/hyde_expander.py::HyDEExpander`` (injected across the
+    chat→kb boundary into ``SearchService``).
     """
 
     async def expand(self, query: str) -> str:
-        """Generate an expanded/hypothetical document for the query.
-
-        Args:
-            query: The user's raw search query.
-
-        Returns:
-            A hypothetical answer document text to be embedded for retrieval.
+        """Generate a hypothetical answer document for the query, to be
+        embedded for retrieval.
         """
         ...
 
@@ -118,11 +84,8 @@ class IQueryExpander(Protocol):
 
 @dataclass
 class RerankResult:
-    """Result of a reranking operation for a single document.
-
-    Attributes:
-        index: Original position of the document in the input list.
-        score: Relevance score assigned by the reranker (higher = more relevant).
+    """A single reranking result: the document's original index and its
+    relevance score (higher = more relevant).
     """
 
     index: int
@@ -131,21 +94,12 @@ class RerankResult:
 
 class IReranker(Protocol):
     """Port for reranking retrieved documents by relevance to a query.
-
-    Implemented by: ``app/kb/infra/infinity_reranker.py::InfinityReranker``
-    (wired in ``app/kb/dependency.py::get_reranker``).
+    Implemented by ``app/kb/infra/infinity_reranker.py::InfinityReranker``.
     """
 
     async def rerank(self, query: str, documents: List[str], top_k: Optional[int] = None) -> List[RerankResult]:
-        """Rerank documents by relevance to the query.
-
-        Args:
-            query: The search query.
-            documents: List of document texts in their original retrieval order.
-            top_k: If provided, return only the top-k most relevant documents.
-
-        Returns:
-            List of RerankResult ordered by descending relevance score.
+        """Rerank ``documents`` (in original retrieval order) against ``query``,
+        returning ``RerankResult``s in descending score, capped to ``top_k``.
         """
         ...
 
@@ -156,19 +110,9 @@ class IReranker(Protocol):
 
 @dataclass
 class ChunkVector:
-    """A vectorized child chunk to be stored in the vector database.
-
-    Attributes:
-        chunk_id: UUID of the child chunk.
-        parent_chunk_id: UUID of the parent chunk this child belongs to.
-        doc_id: UUID of the source PDF document.
-        dense_vector: Dense embedding (BGE-M3, 1024-dim).
-        sparse_indices: BM25 sparse term indices.
-        sparse_values: BM25 sparse term weights.
-        breadcrumbs: Hierarchical section path (e.g. ["BAB I", "Pasal 5"]).
-        content_type: Structural type ("text", "table", "figure").
-        session_id: Optional chat session scope (for per-session collections).
-        text: The child chunk text (stored as payload for retrieval display).
+    """A vectorized child chunk for the vector database: IDs, dense + sparse
+    vectors, hierarchical breadcrumbs, structural type, optional session scope,
+    and the chunk text (stored as payload for retrieval display).
     """
 
     chunk_id: str
@@ -185,13 +129,8 @@ class ChunkVector:
 
 @dataclass
 class SearchResult:
-    """A raw match returned from the vector store.
-
-    Attributes:
-        chunk_id: UUID of the matched child chunk.
-        parent_chunk_id: UUID of the parent chunk to hydrate (Small-to-Big).
-        doc_id: UUID of the source PDF document.
-        score: Hybrid (dense + sparse) similarity score.
+    """A raw vector-store match: the matched child chunk, its parent chunk to
+    hydrate (Small-to-Big), the source document, and the hybrid similarity score.
     """
 
     chunk_id: str
@@ -202,9 +141,7 @@ class SearchResult:
 
 class IVectorStore(Protocol):
     """Port for vector database operations (hybrid dense + sparse search).
-
-    Implemented by: ``app/kb/infra/qdrant_store.py::QdrantStore``
-    (wired in ``app/kb/dependency.py::get_vector_store``).
+    Implemented by ``app/kb/infra/qdrant_store.py::QdrantStore``.
     """
 
     async def ensure_collection(self) -> None:
@@ -225,17 +162,9 @@ class IVectorStore(Protocol):
         mode: str = "hybrid",
     ) -> List[SearchResult]:
         """Run a hybrid (dense + sparse) search against the collection.
-
-        Args:
-            dense_vector: Query dense embedding.
-            sparse_indices: Query sparse term indices.
-            sparse_values: Query sparse term weights.
-            top_k: Maximum number of results to return.
-            session_id: If set, restrict to a per-session collection.
-            mode: Fusion mode — "hybrid" (RRF), "dense", or "sparse".
-
-        Returns:
-            List of :class:`SearchResult` ranked by hybrid score.
+        ``session_id`` restricts to a per-session collection; ``mode`` selects
+        the fusion ("hybrid"/RRF, "dense", or "sparse"). Returns
+        :class:`SearchResult`s ranked by hybrid score.
         """
         ...
 
@@ -253,10 +182,8 @@ class IVectorStore(Protocol):
 
 
 class IKBRepository(Protocol):
-    """Port for KB relational database operations (Postgres).
-
-    Implemented by: ``app/kb/infra/postgres_repo.py::PostgresKBRepository``
-    (wired in ``app/kb/dependency.py::get_kb_repo``).
+    """Port for KB relational database operations (Postgres). Implemented by
+    ``app/kb/infra/postgres_repo.py::PostgresKBRepository``.
     """
 
     async def get_all_pdfs(self) -> List[PDFDocument]:

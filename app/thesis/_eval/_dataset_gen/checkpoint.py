@@ -1,11 +1,6 @@
 """Crash-safe incremental CSV writing for dataset generation.
 
-A full generation run takes hours and costs real API spend. The builders used
-to accumulate every accepted row in memory and write the CSV once at the end,
-so any interruption — a dropped connection, an OpenRouter outage, a laptop
-lid, Ctrl-C — discarded the entire run along with everything already paid for.
-
-This writes each row to the output CSV the moment the panel accepts it, and
+Writes each row to the output CSV the moment the panel accepts it, and
 flushes, so the file on disk is always a valid, complete-as-of-now dataset.
 Combined with ``--resume``, an interrupted run continues from where it stopped
 instead of starting over: the builders reconstruct their per-category and
@@ -34,16 +29,9 @@ logger = structlog.get_logger(__name__)
 def resume_rows(output_path: str, fieldnames: Iterable[str]) -> List[Dict[str, str]]:
     """Read back rows already written by an interrupted run.
 
-    Args:
-        output_path: Path to the output CSV.
-        fieldnames: Expected column names. A file whose header doesn't match is
-            treated as unusable rather than silently merged — resuming into a
-            CSV written under a different schema would produce a dataset that
-            is half one shape and half another.
-
-    Returns:
-        The rows found, or an empty list if the file is missing, empty, or
-        written under a different schema.
+    A file whose header doesn't match ``fieldnames`` is treated as unusable
+    rather than silently merged. Returns an empty list if the file is missing,
+    empty, or written under a different schema.
     """
     path = Path(output_path)
     if not path.exists() or path.stat().st_size == 0:
@@ -84,13 +72,10 @@ class IncrementalCSVWriter:
         with IncrementalCSVWriter(path, fieldnames, resume=True) as w:
             w.append(row)
 
-    Args:
-        output_path: Destination CSV.
-        fieldnames: Column names.
-        resume: When True, append to an existing file (header already present)
-            instead of truncating it. When False the file is overwritten, which
-            is the correct default — a fresh run should not silently inherit
-            rows generated under an older panel or an older prompt.
+    When ``resume`` is True, appends to an existing file (header already
+    present) instead of truncating it. When False the file is overwritten — a
+    fresh run should not silently inherit rows generated under an older panel
+    or prompt.
     """
 
     def __init__(self, output_path: str, fieldnames: Iterable[str], resume: bool = False) -> None:
@@ -123,12 +108,8 @@ class IncrementalCSVWriter:
     def append(self, row: Dict[str, Any]) -> None:
         """Write one row and flush it to disk immediately.
 
-        Flushing per row rather than per batch is what makes an interrupted run
-        recoverable; at a few hundred rows over several hours the cost is
-        irrelevant next to the panel calls.
-
-        Args:
-            row: Mapping of column name to value. Extra keys are ignored.
+        Flushing per row is what makes an interrupted run recoverable; the cost
+        is irrelevant next to the panel calls.
         """
         if self._writer is None or self._handle is None:
             raise RuntimeError("IncrementalCSVWriter used outside its context manager")

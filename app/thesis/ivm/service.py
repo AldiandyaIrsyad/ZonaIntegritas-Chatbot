@@ -1,17 +1,13 @@
-"""
-Service layer for the Input Validation Module (IVM).
+"""Service layer for the Input Validation Module (IVM).
 
-Responsible for checking prompts for malicious content (prompt injection /
-jailbreak detection). Relevance/OOD checking lives in
-``app/thesis/ivm/relevance_service.py`` — the two concerns have independent
-dependencies (a safety classifier vs. a relevance backend) and are composed
-separately at the DI layer.
+Checks prompts for malicious content (prompt injection / jailbreak detection).
+Relevance/OOD checking lives in ``app/thesis/ivm/relevance_service.py`` — the
+two concerns have independent dependencies and are composed separately at the
+DI layer.
 
-``IVMService`` is a plain application-level service, not an
-``IRelevanceChecker``/``IJudge`` adapter — it depends only on the
-``ISafetyModel`` Protocol, so it stays part of the infra-free ``thesis``
-research core (see ``docs/02-arsitektur.md`` §2.2). Wired in
-``app/chat/dependency.py::get_ivm_service``.
+``IVMService`` is a plain application service depending only on the
+``ISafetyModel`` Protocol, so it stays in the infra-free ``thesis`` core. Wired
+in ``app/chat/dependency.py::get_ivm_service``.
 """
 from .interfaces import ISafetyModel
 
@@ -31,40 +27,32 @@ class MaliciousPromptException(IVMException):
 
 
 class IVMService:
-    """Input Validation Module (IVM) — prompt safety checks.
-
-    Args:
-        safety_model (ISafetyModel): Client for prompt injection checks.
-    """
+    """Input Validation Module (IVM) — prompt safety checks."""
 
     def __init__(
         self,
         safety_model: ISafetyModel,
     ):
-        """Args:
-            safety_model: Prompt injection classifier backend (typically
-                ``app/chat/infra/prompt_guard_client.py::PromptGuardClient``).
+        """``safety_model`` is the prompt-injection classifier backend
+        (typically ``app/chat/infra/prompt_guard_client.py::PromptGuardClient``).
         """
         self.safety_model = safety_model
 
     async def check_malicious(self, query: str) -> None:
-        """Validates the query against the safety model using a sliding window.
-
-        Args:
-            query (str): The prompt to check.
+        """Validate the query against the safety model using a sliding window.
 
         Raises:
-            MaliciousPromptException: If the prompt is malicious or if the service fails.
+            MaliciousPromptException: The prompt is malicious or the service fails.
         """
         if not query.strip():
             return
 
         window_size = 512
         overlap = 50
-        
-        # Sliding window
+
+        # Sliding window; runs at least once even for a short query.
         start = 0
-        while start < len(query) or start == 0: # Ensures it runs at least once even if query is short
+        while start < len(query) or start == 0:
             end = start + window_size
             chunk = query[start:end]
             

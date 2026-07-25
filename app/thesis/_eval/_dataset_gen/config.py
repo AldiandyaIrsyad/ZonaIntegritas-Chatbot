@@ -1,10 +1,9 @@
 """Configuration for the dataset generation pipeline.
 
-Skripsi §3.2.1c defines a Generator–Evaluator architecture:
+Generator–Evaluator architecture:
     - Generator: DeepSeek — cheap, strong instruction-following
-    - Panel (5 distinct labs, generator excluded to avoid self-eval bias), all
-      verified live on OpenRouter: Gemini 2.5 Flash, Llama 3.3 70B, Qwen3.7
-      Plus, Nemotron 3 Super, and GPT-5.6-Luna.
+    - Panel: 5 distinct-lab models (generator excluded to avoid self-eval
+      bias), all verified live on OpenRouter.
     - Temperature: 0.0 (deterministic), with upstream provider pinned — see
       ``panel_allow_fallbacks``, since temperature alone is not enough for
       reproducibility when a slug is served by several providers.
@@ -16,13 +15,9 @@ votes NO) and silently rejects every candidate. Run
 resolves slugs, checks each model votes correctly in both directions, and
 reports which upstream provider served each call.
 
-NOTE: the "flash-lite"/"flash" (smallest) tier of a model family is not
-always reliable enough for judging tasks — during real generation runs,
-gemini-2.5-flash-lite gave unexplained bare "NO" votes and glm-4.7-flash
-sometimes exhausted its token budget on hidden reasoning and returned empty
-content (which fails closed as NO). Both were swapped out after empirical
-verification; mistral-small-3.2-24b (smallest Mistral tier) was similarly
-upgraded to mistral-large-2512 as a precaution.
+Avoid the "flash-lite"/smallest tier of a model family for judging — these
+can give bare unexplained "NO" votes or exhaust their token budget on hidden
+reasoning and return empty content (which fails closed as NO).
 """
 
 from __future__ import annotations
@@ -66,42 +61,24 @@ class DatasetGenSettings(BaseSettings):
     )
 
     # --- Evaluator Panel ---
-    # 5 distinct-lab models (slugs and prices verified live against
-    # OpenRouter /models on 2026-07-22 via the preflight script):
-    #   google/gemini-2.5-flash              $0.30  / $2.50  per 1M tokens
-    #   meta-llama/llama-3.3-70b-instruct    $0.10  / $0.32  per 1M tokens
-    #   qwen/qwen3.7-plus                    $0.32  / $1.28  per 1M tokens
-    #   nvidia/nemotron-3-super-120b-a12b    $0.08  / $0.45  per 1M tokens
-    #   openai/gpt-5.6-luna                  $1.00  / $6.00  per 1M tokens
-    # Panel size stays 5 with a majority-of-4 threshold: a 3-model panel was
-    # tried and reverted as too volatile, and fewer/weaker raters is a poor
-    # trade against cost that is negligible at this scale anyway (the whole
-    # A-C regeneration is well under $1).
+    # 5 distinct-lab models. Panel size stays 5 with a majority-of-4
+    # threshold; cost is negligible at this scale (the whole A-C regeneration
+    # is well under $1). Blended input price is ~$0.36/M. Since each panel
+    # call's output is a single label word, INPUT price dominates cost.
     #
-    # This restores gpt-5.6-luna, which an earlier cost pass had swapped out
-    # for openai/gpt-oss-20b, and replaces the Mistral slot with Nemotron 3
-    # Super — a 120B MoE (12B active) at essentially the same price as the
-    # mistral-small-24b it replaces, so it is a straight capability gain.
-    # Blended input price is ~$0.36/M. Since each panel call's output is a
-    # single label word, INPUT price is what dominates cost.
+    # Position carries no meaning: EvaluatorPanel.evaluate gathers all five
+    # votes concurrently and counts them equally.
     #
-    # NOTE ON ORDER: position carries no meaning. EvaluatorPanel.evaluate
-    # gathers all five votes concurrently and counts them equally; there is
-    # no tie-breaker role in the code, whatever earlier revisions of this
-    # comment implied by calling a premium member a "tie-breaker voice".
+    # Generator (deepseek) is intentionally excluded to avoid self-evaluation
+    # bias.
     #
-    # Generator (deepseek) remains intentionally excluded to avoid
-    # self-evaluation bias.
-    #
-    # Caveats carried over: avoid gemini flash-**lite** for judging
-    # (empirically unreliable — bare unexplained "NO" votes / empty responses
-    # from an exhausted reasoning budget; plain "flash" has not shown this),
-    # and avoid ':free' variants, which are separately rate-limited. Any
-    # model that rejects this panel's ``reasoning: {enabled: false}`` request
-    # errors into a fail-closed NO vote on every call, so run
+    # Caveats: avoid gemini flash-**lite** for judging (unreliable — bare
+    # unexplained "NO" votes / empty responses from an exhausted reasoning
+    # budget), and avoid ':free' variants, which are separately rate-limited.
+    # Any model that rejects this panel's ``reasoning: {enabled: false}``
+    # request errors into a fail-closed NO vote on every call, so run
     # ``python -m app.thesis._eval._dataset_gen.preflight`` before a full
-    # generation — it verifies each slug resolves and votes correctly in both
-    # directions, which is exactly the failure this comment keeps warning about.
+    # generation.
     panel_models: str = Field(
         default="google/gemini-2.5-flash,meta-llama/llama-3.3-70b-instruct,qwen/qwen3.7-plus,nvidia/nemotron-3-super-120b-a12b,openai/gpt-5.6-luna",
         description=(
@@ -154,19 +131,11 @@ class DatasetGenSettings(BaseSettings):
 
     @property
     def panel_model_list(self) -> List[str]:
-        """Parse panel_models into a list.
-
-        Returns:
-            List of model identifiers.
-        """
+        """Parse panel_models into a list of model identifiers."""
         return [m.strip() for m in self.panel_models.split(",") if m.strip()]
 
 
 @lru_cache
 def get_dataset_gen_settings() -> DatasetGenSettings:
-    """Return the cached DatasetGenSettings singleton.
-
-    Returns:
-        DatasetGenSettings instance.
-    """
+    """Return the cached DatasetGenSettings singleton."""
     return DatasetGenSettings()

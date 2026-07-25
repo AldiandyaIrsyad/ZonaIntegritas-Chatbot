@@ -1,16 +1,9 @@
 """Content-type router for the chunking pipeline.
 
-This module provides a pure function that classifies each
-:class:`ParsedElement` into a :class:`ContentType` so the chunker can
-route it to the appropriate splitting strategy.
-
-Classification rules:
-- ``element_type == "Table"`` → :attr:`ContentType.TABLE`
-- ``element_type`` in image/figure types → :attr:`ContentType.FIGURE`
-- Default → :attr:`ContentType.TEXT`
-
-This module is pure Python (no infra imports), respecting the
-``thesis/`` purity rule.
+A pure function classifying each :class:`ParsedElement` into a
+:class:`ContentType` so the chunker can route it to the right splitting
+strategy: ``element_type == "Table"`` → TABLE, image/figure types → FIGURE,
+else TEXT. Pure Python (no infra imports), per the ``thesis/`` purity rule.
 """
 
 from __future__ import annotations
@@ -35,13 +28,8 @@ IGNORE_ELEMENT_TYPES = {"Header", "Footer", "PageNumber"}
 
 
 def classify_element(element: ParsedElement) -> ContentType:
-    """Classify a parsed element into a content type for routing.
-
-    Args:
-        element: The parsed element to classify.
-
-    Returns:
-        The content type: TABLE, FIGURE, or TEXT.
+    """Classify a parsed element into a content type (TABLE, FIGURE, or TEXT)
+    for routing.
     """
     if element.element_type in TABLE_ELEMENT_TYPES:
         return ContentType.TABLE
@@ -51,16 +39,8 @@ def classify_element(element: ParsedElement) -> ContentType:
 
 
 def classify_elements(elements: List[ParsedElement]) -> List[ParsedElement]:
-    """Classify all elements in-place, returning the same list.
-
-    Sets ``element.content_type`` for each element based on
-    :func:`classify_element`.
-
-    Args:
-        elements: List of parsed elements to classify.
-
-    Returns:
-        The same list (modified in-place) for convenience.
+    """Classify all elements in-place (setting ``element.content_type`` via
+    :func:`classify_element`) and return the same list for convenience.
     """
     for element in elements:
         element.content_type = classify_element(element)

@@ -21,35 +21,24 @@ logger = structlog.get_logger(__name__)
 BGE_M3_DENSE_DIM: int = 1024
 
 class QdrantStore(IVectorStore):
-    """Async adapter for Qdrant hybrid (dense + sparse) vector search.
-
-    Fulfills: ``app/kb/domain/interfaces.py::IVectorStore``.
-    """
+    """Async adapter for Qdrant hybrid (dense + sparse) vector search."""
 
     def __init__(self, host: str, port: int, collection_name: str) -> None:
-        """Open a Qdrant client for the given collection.
-
-        Args:
-            host: Qdrant server host.
-            port: Qdrant REST port.
-            collection_name: Name of the single collection this app uses
-                (see ``docs/05-basis-data.md``).
+        """Open a Qdrant client for the given collection (the single collection
+        this app uses).
         """
         self.collection_name = collection_name
         self._client = AsyncQdrantClient(host=host, port=port)
         logger.info("QdrantStore initialized", host=host, port=port, collection_name=collection_name)
 
     async def ensure_collection(self) -> None:
-        """Create the collection and its payload indexes if they don't
-        already exist (idempotent — checks ``get_collections`` first and
-        returns early if the collection is present, so this is safe to call
-        on every app startup).
+        """Create the collection and its payload indexes if absent (idempotent;
+        safe to call on every startup).
 
-        Sets up the hybrid schema this adapter's search relies on: a
-        ``dense`` vector (BGE-M3, 1024-dim, cosine) plus a ``bm25`` sparse
-        vector (IDF-modified), and payload indexes on ``is_active``,
-        ``session_id``, ``doc_id``, and ``content_type`` for the filters
-        used in :meth:`hybrid_search`.
+        Sets up the hybrid schema search relies on: a ``dense`` vector (BGE-M3,
+        1024-dim, cosine) plus a ``bm25`` sparse vector (IDF-modified), and
+        payload indexes on ``is_active``, ``session_id``, ``doc_id``, and
+        ``content_type`` for the :meth:`hybrid_search` filters.
         """
         try:
             collections = await self._client.get_collections()
@@ -85,12 +74,10 @@ class QdrantStore(IVectorStore):
             raise
 
     async def upsert_chunks(self, chunks: List[ChunkVector]) -> None:
-        """Upsert vectorized child chunks in batches of 100.
-
-        Batching avoids sending one oversized request for documents with
-        many children; each ``ChunkVector`` becomes a Qdrant point with a
-        ``dense`` vector and, when sparse terms are present, a ``bm25``
-        sparse vector alongside it.
+        """Upsert vectorized child chunks in batches of 100 (avoids one
+        oversized request for documents with many children). Each ``ChunkVector``
+        becomes a Qdrant point with a ``dense`` vector and, when sparse terms
+        exist, a ``bm25`` sparse vector.
         """
         if not chunks:
             return

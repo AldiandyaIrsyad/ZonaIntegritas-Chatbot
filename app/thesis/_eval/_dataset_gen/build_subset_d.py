@@ -4,8 +4,6 @@ Generates sentence-level NLI annotations by running questions through the
 full RAG pipeline, decomposing responses into sentences, and having the
 panel label each sentence.
 
-Skripsi §3.2.1, Tabel 3.6.
-
 Pipeline:
     1. Load Subset A questions (stratified sample)
     2. Run each question through the full chat pipeline via API
@@ -18,16 +16,12 @@ Pipeline:
     5. Accept the majority label if it reaches acceptance_threshold; if not
        but at least 2 panel members still agree on some label, accept that
        as a "disputed" plurality rather than dropping the sentence outright
-       (dropping every disagreement was found to silently zero out the
-       partially_supported class — see writing/overhaul.md M5)
-    6. Output CSV matching Tabel 3.6 schema
-
-Usage:
-    python -m app.thesis._eval._dataset_gen.build_subset_d \\
-        --api-url http://localhost:8000 \\
-        --subset-a data/subset_a.csv \\
-        --output data/subset_d.csv \\
-        --count 30
+       (a disputed plurality is accepted rather than dropped, since dropping
+       every disagreement would zero out the partially_supported class)
+    6. Output CSV with columns: question_id, question, full_response,
+       sentence_id, sentence_text, retrieved_context, label, verifier_note,
+       plus slice metadata (construction, perturbation_family, intended_label,
+       perturbation_of, difficulty_band, split, edit_note)
 """
 
 from __future__ import annotations
@@ -95,9 +89,8 @@ LABELS = ["supported", "partially_supported", "not_supported", "no_source_needed
 # sentences of one response draw on the same chunk(s). Sentence is the one
 # field that varies per call. Ordering the prompt so the varying field comes
 # LAST maximizes the shared prefix across a question's per-sentence panel
-# calls, which is what OpenRouter's provider-side prompt caching (see
-# EvaluatorPanel.evaluate_label's session_id param) actually caches against
-# — see writing/overhaul.md §2.4.
+# calls, which is what OpenRouter's provider-side prompt caching actually
+# caches against.
 VALIDATION_PROMPT = """\
 You are evaluating a sentence from an LLM response for a hallucination \
 detection benchmark.
@@ -117,18 +110,17 @@ Label the sentence as one of:
 # Minimum token count for a sentence to be considered a real proposition
 # rather than a fragment (e.g. a bare name split out of a markdown list:
 # "Arief Johari, S.T., M.Ds."). Fragments have no defensible entailment
-# label and their presence in the earlier version of this dataset (M8 in
-# writing/overhaul.md) diluted label quality. 5 is a pragmatic
-# floor, not a linguistic parse — a real Indonesian clause is rarely
-# shorter than this once citation markers are already stripped.
+# label and dilute label quality. 5 is a pragmatic floor, not a linguistic
+# parse — a real Indonesian clause is rarely shorter than this once citation
+# markers are already stripped.
 MIN_SENTENCE_TOKENS = 5
 
 # How many of the response's retrieved chunks to keep per sentence when
 # building the panel prompt (see select_relevant_chunks). Narrowing from
-# "all ~15 chunks" (15-22k chars observed, per the audit) to the few chunks
-# actually relevant to this sentence is both a quality fix (the panel isn't
-# drowned in irrelevant text) and the single largest cost lever available —
-# larger than any model swap (writing/overhaul.md §2.4).
+# "all ~15 chunks" (15-22k chars observed) to the few chunks actually
+# relevant to this sentence is both a quality fix (the panel isn't drowned in
+# irrelevant text) and the single largest cost lever available — larger than
+# any model swap.
 MAX_CONTEXT_CHUNKS_FOR_PANEL = 3
 
 
@@ -143,12 +135,6 @@ def split_sentences(text: str) -> List[str]:
     which already handles markdown list markers ("1.", "2.") correctly —
     production only ever splits pre-citation text, so this eval-only
     citation-stripping step has no equivalent there.
-
-    Args:
-        text: The response text.
-
-    Returns:
-        List of sentence strings.
     """
     if not text or not text.strip():
         return []
@@ -168,18 +154,12 @@ async def run_pipeline(
     response text and capturing the ``context`` event emitted before
     streaming begins.
 
-    Args:
-        api_url: Base URL of the running application.
-        session_id: Chat session ID.
-        question: The question to ask.
-
-    Returns:
-        Dict with response text, flat retrieved context, and the structured
-        per-chunk list (``chunks``, each a dict with ``title``/``page``/
-        ``breadcrumbs``/``text`` — see chat_service.py's context payload),
-        or None on error. ``chunks`` lets callers narrow context per
-        sentence (select_relevant_chunks) instead of guessing chunk
-        boundaries out of the flat joined string.
+    Returns a dict with response text, flat retrieved context, and the
+    structured per-chunk list (``chunks``, each a dict with ``title``/``page``/
+    ``breadcrumbs``/``text`` — see chat_service.py's context payload), or None
+    on error. ``chunks`` lets callers narrow context per sentence
+    (select_relevant_chunks) instead of guessing chunk boundaries out of the
+    flat joined string.
     """
     async with httpx.AsyncClient(base_url=api_url, timeout=180.0) as client:
         # Send message and collect NDJSON stream.
@@ -238,24 +218,16 @@ def select_relevant_chunks(
     |sent|``) and returns the top ``max_chunks``, joined in their original
     retrieval order (not by score) so the excerpt still reads coherently.
     Falls back to joining everything if there are no real chunk boundaries
-    to work with (e.g. an older API response without the ``chunks`` field).
+    to work with (e.g. an API response without the ``chunks`` field).
 
     This exists for two reasons at once: it keeps the panel from having to
     read all ~15 retrieved chunks (15-22k chars observed) to label a single
     20-token sentence — the single largest cost lever available for this
-    pipeline (writing/overhaul.md §2.4) — and it improves label
-    quality, since a human annotator would naturally focus on the passage
-    that actually supports the sentence rather than being handed the whole
-    context indiscriminately.
+    pipeline — and it improves label quality, since a human annotator would
+    naturally focus on the passage that actually supports the sentence rather
+    than being handed the whole context indiscriminately.
 
-    Args:
-        sentence: The sentence being labeled.
-        chunks: Structured per-chunk dicts from the ``context`` NDJSON
-            event (``title``/``page``/``breadcrumbs``/``text``).
-        max_chunks: Maximum number of chunks to keep.
-
-    Returns:
-        The narrowed context text (chunk texts joined with blank lines).
+    Returns the narrowed context text (chunk texts joined with blank lines).
     """
     if not chunks:
         return ""
@@ -277,14 +249,8 @@ def select_relevant_chunks(
 def is_fragment_sentence(sentence: str, min_tokens: int = MIN_SENTENCE_TOKENS) -> bool:
     """Check whether ``sentence`` is too short to be a real proposition.
 
-    Args:
-        sentence: Candidate sentence (citation markers already stripped).
-        min_tokens: Minimum whitespace-separated token count.
-
-    Returns:
-        True if the sentence should be skipped (M8 in
-        writing/overhaul.md — fragments like bare names have no
-        defensible entailment label).
+    Fragments like bare names have no defensible entailment label and are
+    skipped.
     """
     return len(sentence.split()) < min_tokens
 
@@ -300,7 +266,7 @@ async def label_sentence(
     chunks: List[Dict[str, Any]],
     session_id: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], str, bool]:
-    """Label one sentence via the panel, with plurality fallback (M5 fix).
+    """Label one sentence via the panel, with plurality fallback.
 
     Shared by build_subset_d.py and build_subset_d_hard.py so both scripts
     get the same fragment filter, chunk narrowing, and accept/dispute/drop
@@ -314,13 +280,6 @@ async def label_sentence(
     system actually retrieved.
 
     Args:
-        panel: Evaluator panel for sentence-level labeling.
-        question: The question this sentence's response answers.
-        question_id: ID to tag the output row with.
-        full_response: The full LLM response this sentence was split from.
-        sentence: The sentence text (citation markers already stripped).
-        sent_idx: Index of this sentence within the response.
-        retrieved_context: Full flat retrieved context for the question.
         chunks: Structured per-chunk list for this question (may be empty
             for responses captured before this field existed).
         session_id: Optional OpenRouter sticky-routing session id — pass
@@ -328,12 +287,12 @@ async def label_sentence(
 
     Returns:
         Tuple of (row dict or None, status, unanimous). status is one of
-        "accepted" (clean majority), "disputed" (plurality fallback, M5),
-        "fragment" (skipped before the panel call, M8), "no_signal"
-        (panel ran but no label reached even a 2-vote plurality), or
-        "error" (the panel call itself failed). ``unanimous`` is True only
-        when every panel member independently agreed — the criterion the
-        blind-injection tracker uses for candidate selection.
+        "accepted" (clean majority), "disputed" (plurality fallback),
+        "fragment" (skipped before the panel call), "no_signal" (panel ran
+        but no label reached even a 2-vote plurality), or "error" (the panel
+        call itself failed). ``unanimous`` is True only when every panel
+        member independently agreed — the criterion the blind-injection
+        tracker uses for candidate selection.
     """
     if is_fragment_sentence(sentence):
         return None, "fragment", False
@@ -371,15 +330,14 @@ async def label_sentence(
     if verdict.accepted and verdict.accepted_label:
         label = verdict.accepted_label
     elif verdict.label_counts:
-        # M5 fix: a verdict that misses the acceptance threshold used to be
-        # dropped outright — which systematically discards every sentence
-        # the panel actually disagreed about, and disproportionately
-        # destroys "partially_supported" specifically, since it's the label
-        # most likely to draw a split vote (Subset D shipped with 0/83
-        # partially_supported rows before this fix). Accept the plurality
-        # instead, as long as at least 2 models independently agree — a
-        # genuine 3-way split (e.g. 1-1-1 on a 3-model panel) still has no
-        # usable signal and is dropped.
+        # A verdict that misses the acceptance threshold is accepted as a
+        # disputed plurality rather than dropped outright — dropping every
+        # disagreement systematically discards the sentences the panel
+        # actually disagreed about, and disproportionately destroys
+        # "partially_supported" specifically, since it's the label most likely
+        # to draw a split vote. Accept the plurality as long as at least 2
+        # models independently agree — a genuine 3-way split (e.g. 1-1-1 on a
+        # 3-model panel) still has no usable signal and is dropped.
         top_label, top_count = max(verdict.label_counts.items(), key=lambda kv: kv[1])
         if top_count >= 2:
             label, status = top_label, "disputed"
@@ -404,14 +362,7 @@ async def label_sentence(
 
 
 async def create_session(api_url: str) -> str:
-    """Create a new chat session.
-
-    Args:
-        api_url: Base URL of the running application.
-
-    Returns:
-        Session ID string.
-    """
+    """Create a new chat session and return its ID."""
     async with httpx.AsyncClient(base_url=api_url, timeout=30.0) as client:
         response = await client.post("/api/chat/sessions")
         response.raise_for_status()
@@ -419,15 +370,7 @@ async def create_session(api_url: str) -> str:
 
 
 def load_subset_a(path: str, count: int) -> List[Dict[str, str]]:
-    """Load questions from Subset A CSV.
-
-    Args:
-        path: Path to Subset A CSV.
-        count: Maximum number of questions to load.
-
-    Returns:
-        List of question dicts.
-    """
+    """Load a stratified sample of questions from the Subset A CSV."""
     input_path = Path(path)
     if not input_path.exists():
         logger.error("datagen.subset_d.subset_a_not_found", path=path)
@@ -461,9 +404,10 @@ def load_subset_a(path: str, count: int) -> List[Dict[str, str]]:
     return sampled
 
 
-# Full CSV schema for the rebuilt Subset D: the original Tabel 3.6 columns plus
-# the slice metadata the hard rebuild adds (see _shared/dataset.SubsetDRow). The
-# blind-injection sidecar keeps only the base columns.
+# Full CSV schema for the rebuilt Subset D: the base sentence-label columns
+# plus the slice metadata the hard rebuild adds (see
+# _shared/dataset.SubsetDRow). The blind-injection sidecar keeps only the base
+# columns.
 BASE_FIELDS = [
     "question_id", "question", "full_response", "sentence_id",
     "sentence_text", "retrieved_context", "label", "verifier_note",
@@ -476,19 +420,15 @@ FIELDNAMES = BASE_FIELDS + SLICE_FIELDS
 
 
 def core_resume_state(loaded_core: List[Dict[str, Any]]) -> Tuple[Dict[str, int], set, int]:
-    """Reconstruct phase-2 resume bookkeeping from checkpointed core rows (C29).
+    """Reconstruct phase-2 resume bookkeeping from checkpointed core rows.
 
     Everything phase 2 needs to continue is derivable from the rows already on
-    disk, so an interrupted build resumes without re-paying for verified edits:
+    disk, so an interrupted build resumes without re-paying for verified edits.
 
-    Args:
-        loaded_core: Rows read back from ``<output>.core.part.csv``.
-
-    Returns:
-        ``(kept_by_family, done_parent_family_pairs, max_counter)`` — the
-        per-family kept counts to seed the quota check, the ``(parent_ref,
-        family)`` pairs to skip re-perturbing, and the highest ``qp-…-NNNN``
-        index seen so new ids don't collide.
+    Returns ``(kept_by_family, done_parent_family_pairs, max_counter)`` — the
+    per-family kept counts to seed the quota check, the ``(parent_ref,
+    family)`` pairs to skip re-perturbing, and the highest ``qp-…-NNNN``
+    index seen so new ids don't collide.
     """
     kept = dict(Counter(r["perturbation_family"] for r in loaded_core if r.get("perturbation_family")))
     done_pairs = {(r.get("perturbation_of", ""), r.get("perturbation_family", "")) for r in loaded_core}
@@ -502,15 +442,7 @@ def core_resume_state(loaded_core: List[Dict[str, Any]]) -> Tuple[Dict[str, int]
 
 
 def _tag(row: Dict[str, Any], **overrides: str) -> Dict[str, Any]:
-    """Return a copy of ``row`` with every slice column present (defaulting empty).
-
-    Args:
-        row: A base label_sentence row.
-        **overrides: Slice-column values to set.
-
-    Returns:
-        A dict carrying all FIELDNAMES keys.
-    """
+    """Return a copy of ``row`` with every slice column present (defaulting empty)."""
     out = dict(row)
     for key in SLICE_FIELDS:
         out.setdefault(key, "")
@@ -533,17 +465,7 @@ async def assemble_questions(
     reweighted Subset A + precise-detail + cross-document + evaluative questions
     generated from real KB text, plus a few Subset C boundary queries.
 
-    Args:
-        generator: DeepSeek generator for the KB-grounded question families.
-        api_url: Base URL of the running application.
-        subset_a_path: Path to Subset A CSV.
-        subset_c_path: Path to Subset C CSV (boundary queries), or None.
-        counts: Per-source question counts (reweighted/detail/crossdoc/
-            evaluative/boundary).
-        seed: RNG seed for the samplers.
-
-    Returns:
-        List of (question, source) pairs.
+    Returns a list of (question, source) pairs.
     """
     from app.thesis._eval._dataset_gen.build_subset_a import fetch_kb_documents
     from app.thesis._eval._dataset_gen.build_subset_d_hard import (
@@ -592,17 +514,9 @@ async def phase1_natural(
     This is the unchanged natural methodology (no fabrication) — it supplies the
     realistic base-rate slice and the ``supported`` parents phase 2 perturbs.
 
-    Args:
-        panel: The evaluator panel.
-        api_url: Base URL of the running application.
-        questions_by_source: (question, source) pairs from ``assemble_questions``.
-        blind_tracker: Concordance sidecar tracker.
-        status_counts: Mutable per-status counter, updated in place.
-
-    Returns:
-        Tuple of (natural_rows, chunks_by_question_id). Rows carry
-        ``construction=natural`` and ``split=natural``; the chunk map lets phase 2
-        re-narrow grounding for a chosen parent sentence.
+    Returns (natural_rows, chunks_by_question_id). Rows carry
+    ``construction=natural`` and ``split=natural``; the chunk map lets phase 2
+    re-narrow grounding for a chosen parent sentence.
     """
     natural_rows: List[Dict[str, Any]] = []
     chunks_by_qid: Dict[str, List[Dict[str, Any]]] = {}
@@ -614,7 +528,7 @@ async def phase1_natural(
         question_id = f"q-{source}-{source_counters[source]:03d}"
         if question_id in done_qids:
             # Already panel-labeled and checkpointed by an earlier run; the
-            # counter still advanced above so IDs stay aligned (--resume, C29).
+            # counter still advanced above so IDs stay aligned (--resume).
             continue
         logger.info("datagen.subset_d.processing", question_id=question_id, source=source, question=question[:60])
         try:
@@ -660,12 +574,6 @@ def _family_quotas(core_floor: int) -> Dict[str, int]:
     ``contradiction`` is split across its three families; ``neutral`` comes wholly
     from ``evaluative_graft``; ``far_paraphrase`` supplies hard ``entailment``
     positives with the remainder filled from natural ``supported`` rows.
-
-    Args:
-        core_floor: The per-NLI-class floor for the balanced core.
-
-    Returns:
-        Mapping of family name to kept-row target.
     """
     per_contra = -(-core_floor // 3)  # ceil division across the 3 not_supported families
     return {
@@ -708,7 +616,7 @@ async def phase2_perturb(
         Tuple of (core_rows, kept_per_family, gate_stats).
     """
     quotas = _family_quotas(core_floor)
-    kept: Counter = Counter(resume_kept or {})  # seed from checkpointed core rows (--resume, C29)
+    kept: Counter = Counter(resume_kept or {})  # seed from checkpointed core rows (--resume)
     done_pairs = done_pairs or set()
     gate_stats = {"generated": 0, "gen_failed": 0, "verified": 0, "rejected": 0}
     parents = [
@@ -763,7 +671,7 @@ async def phase2_perturb(
             )
             core_rows.append(tagged)
             if writer is not None:
-                writer.append(tagged)  # flush per verified edit (--resume, C29)
+                writer.append(tagged)  # flush per verified edit (--resume)
             logger.info("datagen.subset_d.perturb_kept", family=family.name, kept=kept[family.name], target=quotas[family.name])
 
     return core_rows, dict(kept), gate_stats
@@ -782,14 +690,7 @@ def promote_supported_to_core(
     natural row's ``split`` to ``core`` in place; the far_paraphrase positives
     already in ``core_rows`` count toward the target first.
 
-    Args:
-        natural_rows: Phase-1 rows (mutated in place).
-        core_rows: Phase-2 perturbed rows.
-        core_floor: Per-class floor.
-        seed: RNG seed for which naturals are promoted.
-
-    Returns:
-        Number of natural rows promoted into the core.
+    Returns the number of natural rows promoted into the core.
     """
     counts = nli_class_counts(core_rows)
     target = max(core_floor, counts.get("contradiction", 0), counts.get("neutral", 0))
@@ -811,10 +712,6 @@ async def phase3_band(nli_client: EvalNLIClient, rows: List[Dict[str, Any]]) -> 
     A reported slice only, never an inclusion gate — so the dataset's composition
     stays independent of any one model's blind spots. ``no_source_needed`` rows
     (excluded from Exp3 scoring) get an empty band.
-
-    Args:
-        nli_client: The production NLI client (Infinity).
-        rows: All rows (mutated in place).
     """
     for row in rows:
         truth_nli = LABEL_TO_NLI.get(row["label"])
@@ -846,22 +743,9 @@ async def build_subset_d(
 ) -> None:
     """Build the single, hardened Subset D and save to CSV.
 
-    Four phases (see the module docstring and writing/changes.md): a natural
-    backbone, a panel-verified counterfactual-perturbation core, adversarial
-    difficulty banding, then shortcut/balance assertions before writing one file.
-
-    Args:
-        settings: Dataset generation settings.
-        api_url: Base URL of the running application.
-        subset_a_path: Path to Subset A CSV (question source).
-        subset_c_path: Path to Subset C CSV (boundary queries), or None.
-        output_path: Output CSV path.
-        question_counts: Per-source phase-1 question counts.
-        core_floor: Per-class floor driving perturbation quotas + entailment balance.
-        class_floor: Floor the balance assertion enforces on the core slice.
-        infinity_url: Infinity base URL (NLI banding).
-        nli_model: NLI model identifier for banding.
-        seed: RNG seed for reproducibility.
+    Four phases: a natural backbone, a panel-verified
+    counterfactual-perturbation core, adversarial difficulty banding, then
+    shortcut/balance assertions before writing one file.
     """
     if not settings.openrouter_api_key:
         logger.error("datagen.subset_d.missing_api_key")
@@ -874,7 +758,7 @@ async def build_subset_d(
 
     # Fail-safe checkpoints: the panel spend (5 models × ~hundreds of sentences)
     # is written per-row as it is accepted, so an abort/crash/restart never
-    # re-pays for it — --resume skips whatever is already on disk (C29).
+    # re-pays for it — --resume skips whatever is already on disk.
     natural_part = output_path.replace(".csv", ".natural.part.csv")
     core_part = output_path.replace(".csv", ".core.part.csv")
     loaded_natural = resume_rows(natural_part, FIELDNAMES) if resume else []
@@ -926,7 +810,7 @@ async def build_subset_d(
     # target the balanced ``core`` slice: that is where the counterfactual edits are
     # minimal (so negatives share the positives' overlap band) and where macro-F1 is
     # meaningful. The ``natural`` backbone is by design the realistic, supported-heavy
-    # base-rate slice (§3.1.6.5) and would trip a surface-feature check for that very
+    # base-rate slice and would trip a surface-feature check for that very
     # reason, so its cross-tab is reported for transparency but not asserted on.
     core_slice = [r for r in all_rows if r.get("split") == "core"]
     shortcut = assert_no_shortcut_features(core_slice)
@@ -955,9 +839,10 @@ async def build_subset_d(
             "source_subset_c": subset_c_path,
             "questions_processed": len(questions_by_source),
             "processing_status_counts": dict(status_counts),
-            # The headline sanity check: the 2026-07-19 build was 96.3%
-            # `supported` with zero `partially_supported`. This must now show all
-            # three NLI classes populated on the core.
+            # The headline sanity check: this must show all three NLI classes
+            # populated on the core (a supported-heavy build with zero
+            # partially_supported is the defect the perturbation core exists to
+            # fix).
             "label_distribution": label_distribution(all_rows),
             "by_construction": dict(Counter(r.get("construction", "") for r in all_rows)),
             "by_split": dict(Counter(r.get("split", "") for r in all_rows)),

@@ -1,8 +1,7 @@
-"""
-Relevance / out-of-domain (OOD) checking service for the IVM.
+"""Relevance / out-of-domain (OOD) checking service for the IVM.
 
-Delegates the actual relevance decision to an injected IRelevanceChecker
-(see app/thesis/ivm/checkers.py), wired at app/chat/dependency.py.
+Delegates the relevance decision to an injected ``IRelevanceChecker`` (see
+``app/thesis/ivm/checkers.py``), wired in ``app/chat/dependency.py``.
 """
 from typing import List, Optional
 
@@ -24,22 +23,17 @@ class IrrelevantQueryException(RelevanceException):
 
 
 class RelevanceService:
-    """Validates that queries and documents are in-domain for the knowledge base.
+    """Validates that queries are in-domain for the knowledge base.
 
-    Depends only on the ``IRelevanceChecker`` Protocol, so it stays part of
-    the infra-free ``thesis`` research core (see ``docs/02-arsitektur.md``
-    §2.2). Wired in ``app/chat/dependency.py::get_relevance_service``.
-
-    Args:
-        relevance_checker (IRelevanceChecker): The active OOD-check backend.
+    Depends only on the ``IRelevanceChecker`` Protocol, keeping it in the
+    infra-free ``thesis`` core. Wired in
+    ``app/chat/dependency.py::get_relevance_service``.
     """
 
     def __init__(self, relevance_checker: IRelevanceChecker):
-        """Args:
-            relevance_checker: The active OOD-check backend (one of the
-                ``IRelevanceChecker`` implementations in
-                ``app/thesis/ivm/checkers.py``, selected by
-                ``app/chat/dependency.py::get_relevance_checker``).
+        """``relevance_checker`` is the active OOD-check backend (one of the
+        ``IRelevanceChecker`` implementations selected by
+        ``app/chat/dependency.py::get_relevance_checker``).
         """
         self.relevance_checker = relevance_checker
 
@@ -49,18 +43,13 @@ class RelevanceService:
         context_chunks: List[str],
         context_scores: Optional[List[float]] = None,
     ) -> None:
-        """Validates that the query is relevant to the retrieved contexts.
+        """Validate that the query is relevant to the retrieved contexts.
 
-        Args:
-            query (str): The query string.
-            context_chunks (List[str]): Text chunks retrieved from the knowledge base.
-            context_scores (Optional[List[float]]): Similarity scores for
-                ``context_chunks`` (same order), already computed by
-                retrieval. Passed through so RAG-only checkers can skip a
-                redundant embedding/search call.
+        ``context_scores`` (same order as ``context_chunks``) are passed through
+        so score-only checkers can skip a redundant embedding/search call.
 
         Raises:
-            IrrelevantQueryException: If the query is deemed irrelevant or the service fails.
+            IrrelevantQueryException: The query is irrelevant or the check fails.
         """
         if not query.strip() or not context_chunks:
             raise IrrelevantQueryException("Query or contexts are empty.")

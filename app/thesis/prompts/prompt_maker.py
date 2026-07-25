@@ -1,22 +1,18 @@
-"""
-Prompt Maker — centralized prompt construction for the Chat module.
+"""Prompt Maker — centralized prompt construction for the Chat module.
 
-Builds the Indonesian-language system prompt and the RAG context/question
-user turn, and wraps the raw user message in a cryptographically random,
-per-request delimiter as an additional structural defense against
-system-prompt injection (on top of the classifier-based guard in
-``app/thesis/ivm/service.py``).
+Builds the Indonesian system prompt and the RAG context/question user turn,
+and wraps the raw user message in a random per-request delimiter as a
+structural defense against system-prompt injection (on top of the
+classifier-based guard in ``app/thesis/ivm/service.py``).
 
 Usage:
-    from app.thesis.prompts import build_prompt
-
     bundle = build_prompt(user_message, contexts, base_system_prompt)
     messages = [{"role": "system", "content": bundle.system_prompt}, ...]
     messages.append({"role": "user", "content": bundle.user_turn})
 
-Pure Python (stdlib ``secrets`` + the ``RetrievedContext`` data type from
-``thesis/ram/interfaces.py``) — no infra imports, per the ``thesis/``
-purity rule (see ``docs/02-arsitektur.md`` §2.2).
+Pure Python (stdlib ``secrets`` + ``RetrievedContext`` from
+``thesis/ram/interfaces.py``) — no infra imports, per the ``thesis/`` purity
+rule.
 """
 import secrets
 from dataclasses import dataclass
@@ -44,12 +40,9 @@ DEFAULT_SYSTEM_PROMPT_ID = (
 
 
 def make_user_delimiter() -> str:
-    """Generate a fresh, cryptographically random per-request nonce.
-
-    Returns:
-        A random hex string. Unpredictable to an attacker, so a malicious
-        user message cannot forge a matching closing delimiter to escape
-        the boundary tags built around it.
+    """Generate a fresh, cryptographically random per-request nonce (a random
+    hex string). Unpredictable to an attacker, so a malicious message can't
+    forge a matching closing delimiter to escape the boundary tags.
     """
     return secrets.token_hex(16)
 
@@ -57,20 +50,12 @@ def make_user_delimiter() -> str:
 def build_context_block(contexts: List[RetrievedContext]) -> str:
     """Format retrieved contexts into per-source header + content blocks.
 
-    Each retrieved chunk becomes a single self-contained block: a header
-    naming the source, page, and section (when available), immediately
-    followed by that chunk's own text — rather than a bare "[N]" index,
-    so the page/section context travels with the content it describes.
-    The "Sumber N" wording (instead of a bare "[N]") also avoids handing
-    the model a bracket-number pattern it could mimic as its own citation
-    style (see ``DEFAULT_SYSTEM_PROMPT_ID``, which explicitly asks it not
-    to).
-
-    Args:
-        contexts: Retrieved context blocks with breadcrumbs.
-
-    Returns:
-        The formatted context block, or "" if contexts is empty.
+    Each chunk becomes a self-contained block: a header naming the source,
+    page, and section (when available) followed by that chunk's text — rather
+    than a bare "[N]" index, so the page/section travels with its content. The
+    "Sumber N" wording also avoids handing the model a bracket-number pattern
+    it could mimic as its own citation style. Returns "" if ``contexts`` is
+    empty.
     """
     if not contexts:
         return ""
@@ -90,17 +75,8 @@ def build_user_turn(user_message: str, context_block: str, nonce: str) -> str:
     """Build the final 'user' role content: context + delimited question.
 
     The user message is always wrapped in ``<user_input_{nonce}>`` /
-    ``</user_input_{nonce}>`` tags, regardless of whether context is
-    present — the delimiter is an injection defense independent of
-    retrieval.
-
-    Args:
-        user_message: The user's raw question.
-        context_block: Output of ``build_context_block`` (may be "").
-        nonce: Output of ``make_user_delimiter``.
-
-    Returns:
-        The formatted user turn content.
+    ``</user_input_{nonce}>`` tags, with or without context — the delimiter is
+    an injection defense independent of retrieval.
     """
     tag_open = f"<user_input_{nonce}>"
     tag_close = f"</user_input_{nonce}>"
@@ -113,15 +89,9 @@ def build_user_turn(user_message: str, context_block: str, nonce: str) -> str:
 
 
 def build_system_prompt(base_system_prompt: str, nonce: str) -> str:
-    """Append delimiter-aware injection-defense instructions to the base prompt.
-
-    Args:
-        base_system_prompt: The operator-configured persona/behavior prompt.
-        nonce: Output of ``make_user_delimiter`` — must match the nonce used
-            in ``build_user_turn`` for the same request.
-
-    Returns:
-        The base prompt plus a paragraph naming the literal delimiter tags.
+    """Append delimiter-aware injection-defense instructions to the base
+    prompt, naming the literal delimiter tags. ``nonce`` must match the one
+    used in ``build_user_turn`` for the same request.
     """
     tag_open = f"<user_input_{nonce}>"
     tag_close = f"</user_input_{nonce}>"
@@ -151,24 +121,14 @@ def build_prompt(
     use_nonce: bool = True,
 ) -> PromptBundle:
     """One-shot composer: generates the nonce, context block, user turn, and
-    system prompt together so they can never drift out of sync (e.g. a
-    mismatched delimiter tag name between the two messages).
+    system prompt together so they can't drift out of sync (e.g. a mismatched
+    delimiter tag between the two messages).
 
-    Args:
-        user_message: The user's raw question.
-        contexts: Retrieved context blocks with breadcrumbs.
-        base_system_prompt: The operator-configured persona/behavior prompt.
-        use_nonce: When False, omit the delimiter tags and the paragraph of
-            defense instructions that names them, so the user message is
-            passed through unwrapped. This exists to ablate the structural
-            injection defense on its own — it is a separate layer from the
-            classifier-based guard in ``app/thesis/ivm/service.py``, and
-            measuring what it contributes requires being able to turn it off.
-            Production callers leave this True.
-
-    Returns:
-        A ``PromptBundle`` with the final system prompt, user turn, and nonce
-        (empty string when ``use_nonce`` is False).
+    ``use_nonce=False`` omits the delimiter tags and the defense paragraph,
+    passing the user message through unwrapped — to ablate this structural
+    defense (a separate layer from the IVM classifier) on its own. Production
+    callers leave it True. Returns a ``PromptBundle`` (nonce is "" when
+    ``use_nonce`` is False).
     """
     context_block = build_context_block(contexts)
     if not use_nonce:

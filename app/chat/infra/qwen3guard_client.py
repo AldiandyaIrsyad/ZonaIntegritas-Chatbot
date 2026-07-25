@@ -1,44 +1,25 @@
 """Hosted generative safety-guard infrastructure adapter.
 
-Infra adapter for the IVM (Input Validation Module) research core. Calls
-Qwen3Guard-Gen over an OpenAI-compatible chat-completions API and reduces its
-generated verdict to the binary decision the IVM needs.
+Calls Qwen3Guard-Gen over an OpenAI-compatible chat-completions API and reduces
+its generated verdict to the binary decision the IVM needs. Fulfills
+``app/thesis/ivm/interfaces.py::ISafetyModel``; wired in
+``app/chat/dependency.py::get_safety_model``.
 
-Fulfills: ``app/thesis/ivm/interfaces.py::ISafetyModel``.
-Wired in: ``app/chat/dependency.py::get_safety_model``.
+Unlike ``PromptGuardClient`` (which flags only explicit instruction-override
+attempts and was never evaluated on Indonesian), Qwen3Guard was trained on
+native Indonesian and classifies against a content policy with a ``Jailbreak``
+category — closer to this system's "input berbahaya" scope. It's too large to
+deploy on the target GPU, so this adapter calls a hosted endpoint and is meant
+for evaluation rather than the per-turn chat path.
 
-Why this exists alongside ``PromptGuardClient``
------------------------------------------------
-The local classifier and this model answer *different questions*, and the
-difference is the point of comparing them.
-
-``Llama-Prompt-Guard-2`` flags a prompt only when it explicitly attempts to
-override prior instructions, regardless of whether the prompt is harmful, and
-Indonesian is not among the eight languages its authors evaluated. Qwen3Guard
-was trained on natively-collected Indonesian and classifies against a content
-policy that includes a ``Jailbreak`` category — so its scope is much closer to
-this system's actual policy, which RQ2 frames as "input berbahaya" rather than
-prompt injection narrowly.
-
-Why it is not the default
--------------------------
-It cannot be deployed here. On the target machine — an 8 GB laptop GPU already
-holding the reranker, the NLI model and the in-process embedder — the smallest
-Qwen3Guard is 751M parameters against Prompt Guard 2's 86M, and the 4B and 8B
-variants exceed the whole card in half precision. This adapter therefore calls a
-hosted endpoint, and is intended for evaluation rather than for the per-turn
-chat path.
-
-Output contract
----------------
-Qwen3Guard-Gen generates text of the form::
+Qwen3Guard-Gen emits a fixed two-line verdict::
 
     Safety: Unsafe
     Categories: Jailbreak
 
-Three tiers, not two. ``Controversial`` is mapped by configuration rather than
-by a constant here, because that mapping is a methodological choice that has to
-be fixed before an experiment runs.
+There are three tiers; ``Controversial`` is mapped to safe/unsafe by
+configuration (a methodological choice fixed before an experiment runs), not by
+a constant here.
 """
 
 from __future__ import annotations
@@ -53,17 +34,14 @@ from app.thesis.ivm.interfaces import ISafetyModel, SafetyResult
 
 logger = structlog.get_logger(__name__)
 
-# The generated verdict is a fixed two-line form; parsing it with a regex is
-# appropriate here precisely because the model was trained to emit exactly this.
+# The verdict is a fixed two-line form the model was trained to emit, so a
+# regex parse is appropriate here.
 SAFETY_PATTERN = re.compile(r"Safety:\s*(Safe|Unsafe|Controversial)", re.IGNORECASE)
 CATEGORY_PATTERN = re.compile(r"Categories?:\s*(.+)", re.IGNORECASE)
 
 
 class Qwen3GuardClient(ISafetyModel):
-    """Infrastructure adapter for hosted generative safety classification.
-
-    Fulfills: ``app/thesis/ivm/interfaces.py::ISafetyModel``.
-    """
+    """Hosted generative safety classification."""
 
     def __init__(
         self,
@@ -73,19 +51,10 @@ class Qwen3GuardClient(ISafetyModel):
         controversial_is_unsafe: bool = True,
         timeout: float = 30.0,
     ):
-        """Configure the OpenAI-compatible client used for classification.
-
-        Args:
-            base_url: API base URL, e.g. ``https://router.huggingface.co/v1``.
-            api_key: Bearer token for the endpoint.
-            model: Model identifier, e.g.
-                ``Qwen/Qwen3Guard-Gen-0.6B:featherless-ai``.
-            controversial_is_unsafe: Whether the ``Controversial`` tier counts
-                as unsafe. True matches the fail-closed posture of the rest of
-                the IVM.
-            timeout: Request timeout in seconds. Higher than the local
-                classifier's because this is a network call to a generative
-                model rather than a single forward pass.
+        """Configure the OpenAI-compatible client. ``controversial_is_unsafe``
+        sets whether the ``Controversial`` tier counts as unsafe (True matches
+        the IVM's fail-closed posture). ``timeout`` is higher than the local
+        classifier's since this is a network call to a generative model.
         """
         self.model = model
         self.controversial_is_unsafe = controversial_is_unsafe
@@ -103,13 +72,8 @@ class Qwen3GuardClient(ISafetyModel):
 
     @staticmethod
     def parse_verdict(content: str) -> tuple[Optional[str], List[str]]:
-        """Extract the safety tier and categories from the generated verdict.
-
-        Args:
-            content: Raw model output.
-
-        Returns:
-            A tuple of (tier or None when unparseable, category names).
+        """Extract the safety tier (None if unparseable) and category names
+        from the generated verdict.
         """
         tier_match = SAFETY_PATTERN.search(content or "")
         tier = tier_match.group(1).capitalize() if tier_match else None
@@ -129,12 +93,10 @@ class Qwen3GuardClient(ISafetyModel):
         hosted Qwen3Guard-Gen model for a safety verdict and reducing its three
         tiers to a binary decision.
 
-        Fails closed: a request error, an empty response, or a verdict that
-        cannot be parsed returns ``is_safe=False`` rather than letting unchecked
-        input through. An unparseable verdict is treated as unsafe rather than
-        safe because this adapter sits on the same gate as the local
-        classifier, where the cost of a wrong "safe" is unbounded and the cost
-        of a wrong "unsafe" is one rejected turn.
+        Fails closed: a request error, empty response, or unparseable verdict
+        returns ``is_safe=False`` rather than letting unchecked input through.
+        An unparseable verdict counts as unsafe because on this gate a wrong
+        "safe" is unbounded-cost while a wrong "unsafe" is one rejected turn.
         """
         try:
             response = await self._client.post(

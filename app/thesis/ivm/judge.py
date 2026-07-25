@@ -1,14 +1,10 @@
-"""
-LLM-based Judge implementation for relevance checking.
+"""LLM-based judge implementation for relevance checking.
 
-Fulfills: ``app/thesis/ivm/interfaces.py::IJudge``.
-Wired in: ``app/chat/dependency.py::get_relevance_checker`` (constructs the
-``LLMJudge`` and wraps it in ``app/thesis/ivm/checkers.py::LLMJudgeRelevanceChecker``
-when ``ChatConfig.ood_method == "llm_judge"``).
-
-Depends only on the narrow ``ILLMJudgeConnection`` Protocol, not any
-concrete HTTP client, so this stays part of the infra-free ``thesis``
-research core (see ``docs/02-arsitektur.md`` §2.2).
+Fulfills ``app/thesis/ivm/interfaces.py::IJudge``; wired in
+``app/chat/dependency.py::get_relevance_checker`` (constructs the ``LLMJudge``
+and wraps it in ``LLMJudgeRelevanceChecker`` when
+``ChatConfig.ood_method == "llm_judge"``). Depends only on the narrow
+``ILLMJudgeConnection`` Protocol, keeping it in the infra-free ``thesis`` core.
 """
 from typing import Optional
 
@@ -34,11 +30,7 @@ DEFAULT_RELEVANCE_JUDGE_USER_TEMPLATE = (
 
 
 class LLMJudge(IJudge):
-    """Judge that uses an LLM to evaluate relevance.
-
-    Fulfills: ``app/thesis/ivm/interfaces.py::IJudge``.
-    Wired in: ``app/chat/dependency.py::get_relevance_checker``.
-    """
+    """Judge that uses an LLM to evaluate relevance."""
 
     def __init__(
         self,
@@ -47,13 +39,10 @@ class LLMJudge(IJudge):
         system_prompt: Optional[str] = None,
         user_template: Optional[str] = None,
     ) -> None:
-        """Args:
-            llm_connection: Narrow LLM connection (``ILLMJudgeConnection``,
-                ``stream_chat`` only) used to run the judge prompt.
-            model: Model identifier passed through to ``stream_chat``.
-            system_prompt: Overrides ``DEFAULT_RELEVANCE_JUDGE_PROMPT`` if given.
-            user_template: Overrides ``DEFAULT_RELEVANCE_JUDGE_USER_TEMPLATE``
-                if given. Must contain ``{context}`` and ``{query}`` placeholders.
+        """``llm_connection`` is the narrow ``stream_chat``-only connection used
+        to run the judge prompt. ``system_prompt``/``user_template`` override
+        the defaults; ``user_template`` must contain ``{context}`` and
+        ``{query}`` placeholders.
         """
         self.llm_connection = llm_connection
         self.model = model
@@ -63,21 +52,11 @@ class LLMJudge(IJudge):
     async def evaluate_relevance(self, query: str, context: str) -> bool:
         """Ask the LLM whether ``query`` is on-topic for ``context``.
 
-        Streams the judge's response (see ``max_tokens`` comment below for
-        why 400, not a short cap) and fail-closed-parses the trailing
-        YES/NO verdict.
-
-        Args:
-            query: The user's raw query text.
-            context: Joined KB context chunks to judge relevance against.
-
-        Returns:
-            bool: True only if the model's last word starts with "YES".
-
-        Raises:
-            Exception: Re-raised from the LLM connection on failure — the
-                caller (``LLMJudgeRelevanceChecker``) treats this as
-                irrelevant (fail closed).
+        Streams the judge's response (see the ``max_tokens`` comment for why
+        400, not a short cap) and fail-closed-parses the trailing YES/NO
+        verdict: True only if the last word starts with "YES". Re-raises any
+        LLM connection failure — the caller treats that as irrelevant (fail
+        closed).
         """
         user_content = self.user_template.replace("{context}", context).replace("{query}", query)
         messages = [
@@ -91,22 +70,12 @@ class LLMJudge(IJudge):
             async for chunk in self.llm_connection.stream_chat(
                 model=self.model,
                 messages=messages,
-                # Reasoning models (e.g. Qwen3-32B) don't reliably honor
-                # LLMConnection's reasoning-disable request over streaming:
-                # confirmed live that the actual OpenRouter response cleanly
-                # separates message.content ("NO") from a ~240-token
-                # message.reasoning field in non-streaming mode, but
-                # LLMConnection.stream_chat's fallback (yield the reasoning
-                # delta whenever the content delta is empty, so callers that
-                # just concatenate chunks don't silently lose everything)
-                # means the reasoning preamble arrives as regular chunks
-                # *before* the real answer. 50 tokens was nowhere near
-                # enough to get past ~240 tokens of reasoning to the actual
-                # one-word answer, so the judge always saw only reasoning
-                # text and (correctly, per its own fail-closed logic) never
-                # matched "YES" — silently blocking every query regardless
-                # of true relevance. 400 gives headroom past a typical
-                # reasoning preamble.
+                # Reasoning models (e.g. Qwen3-32B) don't reliably honor the
+                # reasoning-disable request over streaming: stream_chat's
+                # fallback yields the reasoning delta whenever content is empty,
+                # so a ~240-token reasoning preamble arrives as regular chunks
+                # before the one-word answer. 400 tokens gives headroom past a
+                # typical preamble so the judge actually sees the answer.
                 max_tokens=400,
             ):
                 response_chunks.append(chunk)
@@ -114,12 +83,10 @@ class LLMJudge(IJudge):
             response_text = "".join(response_chunks).strip().upper()
             logger.info("llm_judge.result", query=query[:100], response=response_text, chunk_count=len(response_chunks))
 
-            # Fail closed: if we don't get a clear YES, it's irrelevant.
-            # Check the *last* word rather than requiring the response to
-            # start with YES/NO — reasoning models conclude with the answer
-            # after their preamble rather than leading with it (non-reasoning
-            # models just output "YES"/"NO" directly, where first-word and
-            # last-word checks are equivalent, so this doesn't regress them).
+            # Fail closed: no clear YES means irrelevant. Check the *last* word
+            # rather than the first — reasoning models conclude with the answer
+            # after their preamble (non-reasoning models output "YES"/"NO"
+            # directly, where first- and last-word checks are equivalent).
             last_word = response_text.split()[-1].rstrip(".,!?'\"") if response_text.split() else ""
             return last_word.startswith("YES")
         except Exception as e:

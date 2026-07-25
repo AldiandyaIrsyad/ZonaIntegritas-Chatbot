@@ -1,8 +1,6 @@
-"""
-Dependency injection for the KB domain — the composition root that builds
+"""Dependency injection for the KB domain — the composition root that builds
 concrete adapters (``app/kb/infra/``) and wires them into the application
 services behind the domain's Protocol ports (``app/kb/domain/interfaces.py``).
-See ``docs/02-arsitektur.md`` §2.1 for the dependency-rule diagram.
 """
 
 from functools import lru_cache
@@ -27,11 +25,10 @@ async def get_kb_repo(db: AsyncSession = Depends(get_db_session)) -> PostgresKBR
     """Provide ``IKBRepository`` (per-request, bound to the request's DB session)."""
     return PostgresKBRepository(db)
 
-# These four are process-lifetime singletons (not per-request factories):
-# each wraps an httpx.AsyncClient (or, for BGEM3Embeddings, an in-process
-# model) that's expensive to open/load and was previously being recreated
-# on every dependency resolution with nothing ever closing it — a real
-# connection/resource leak. app/main.py's lifespan closes these on shutdown.
+# These four are process-lifetime singletons (not per-request factories): each
+# wraps an httpx.AsyncClient (or, for BGEM3Embeddings, an in-process model)
+# that's expensive to open/load and must not be recreated per request. Closed
+# on shutdown in app/main.py's lifespan.
 
 @lru_cache
 def get_vector_store() -> QdrantStore:

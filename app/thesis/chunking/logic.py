@@ -1,21 +1,18 @@
-"""
-Parent-child chunking strategy for Small-to-Big retrieval.
+"""Parent-child chunking strategy for Small-to-Big retrieval.
 
-Takes structured elements from the unstructured parser and organizes them
-into a two-level hierarchy:
-- Parent chunks: logical sections of the document (for LLM context)
-- Child chunks: sentence-level splits of each parent (for retrieval precision)
+Organizes structured elements from the parser into a two-level hierarchy:
+parent chunks (logical sections, for LLM context) and child chunks
+(sentence-level splits, for retrieval precision).
 
 Content-type aware:
-- Text: uses RecursiveCharacterTextSplitter at sentence boundaries.
-- Tables (HTML): stored whole — no character splitting to preserve HTML structure.
-- Tables (Markdown): split by row groups, repeating the header in each child
-  chunk so every child is independently embeddable.
+- Text: RecursiveCharacterTextSplitter at sentence boundaries.
+- Tables (HTML): stored whole — no character splitting, to preserve structure.
+- Tables (Markdown): split by row groups, repeating the header in each child so
+  every child is independently embeddable.
 - Figures: VLM descriptions split at sentence boundaries if long.
 
-Depends only on stdlib ``re``/``uuid`` and the ``langchain_text_splitters``
-library (a pure text-splitting utility, not an infra client) — no HTTP/DB
-imports, per the ``thesis/`` purity rule (see ``docs/02-arsitektur.md`` §2.2).
+Depends only on stdlib ``re``/``uuid`` and ``langchain_text_splitters`` (a pure
+text-splitting utility) — no HTTP/DB imports, per the ``thesis/`` purity rule.
 """
 import re
 import uuid
@@ -45,28 +42,18 @@ DEFAULT_CHILD_OVERLAP_CHARS = 50
 # gibberish (no meaningful context) and dropped before embedding/upsert.
 MIN_CHILD_TEXT_LENGTH = 8
 
-# Matches Indonesian legal "ayat" markers like "(1)", "(2)". The unstructured
-# hi_res layout model occasionally misclassifies these short, numbered lines
-# as "Title" elements; without this guard that would be treated as a section
-# boundary, resetting the heading stack (see infer_heading_depth — it has no
-# pattern for a leading "(", only unparenthesized "1)") and splitting ayat
-# clauses of the same Pasal into unrelated parent chunks.
+# Matches Indonesian legal "ayat" markers like "(1)", "(2)". The hi_res layout
+# model occasionally misclassifies these short numbered lines as "Title";
+# without this guard they'd be treated as a section boundary, resetting the
+# heading stack (infer_heading_depth has no pattern for a leading "(") and
+# splitting ayat clauses of one Pasal into unrelated parent chunks.
 _AYAT_MARKER_RE = re.compile(r"^\(\d+\)\s")
 
 
 def infer_heading_depth(text: str, metadata: Dict[str, Any]) -> int:
-    """Infer the hierarchical depth of a heading element.
-
-    First checks ``metadata["category_depth"]`` from the parser. If not
-    available, falls back to heuristic pattern matching for Indonesian
-    legal documents.
-
-    Args:
-        text: The heading text.
-        metadata: Parser metadata dict.
-
-    Returns:
-        Integer depth (0 = root, higher = deeper).
+    """Infer the hierarchical depth of a heading element (0 = root, higher =
+    deeper). Uses ``metadata["category_depth"]`` when present, else heuristic
+    pattern matching for Indonesian legal documents.
     """
     # Try parser-provided depth first
     category_depth = metadata.get("category_depth")
@@ -105,17 +92,9 @@ def infer_heading_depth(text: str, metadata: Dict[str, Any]) -> int:
 
 
 def _slug(text: str) -> str:
-    """Convert heading text to a slug suitable for ltree paths.
-
-    Lowercase, replaces spaces/punctuation with underscores, truncates
-    to 50 chars, and prefixes with ``h_`` if the result starts with a
-    digit (ltree labels cannot start with digits).
-
-    Args:
-        text: The heading text.
-
-    Returns:
-        Slug string (e.g., "bab_i", "pasal_5", "a_syarat").
+    """Convert heading text to an ltree-safe slug: lowercase, spaces/punctuation
+    to underscores, truncated to 50 chars, prefixed with ``h_`` if it starts
+    with a digit (ltree labels can't). E.g. "bab_i", "pasal_5", "a_syarat".
     """
     slug = text.lower().strip()
     slug = re.sub(r"[^a-z0-9]+", "_", slug)
@@ -344,10 +323,9 @@ def create_parent_chunks(
         if current_fallback_page is None:
             current_fallback_page = element.metadata.get("page_number")
 
-        # Prefer the first *body* element's page over a heading's — headings
-        # often sit at the bottom of one PDF page while their body content
-        # starts on the next, which would otherwise mis-attribute the whole
-        # chunk (and its citation) to the wrong page.
+        # Prefer the first *body* element's page over a heading's: headings
+        # often sit at the bottom of one PDF page while their body starts on the
+        # next, which would otherwise mis-attribute the chunk (and citation).
         if not is_boundary and current_page is None:
             current_page = element.metadata.get("page_number")
 
@@ -373,29 +351,13 @@ def split_into_children(
 ) -> List[ChildChunkData]:
     """Split a parent chunk into sentence-level child chunks.
 
-    **Content-type aware dispatcher**. Routes to the appropriate splitting
-    strategy based on ``parent.content_type``:
-
-    - :attr:`ContentType.TEXT` → :func:`_split_text_children`
-      (RecursiveCharacterTextSplitter, respects sentence boundaries)
-    - :attr:`ContentType.TABLE` → :func:`_split_table_children`
-      (Markdown tables: row-group splitting with header repetition;
-       HTML tables: no splitting, preserves structure as single child)
-    - :attr:`ContentType.FIGURE` → :func:`_split_figure_children`
-      (sentence-level split on VLM description)
-    - :attr:`ContentType.HYBRID` → :func:`_split_text_children`
-      (treat as text — the hybrid content is already linearised)
-
-    Injects the parent's breadcrumbs into every child chunk so that vector
+    Content-type aware dispatcher routing on ``parent.content_type``:
+    TEXT/HYBRID → :func:`_split_text_children` (RecursiveCharacterTextSplitter,
+    sentence boundaries); TABLE → :func:`_split_table_children` (Markdown:
+    row-group splitting with header repetition; HTML: single child, no split);
+    FIGURE → :func:`_split_figure_children` (sentence split on the VLM
+    description). Injects the parent's breadcrumbs into every child so vector
     search always has the full hierarchical context.
-
-    Args:
-        parent (ParentChunkData): The parent chunk to split.
-        max_chars (int): Maximum characters per child chunk.
-        overlap_chars (int): Overlap between consecutive child chunks.
-
-    Returns:
-        List[ChildChunkData]: List of ChildChunkData, each referencing its parent.
     """
     if parent.content_type == ContentType.TABLE:
         children = _split_table_children(parent, max_chars)
@@ -405,12 +367,11 @@ def split_into_children(
         # TEXT and HYBRID both use the standard text splitter
         children = _split_text_children(parent, max_chars, overlap_chars)
 
-    # Drop gibberish children — chunks whose *body* text (excluding the
-    # breadcrumb tag, which every child under a heading carries and would
-    # otherwise mask a short/garbage body from this check) is shorter than
-    # the minimum threshold carry no meaningful context for retrieval. This
-    # filters out micro-fragments (e.g. lone punctuation, single letters,
-    # OCR noise) before they reach the embedding model and vector store.
+    # Drop gibberish children: chunks whose *body* text (excluding the
+    # breadcrumb tag every child under a heading carries, which would otherwise
+    # mask a short/garbage body) is below the minimum threshold carry no
+    # meaningful context. Filters micro-fragments (lone punctuation, single
+    # letters, OCR noise) before embedding/upsert.
     original_count = len(children)
     children = [
         child for child in children
@@ -444,20 +405,12 @@ def _build_breadcrumb_tag(breadcrumbs: List[str]) -> str:
     """Build the breadcrumb tag prepended to every child chunk's text.
 
     Deliberately lighter than a bracketed "[Context: ...]" header: parent
-    chunks (what the LLM prompt and frontend actually display, and what
-    RAM's sentence-splitter windows) no longer carry any inline breadcrumb
-    text at all — ``ParentChunkData.breadcrumbs`` already gives every
-    downstream consumer that data structurally. This tag exists only for
-    child chunks, which are embedding-only, so a plain, boilerplate-free
-    rendering (no brackets, no "Context:" label) keeps the discriminative
-    part of the signal (e.g. "Pasal 5") without diluting the embedding
-    with a constant string repeated across nearly every chunk.
-
-    Args:
-        breadcrumbs: Hierarchical section path.
-
-    Returns:
-        Breadcrumb tag string (empty if no breadcrumbs).
+    chunks (what the LLM prompt, frontend, and RAM's splitter use) carry no
+    inline breadcrumb text — ``ParentChunkData.breadcrumbs`` provides that
+    structurally. This tag exists only for embedding-only child chunks, so a
+    plain rendering (no brackets/label) keeps the discriminative signal (e.g.
+    "Pasal 5") without diluting the embedding with a repeated constant string.
+    Returns "" if there are no breadcrumbs.
     """
     if not breadcrumbs:
         return ""
@@ -465,14 +418,8 @@ def _build_breadcrumb_tag(breadcrumbs: List[str]) -> str:
 
 
 def _strip_breadcrumb_tag(text: str, breadcrumbs: List[str]) -> str:
-    """Return a child chunk's body text with its breadcrumb tag removed.
-
-    Args:
-        text: The child text (may start with a breadcrumb tag).
-        breadcrumbs: Breadcrumbs used to build the tag.
-
-    Returns:
-        The body text with the tag stripped, if present.
+    """Return a child chunk's body text with its breadcrumb tag removed (if
+    present).
     """
     tag = _build_breadcrumb_tag(breadcrumbs)
     if tag and text.startswith(tag):
@@ -487,17 +434,9 @@ def _split_text_children(
 ) -> List[ChildChunkData]:
     """Split narrative text into child chunks using RecursiveCharacterTextSplitter.
 
-    Respects sentence and word boundaries. Prepends a breadcrumb tag to
-    every child so vector search always has hierarchical context (parent
-    text itself carries no such tag — see ``_build_breadcrumb_tag``).
-
-    Args:
-        parent: The parent chunk to split.
-        max_chars: Maximum characters per child chunk.
-        overlap_chars: Overlap between consecutive child chunks.
-
-    Returns:
-        List of child chunks.
+    Respects sentence and word boundaries. Prepends a breadcrumb tag to every
+    child so vector search always has hierarchical context (the parent text
+    itself carries no such tag — see ``_build_breadcrumb_tag``).
     """
     breadcrumb_tag = _build_breadcrumb_tag(parent.breadcrumbs)
 
@@ -536,38 +475,20 @@ def _split_table_children(
     parent: ParentChunkData,
     max_chars: int = DEFAULT_CHILD_MAX_CHARS,
 ) -> List[ChildChunkData]:
-    """Create child chunk(s) for a table parent.
+    """Create child chunk(s) for a table parent, dispatching on Markdown vs HTML.
 
-    Dispatches between two strategies depending on whether the table text
-    is Markdown or HTML:
+    **Markdown tables** (``| col | col |``): stored as a single child if they
+    fit ``max_chars``; otherwise split into row-group children, each repeating
+    the header so every child is independently embeddable.
 
-    **Markdown tables** (pipe-delimited ``| col | col |`` format):
-        If the full table fits within ``max_chars``, it is stored as a
-        single child chunk. If it exceeds ``max_chars``, it is split into
-        row-group child chunks — each group repeats the header row so
-        every child is independently embeddable without losing column
-        context. Row-group size is chosen to keep each child ≤ max_chars.
+    **HTML tables** (legacy): stored as a single child without splitting —
+    splitting HTML at row boundaries is fragile (unclosed tags, colspan/
+    rowspan). Large HTML tables are better converted to Markdown upstream (see
+    :mod:`thesis.chunking.table_converter`).
 
-    **HTML tables** (``<table>`` format, legacy):
-        Stored as a single child chunk without splitting. Splitting HTML at
-        row boundaries is fragile (unclosed tags, colspan/rowspan), so the
-        whole table is preserved. Large HTML tables are better converted to
-        Markdown upstream (see :mod:`thesis.chunking.table_converter`).
-
-    If a table summary is available in ``element_metadata`` (generated
-    upstream by a table-summarization step), it is always appended as an
-    additional child — the summary is what gets vector-searched, while the
-    full table (parent) is retrieved for LLM context.
-
-    Args:
-        parent: The table parent chunk.
-        max_chars: Maximum characters per child chunk. Used only for
-            Markdown table row-group splitting.
-
-    Returns:
-        List of child chunks: at least one (the full table or first row
-        group). May include additional row-group children for large
-        Markdown tables, and a final summary child if available.
+    If a table summary is available in ``element_metadata``, it's appended as an
+    extra child — the summary is vector-searched while the full table (parent)
+    is retrieved for LLM context. Returns at least one child.
     """
     breadcrumb_tag = _build_breadcrumb_tag(parent.breadcrumbs)
     children: List[ChildChunkData] = []
@@ -730,22 +651,13 @@ def _split_figure_children(
 ) -> List[ChildChunkData]:
     """Split a VLM figure description into child chunks.
 
-    Figure descriptions are natural-language text (generated by a VLM),
-    so they can be split at sentence boundaries like narrative text.
-    However, if the description is short enough to fit in a single
-    child chunk (common case), no splitting is applied — this preserves
-    the full description as one retrievable unit.
-
-    Args:
-        parent: The figure parent chunk (text = VLM description).
-        max_chars: Maximum characters per child chunk.
-        overlap_chars: Overlap between consecutive child chunks.
-
-    Returns:
-        List of child chunks.
+    Figure descriptions are natural-language text, so they split at sentence
+    boundaries like narrative text. But if the description fits in a single
+    child (the common case), no splitting is applied — preserving the full
+    description as one retrievable unit.
     """
-    # If the description fits in a single child, don't split — preserve
-    # the full VLM description as one retrievable unit
+    # If the description fits in a single child, don't split — preserve the
+    # full VLM description as one retrievable unit.
     if len(parent.text) <= max_chars:
         breadcrumb_tag = _build_breadcrumb_tag(parent.breadcrumbs)
         return [

@@ -1,23 +1,16 @@
 """Controlled counterfactual perturbations for the hard Subset D rebuild.
 
-The natural Subset D pipeline (``build_subset_d.py`` / ``build_subset_d_hard.py``)
-hardens the *question* and hopes the RAG pipeline hallucinates, then panel-labels
-whatever comes out. A well-grounded pipeline answers faithfully or abstains, so
-negatives are vanishingly rare: the committed build was 96.3% ``supported`` with
-**zero** ``partially_supported``. That makes macro-F1 undefined-in-practice and
-lets an "always predict supported" verifier score ~96%.
-
-This module moves the difficulty lever from the question to the **response**. A
-known-good (``supported``) sentence plus its grounding is edited *minimally* into a
+Moves the difficulty lever from the question to the **response**: a known-good
+(``supported``) sentence plus its grounding is edited *minimally* into a
 counterfactual whose label is known **by construction** — then the same 5-model
 panel *verifies* the label before it is kept (``build_subset_d`` phase 2). The
-negatives it produces are subtle: a single flipped number keeps almost all of the
-sentence's lexical overlap with the context, which is exactly the case a lexical
-or weak-NLI verifier gets wrong.
+negatives are subtle: a single flipped number keeps almost all of the sentence's
+lexical overlap with the context, which is exactly the case a lexical or
+weak-NLI verifier gets wrong.
 
 Nothing here calls the network except ``generate_perturbation`` (one generator
-call) — the banding and assertion helpers are pure so they run in the builder and
-in tests without a stack.
+call) — the banding and assertion helpers are pure so they run in the builder
+and in tests without a stack.
 
 Design notes:
     - Every family carries the NLI-mapped ``intended_label`` (Exp3's LABEL_MAP),
@@ -45,8 +38,8 @@ PARTIALLY_SUPPORTED = "partially_supported"
 NOT_SUPPORTED = "not_supported"
 NO_SOURCE_NEEDED = "no_source_needed"
 
-# 4-label -> 3-class NLI, kept identical to exp3_ram/run.py's LABEL_MAP so the
-# balance floor and the banding are expressed in the classes Exp3 scores.
+# 4-label -> 3-class NLI, identical to exp3_ram/run.py's LABEL_MAP so the
+# balance floor and banding are expressed in the classes Exp3 scores.
 LABEL_TO_NLI: Dict[str, str] = {
     SUPPORTED: "entailment",
     NOT_SUPPORTED: "contradiction",
@@ -59,12 +52,8 @@ LABEL_TO_NLI: Dict[str, str] = {
 class PerturbationFamily:
     """One counterfactual edit strategy.
 
-    Attributes:
-        name: Stable slug recorded in the ``perturbation_family`` column.
-        intended_label: The 4-label ground truth the edit is designed to produce
-            (verified by the panel before the row is kept).
-        system_prompt: Generator system prompt. Must instruct a *minimal* edit and
-            a JSON reply with ``perturbed`` and ``edit_note`` fields.
+    ``system_prompt`` must instruct a *minimal* edit and a JSON reply with
+    ``perturbed`` and ``edit_note`` fields.
     """
 
     name: str
@@ -72,8 +61,8 @@ class PerturbationFamily:
     system_prompt: str
 
 
-# The response is always a single JSON object so the generator's output parses the
-# same way for every family; the builder reads .perturbed / .edit_note.
+# The response is always a single JSON object so the generator's output parses
+# the same way for every family; the builder reads .perturbed / .edit_note.
 _JSON_TAIL = (
     ' Output a single JSON object with exactly two fields: "perturbed" (the edited '
     'sentence, in Indonesian) and "edit_note" (a short English description of the '
@@ -151,15 +140,7 @@ FAMILY_BY_NAME: Dict[str, PerturbationFamily] = {f.name: f for f in FAMILIES}
 
 
 def build_perturbation_prompt(sentence: str, grounding: str) -> str:
-    """Assemble the user-message body for a perturbation call.
-
-    Args:
-        sentence: The parent (supported) sentence to edit.
-        grounding: The context chunk(s) that support the parent sentence.
-
-    Returns:
-        The user prompt string.
-    """
+    """Assemble the user-message body for a perturbation call."""
     return (
         f"Context:\n{grounding}\n\n"
         f"Supported sentence:\n{sentence}\n\n"
@@ -175,20 +156,9 @@ async def generate_perturbation(
 ) -> Optional[Tuple[str, str]]:
     """Generate one counterfactual edit of ``sentence`` for ``family``.
 
-    Uses ``DatasetGenerator.generate_single`` (one text reply) and parses the JSON
-    object out of it. Returns None when the generator errors, returns unparseable
-    output, or returns an edit identical to the input (a no-op edit carries no
-    label signal and must not be kept).
-
-    Args:
-        generator: A ``DatasetGenerator`` (or anything with an async
-            ``generate_single(prompt, system_prompt)`` returning text).
-        sentence: The parent supported sentence.
-        grounding: The supporting context for the parent sentence.
-        family: The perturbation strategy to apply.
-
-    Returns:
-        Tuple of (perturbed_sentence, edit_note), or None on failure / no-op.
+    Returns None when the generator errors, returns unparseable output, or
+    returns an edit identical to the input (a no-op edit carries no label
+    signal and must not be kept).
     """
     prompt = build_perturbation_prompt(sentence, grounding)
     try:
@@ -205,17 +175,9 @@ async def generate_perturbation(
 
 
 def _parse_perturbation(raw: str) -> Optional[Tuple[str, str]]:
-    """Extract (perturbed, edit_note) from a generator reply.
+    """Extract (perturbed, edit_note) from a generator reply via parse_json_object.
 
-    Tolerates a bare JSON object, one wrapped in prose, fenced JSON, or a
-    pretty-printed multi-line object — via the shared ``parse_json_object``.
     Returns None if no object with a non-empty ``perturbed`` field is recovered.
-
-    Args:
-        raw: The generator's text reply.
-
-    Returns:
-        (perturbed, edit_note) or None.
     """
     obj = parse_json_object(raw)
     if obj and str(obj.get("perturbed", "")).strip():
@@ -223,13 +185,13 @@ def _parse_perturbation(raw: str) -> Optional[Tuple[str, str]]:
     return None
 
 
-# --- Difficulty banding (Tier 1 adversarial signal; a TAG, never a gate) -----
+# --- Difficulty banding (a TAG, never a gate) --------------------------------
 BAND_HARD = "hard"
 BAND_MEDIUM = "medium"
 BAND_EASY = "easy"
 
-# When the production verifier is *correct*, how confident it is splits easy from
-# medium. When it is *wrong*, the row is hard regardless of confidence.
+# When the production verifier is *correct*, confidence splits easy from medium.
+# When it is *wrong*, the row is hard regardless of confidence.
 _BAND_CONFIDENT = 0.80
 
 
@@ -240,20 +202,11 @@ def band_by_nli(
 ) -> str:
     """Rate one row's difficulty from how the production NLI verifier fared on it.
 
-    This is used only to *label* a slice ("accuracy on the NLI-hard rows"), never
-    to decide inclusion — so the dataset's composition stays independent of any
-    one model's blind spots.
+    Used only to *label* a slice, never to decide inclusion — so the dataset's
+    composition stays independent of any one model's blind spots.
 
-    Args:
-        predicted_nli: The verifier's 3-class prediction (entailment/neutral/
-            contradiction).
-        truth_nli: The row's ground-truth 3-class label.
-        score: Optional confidence in [0, 1] for the predicted class. When absent,
-            a correct row is ``medium`` (we cannot tell easy from medium).
-
-    Returns:
-        ``hard`` if the verifier is wrong, else ``easy`` (correct and confident)
-        or ``medium`` (correct but not confident, or confidence unknown).
+    Returns ``hard`` if the verifier is wrong, else ``easy`` (correct and
+    confident) or ``medium`` (correct but not confident, or confidence unknown).
     """
     if predicted_nli != truth_nli:
         return BAND_HARD
@@ -262,13 +215,13 @@ def band_by_nli(
     return BAND_MEDIUM
 
 
-# --- Shortcut + balance assertions (adapted from build_subset_b_train) --------
+# --- Shortcut + balance assertions (mirrors build_subset_b_train) -------------
 # A cell smaller than this says nothing about balance.
 MIN_CELL_ROWS = 15
-# The rarer of {supported, not_supported} must hold at least this share of a cell:
-# the surface feature must not be *decisive*, not that the cell be balanced.
+# The rarer of {supported, not_supported} must hold at least this share of a
+# cell: the surface feature must not be *decisive*, not that the cell be balanced.
 MIN_MINORITY_SHARE = 0.25
-# Default per-class floor for the balanced core (NLI classes).
+# Per-class floor for the balanced core (NLI classes).
 MIN_CLASS_ROWS = 60
 
 _LENGTH_BANDS: Tuple[Tuple[str, int, int], ...] = (
@@ -302,18 +255,10 @@ def _overlap_band(overlap: float) -> str:
 def shortcut_report(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Cross-tabulate the supported/not_supported split against surface features.
 
-    Two features are checked, each on its own: sentence length, and lexical
-    overlap between the sentence and its retrieved context (token containment).
-    Only the two decisive classes are counted — ``partially_supported`` and
+    Two features are checked: sentence length, and lexical overlap between the
+    sentence and its retrieved context (token containment). Only the two
+    decisive classes are counted — ``partially_supported`` and
     ``no_source_needed`` are not part of a lexical-overlap shortcut.
-
-    Args:
-        rows: Dataset rows (dicts with ``sentence_text``, ``retrieved_context``,
-            ``label``).
-
-    Returns:
-        One record per non-empty (feature, band) cell with the two counts and the
-        minority share.
     """
     cells: Dict[Tuple[str, str], Counter] = {}
     for row in rows:
@@ -348,17 +293,9 @@ def shortcut_report(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def assert_no_shortcut_features(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Fail the build if length or lexical overlap can stand in for the label.
 
-    A faithfulness verifier trained or evaluated on data where a surface feature
-    separates ``supported`` from ``not_supported`` can score well without judging
-    entailment. The counterfactual perturbations are minimal edits precisely so
-    the negatives land in the same high-overlap band as the positives; this
+    The counterfactual perturbations are minimal edits precisely so the
+    negatives land in the same high-overlap band as the positives; this
     assertion proves that held on the assembled set.
-
-    Args:
-        rows: The dataset about to be written.
-
-    Returns:
-        The full cross-tabulation, for the provenance sidecar.
 
     Raises:
         AssertionError: If a sufficiently large cell is dominated by one label.

@@ -14,20 +14,12 @@ logger = structlog.get_logger(__name__)
 
 
 class InfinityReranker(IReranker):
-    """HTTP adapter for the Infinity reranking server.
-
-    Fulfills: ``app/kb/domain/interfaces.py::IReranker``. Calls the Infinity
-    ``/rerank`` endpoint with the BGE-reranker-v2-m3 model loaded via
-    docker-compose.
+    """HTTP adapter for the Infinity reranking server. Calls the ``/rerank``
+    endpoint with the BGE-reranker-v2-m3 model.
     """
 
     def __init__(self, base_url: str, model: str) -> None:
-        """Open an HTTP client for the Infinity reranking endpoint.
-
-        Args:
-            base_url: Infinity server base URL.
-            model: Reranker model identifier registered with Infinity.
-        """
+        """Open an HTTP client for the Infinity reranking endpoint."""
         self.model = model
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
@@ -41,15 +33,9 @@ class InfinityReranker(IReranker):
         documents: List[str],
         top_k: Optional[int] = None,
     ) -> List[RerankResult]:
-        """Rerank documents by relevance to the query.
-
-        Args:
-            query: The search query.
-            documents: List of document texts in their original retrieval order.
-            top_k: If provided, return only the top-k most relevant documents.
-
-        Returns:
-            List of RerankResult ordered by descending relevance score.
+        """Rerank ``documents`` by relevance to ``query``, returning
+        ``RerankResult``s in descending score order (capped to ``top_k`` when
+        given).
         """
         if not documents:
             return []
@@ -80,12 +66,11 @@ class InfinityReranker(IReranker):
             score = float(item.get("relevance_score", item.get("score", 0.0)))
             rerank_results.append(RerankResult(index=idx, score=score))
 
-        # Infinity returns results already sorted by descending score;
-        # sort defensively to guarantee the contract.
+        # Infinity returns results sorted by score; sort defensively to
+        # guarantee the contract.
         rerank_results.sort(key=lambda r: r.score, reverse=True)
 
-        # The server is expected to honor top_k, but don't rely on it —
-        # enforce the cap client-side too.
+        # The server should honor top_k, but enforce the cap client-side too.
         if top_k is not None:
             rerank_results = rerank_results[:top_k]
 

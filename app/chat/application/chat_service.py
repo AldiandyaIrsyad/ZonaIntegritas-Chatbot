@@ -1,5 +1,5 @@
 """
-Ultimate Orchestrator for the Chat Module.
+Orchestrator for the Chat Module.
 
 Coordinates the Knowledge Base, IVM (Safety/Relevance), RAM (Response Assessment),
 and the LLM inference engine.
@@ -22,54 +22,35 @@ from app.thesis.ram.text_utils import split_sentences_with_seps
 
 logger = structlog.get_logger(__name__)
 
-# A Markdown table row (header, separator, or data row) starts and ends
-# with "|". Used to keep citation markers off table row lines — appending
-# text after a row's closing "|" would corrupt GFM table syntax.
+# A Markdown table row (header, separator, or data row) starts and ends with
+# "|". Keeps citation markers off table rows — appending text after a row's
+# closing "|" would corrupt GFM table syntax.
 _TABLE_ROW_RE = re.compile(r'^\s*\|.*\|\s*$')
 
-# Minimum proposition length (chars) worth an NLI call. Short factual
-# completions (dates, amounts, short names) are common in this domain and
-# should still get a citation attempt, so this is intentionally low —
-# it mainly filters pure interjections ("Ya.", "Oke.").
+# Minimum proposition length (chars) worth an NLI call.
 MIN_ASSESSABLE_LENGTH = 8
 
 class ChatService:
     """Orchestrates the chat request pipeline (application-layer service).
 
-    ``process_chat_message`` runs the full streaming RAG pipeline for a
-    single user turn, in order:
+    ``process_chat_message`` runs the streaming RAG pipeline for one user turn:
+    persist the user message → IVM safety check → IVM relevance pre-check →
+    deep KB retrieval (top_k=15) → prompt build (with anti-injection
+    delimiter) → stream the LLM completion → per-proposition RAM entailment
+    assessment with citation markers → persist the assistant message with its
+    RAG context.
 
-        1. Persist the incoming user message (and create/rename the session).
-        2. Safety check the combined message+attachment text (IVM).
-        3. Pre-check topical relevance against a shallow KB search (IVM).
-        4. Deep KB retrieval for generation context (top_k=15).
-        5. Build the system/user prompt (with anti-injection delimiter).
-        6. Stream the LLM completion, buffering by sentence/proposition.
-        7. Per-proposition, assess entailment against the retrieved context
-           and append a citation marker (RAM) — skipped in baseline mode.
-        8. Persist the final assistant message alongside its RAG context.
+    Collaborators (ports from ``app/chat/domain/interfaces.py`` or services
+    from other bounded contexts, wired in
+    ``app/chat/dependency.py::get_chat_service``): ``chat_repo`` (session/
+    message persistence), ``llm_conn`` (LLM calls), ``search_service`` (hybrid
+    KB retrieval for both the pre-check and deep fetch), ``ivm_service``
+    (prompt-injection safety gate), ``relevance_service`` (topical/OOD gate),
+    and ``ram_service`` (per-sentence NLI citation markers).
 
-    Collaborators injected at construction (each a port from
-    ``app/chat/domain/interfaces.py`` or a service from another bounded
-    context, wired in ``app/chat/dependency.py::get_chat_service``):
-        - ``chat_repo``: ``IChatRepository`` — session/message persistence.
-        - ``llm_conn``: ``ILLMConnection`` — streaming/non-streaming LLM calls.
-        - ``search_service``: ``app.kb.application.search_service.SearchService``
-          — hybrid KB retrieval (used for both the relevance pre-check and
-          the deep context fetch).
-        - ``ivm_service``: ``app.thesis.ivm.service.IVMService`` — the Input
-          Validation Module; prompt-injection/malicious-content safety gate.
-        - ``relevance_service``: ``app.thesis.ivm.relevance_service.RelevanceService``
-          — the IVM's out-of-domain / topical relevance gate.
-        - ``ram_service``: ``app.thesis.ram.service.RAMService`` — the
-          Response Assessment Module; per-sentence NLI entailment check
-          used to attach hallucination-aware citation markers.
-
-    Each defense can be disabled independently for ablation experiments —
-    ``skip_ivm`` (steps 2-3), ``skip_ram`` (step 7), and ``skip_nonce`` (the
-    delimiter in step 5) — with ``skip_guardrails`` kept as the shorthand that
-    sets the first two together. Retrieval always runs so the LLM has context.
-    See ``process_chat_message``.
+    Each defense is independently disableable for ablation — ``skip_ivm``,
+    ``skip_ram``, ``skip_nonce`` — with ``skip_guardrails`` as the shorthand
+    for the first two. Retrieval always runs so the LLM has context.
     """
 
     def __init__(
@@ -87,23 +68,9 @@ class ChatService:
     ):
         """Wire the pipeline's collaborators and generation settings.
 
-        Args:
-            chat_repo: Session/message persistence port.
-            llm_conn: LLM connection port used for streaming generation.
-            search_service: KB hybrid retrieval service (relevance
-                pre-check + deep context fetch).
-            ivm_service: Safety (prompt-injection) checker.
-            relevance_service: Topical/OOD relevance checker.
-            ram_service: Per-sentence NLI assessment service used to
-                generate citation markers.
-            model_name: LLM model identifier passed to ``llm_conn``.
-            system_prompt: Base system prompt template (see
-                ``app.thesis.prompts.build_prompt``).
-            temperature: Sampling temperature for generation.
-            attachment_search_excerpt_chars: Max characters of an uploaded
-                attachment's text folded into the KB search query (the full
-                text still goes to the LLM prompt) — see
-                ``ChatConfig.attachment_search_excerpt_chars``.
+        ``attachment_search_excerpt_chars`` caps how much of an uploaded
+        attachment's text is folded into the KB search query (the full text
+        still goes to the LLM prompt).
         """
         self.chat_repo = chat_repo
         self.llm_conn = llm_conn
@@ -153,32 +120,16 @@ class ChatService:
 
     @staticmethod
     def _format_citation(result: Any) -> str:
-        """Format an NLI assessment result into a canonical citation marker.
+        """Format an NLI result into a canonical citation marker.
 
-        Produces a marker of the form
-        ``*(STATUS: SCORE; SOURCE; Page N; DocID:ID; Evidence:"snippet")*``
-        where STATUS is one of Supported/Contradiction, SCORE is the
-        dominant NLI confidence (2 decimals), SOURCE is the document title
-        (omitted if empty), Page N is included only when a page number is
-        available, DocID:ID is included only when a source document id is
-        available (lets the frontend offer a "Download PDF" link), and
-        Evidence:"snippet" is included only when a matched sub-passage is
-        available (the reranker-matched context window the NLI check was
-        actually run against). This format is parsed by the frontend
-        ``renderMessage`` function to render colored citation badges with
-        tooltips.
+        Produces ``*(STATUS: SCORE; SOURCE; Page N; DocID:ID; Evidence:"snippet")*``
+        where STATUS is Supported/Contradiction and SCORE the dominant NLI
+        confidence; SOURCE, Page, DocID, and Evidence appear only when present
+        (DocID enables a frontend "Download PDF" link). Parsed by the frontend
+        ``renderMessage`` to render citation badges with tooltips.
 
-        Neutral results (and any unrecognized label, e.g. from the
-        disabled/error fallback paths in the NLI adapter) produce no
-        marker at all, since there's nothing useful to tell the user.
-
-        Args:
-            result: An ``NLIResult`` with ``label``, per-class scores,
-                ``source_title``, optional ``page``, and optional ``doc_id``.
-
-        Returns:
-            A citation marker string, or an empty string if the result is
-            None or the label isn't Supported/Contradiction.
+        Returns "" for None or non-Supported/Contradiction labels (neutral and
+        error-fallback results carry nothing useful to show).
         """
         if result is None:
             return ""
@@ -220,27 +171,25 @@ class ChatService:
         "\\n\\n" for a paragraph break), so callers can preserve the original
         formatting instead of always rejoining with a single space.
         """
-        # Split on sentence boundaries (., ?, !) and newlines. Delegates to
-        # the shared splitter, which guards against markdown list markers
-        # (e.g. "1.", "2.") being mistaken for sentence ends, and which
-        # reports the exact separator matched at each boundary.
+        # Sentence boundaries (., ?, !) and newlines, via the shared splitter
+        # (guards against markdown list markers like "1." being read as
+        # sentence ends, and reports the separator at each boundary).
         sentence_pairs = split_sentences_with_seps(text)
 
         propositions: List[Tuple[str, str]] = []
         for part, sep in sentence_pairs:
-            # Split on Indonesian conjunction markers that introduce new claims,
-            # keeping the conjunction with the second part if possible (handled by split, we'll re-attach or just let NLI handle it).
-            # Using positive lookbehind to keep the delimiter attached to the right part.
+            # Further split on Indonesian conjunctions that introduce new
+            # claims, keeping the delimiter attached to the following part.
             sub_parts = re.split(r'(?i)(,\s*yang\s+|,\s*dan\s+|,\s*karena\s+|,\s*sehingga\s+)', part)
 
             subs = []
             current_prop = ""
             for sp in sub_parts:
                 if re.match(r'(?i)(,\s*yang\s+|,\s*dan\s+|,\s*karena\s+|,\s*sehingga\s+)', sp):
-                    # It's a delimiter, start a new proposition with it
+                    # Delimiter: start a new proposition with it.
                     if current_prop.strip():
                         subs.append(current_prop.strip())
-                    current_prop = sp.lstrip(", ") # Strip leading comma for cleaner premise
+                    current_prop = sp.lstrip(", ")  # drop leading comma
                 else:
                     current_prop += sp
 
@@ -258,16 +207,10 @@ class ChatService:
 
     @staticmethod
     def _is_table_row(prop_text: str) -> bool:
-        """True if a proposition is a single Markdown table line (header,
-        separator, or data row) — starts and ends with '|'.
-
-        Used to keep citation markers off table row lines, which would
-        corrupt GFM table syntax if appended inline (a valid row must
-        consist solely of pipe-delimited cells).
-
-        Known limitation: a bare-pipe-notation sentence like "|x| = 5"
-        would false-positive; accepted given this domain (Indonesian
-        regulatory/thesis prose essentially never uses that notation).
+        """True if a proposition is a single Markdown table line (starts/ends
+        with '|'). Keeps citation markers off row lines, which would corrupt
+        GFM table syntax. A bare-pipe sentence like "|x| = 5" false-positives,
+        acceptable in this domain.
         """
         return bool(_TABLE_ROW_RE.match(prop_text.strip()))
 
@@ -278,11 +221,8 @@ class ChatService:
         ram_contexts: List[RAMRetrievedContext],
         skip_ram: bool,
     ) -> str:
-        """Run RAM assessment (unless in baseline mode) and format the
-        result into a citation marker string (possibly "").
-
-        Shared by the per-proposition prose path and the accumulated
-        table-block path in ``_handle_complete_proposition``.
+        """Run RAM assessment (unless baseline) and format a citation marker
+        (possibly ""). Shared by the prose and table-block paths.
         """
         if skip_ram:
             return ""
@@ -299,16 +239,14 @@ class ChatService:
         skip_ram: bool,
         table_rows: List[Tuple[str, str]],
     ) -> AsyncGenerator[str, None]:
-        """Process one complete (proposition, sep) pair, yielding output
-        text chunks in the order they should be streamed/appended.
+        """Process one complete (proposition, sep) pair, yielding output chunks
+        in stream order.
 
-        Table row propositions are accumulated in the caller-owned
-        ``table_rows`` list (mutated in place) instead of being assessed
-        individually — a single row has no column headers, and injecting
-        a citation marker onto a row's line would corrupt GFM table
-        syntax. Once a non-table-row proposition arrives (the table block
-        has ended), the accumulated rows are assessed as one unit and the
-        citation is emitted as its own paragraph, never on a row line.
+        Table rows are accumulated in the caller-owned ``table_rows`` list
+        rather than assessed individually — a lone row has no headers, and a
+        marker on a row line would corrupt GFM syntax. When a non-row
+        proposition ends the block, the rows are assessed as one unit and the
+        citation is emitted as its own paragraph.
         """
         if self._is_table_row(prop_text):
             table_rows.append((prop_text, sep))
@@ -342,53 +280,36 @@ class ChatService:
         skip_ram: Optional[bool] = None,
         skip_nonce: bool = False,
     ) -> AsyncGenerator[str, None]:
-        """The main generation pipeline: Safety -> Pre-check -> Context -> Generate -> Assess.
+        """The main generation pipeline: Safety → Pre-check → Context → Generate → Assess.
 
-        The three defenses can be disabled independently, which is what lets an
-        experiment attribute an effect to one of them rather than to "guardrails
-        on vs off" as a single block:
+        The three defenses disable independently so an experiment can attribute
+        an effect to one of them: ``skip_ivm`` (safety + relevance),
+        ``skip_ram`` (per-sentence assessment), ``skip_nonce`` (the
+        anti-injection delimiter, a structural defense separate from the IVM
+        classifier). ``skip_guardrails`` is the shorthand for ``skip_ivm`` +
+        ``skip_ram`` unless either is passed explicitly; it does not imply
+        ``skip_nonce``. Retrieval always runs so the LLM has context.
 
-        - ``skip_ivm`` bypasses the IVM safety + relevance checks.
-        - ``skip_ram`` bypasses the RAM per-sentence assessment.
-        - ``skip_nonce`` bypasses the anti-injection delimiter (see
-          ``app.thesis.prompts.build_prompt``), which is a structural defense
-          independent of the IVM classifier.
-
-        ``skip_guardrails`` remains as the both-at-once shorthand: it sets
-        ``skip_ivm`` and ``skip_ram`` together unless either is passed
-        explicitly. It does NOT imply ``skip_nonce`` — the delimiter is not
-        part of the IVM/RAM pair, and folding it in would silently change what
-        the existing Experiment 4 baseline measures.
-
-        Retrieval always runs so the LLM has context.
-
-        ``attachment_text`` (the extracted text of a chat-uploaded PDF, if
-        any) is treated as part of the user's prompt for this turn only: it
-        is folded into the same IVM safety check, the same KB search queries,
-        and the same anti-injection delimiter as the typed message, but is
-        never persisted or replayed on later turns (see
-        ``app/chat/infra/pdf_text_extractor.py`` and
-        ``app/chat/application/attachment_service.py``).
+        ``attachment_text`` (extracted text of a chat-uploaded PDF, if any) is
+        treated as part of this turn's prompt only: folded into the same IVM
+        check, KB search queries, and delimiter as the typed message, but never
+        persisted or replayed on later turns.
         """
 
         # Resolve the individual switches from the shorthand.
         skip_ivm = skip_guardrails if skip_ivm is None else skip_ivm
         skip_ram = skip_guardrails if skip_ram is None else skip_ram
 
-        # Combined text used for safety checking and prompt building: the
-        # attachment is data the user is asking about, so it rides inside
-        # the same trust boundary as the typed message rather than being
-        # treated as separate system-provided context.
+        # The attachment is data the user is asking about, so it shares the
+        # typed message's trust boundary rather than being system context.
         if attachment_text:
             combined_text = (
                 f"{message_text}\n\n[Dokumen terlampir: {attachment_filename}]\n{attachment_text}"
             )
-            # Capped excerpt for KB search queries only (full text still goes
-            # into combined_text above for the IVM check and LLM prompt) —
-            # a short question like "is this against X rules?" alone often
-            # won't retrieve the right KB chunks since the real topic lives
-            # in the attachment, but a full-length document would degrade
-            # embedding/HyDE query quality.
+            # Capped excerpt for KB search only (full text still goes to the
+            # IVM check and LLM prompt): a short question alone often won't
+            # retrieve the right chunks since the topic lives in the
+            # attachment, but a full document would degrade embedding/HyDE.
             search_query_text = (
                 f"{message_text}\n\n{attachment_text[: self.attachment_search_excerpt_chars]}"
             )
@@ -406,35 +327,29 @@ class ChatService:
             new_title = message_text[:30] + ("..." if len(message_text) > 30 else "")
             await self.chat_repo.update_session_title(session, new_title)
 
-        # Capture history BEFORE any DB writes to avoid lazy-load issues
-        # in async context (greenlet_spawn errors after flush/commit).
-        # For newly created sessions, messages is empty (no lazy load needed).
+        # Capture history before any DB writes to avoid async lazy-load errors
+        # (greenlet_spawn after flush/commit). New sessions have no history.
         if is_new_session:
             history: List = []
         else:
             history = list(session.messages[-10:]) if session and session.messages else []
 
-        # Record user message. Only the typed text and the attachment's
-        # filename are persisted — the extracted attachment text itself is
-        # single-turn only and never stored (see docstring above).
+        # Record the user message. Only the typed text and the attachment's
+        # filename are persisted; the extracted text is single-turn only.
         await self.chat_repo.create_message(
             session_id, "user", message_text, raw_content=message_text,
             attachment_filename=attachment_filename,
         )
 
         try:
-            # 2. Safety Check (IVM) — scans the combined message + attachment
-            # text, since an attached PDF is just as capable of carrying a
-            # prompt injection as typed text.
+            # 2. Safety check (IVM) over the combined message + attachment,
+            # since an attached PDF can carry a prompt injection too.
             if not skip_ivm:
                 await self.ivm_service.check_malicious(combined_text)
 
-            # 3. Pre-check Relevance (IVM + KB)
-            # NOTE: We intentionally do NOT pass session_id here. The chat
-            # session ID is unrelated to the KB chunk session_id payload —
-            # KB chunks are ingested without a session_id and the Qdrant
-            # filter would return zero results if we passed the chat
-            # session ID.
+            # 3. Relevance pre-check (IVM + KB). No session_id is passed: the
+            # chat session ID is unrelated to the KB chunk session_id payload,
+            # and filtering on it would return zero results.
             precheck_contexts = await self.search_service.search(search_query_text, top_k=3)
             if not skip_ivm:
                 if not precheck_contexts:
@@ -462,39 +377,30 @@ class ChatService:
                 for ctx in full_contexts
             ]
 
-            # 5. Prompt Building (Indonesian system/context prompt + a
-            # cryptographically random per-request delimiter wrapping the
-            # raw user message, as an additional defense against system
-            # prompt injection on top of the IVM safety check above).
+            # 5. Prompt build: Indonesian system/context prompt plus a random
+            # per-request delimiter wrapping the raw user message (injection
+            # defense on top of the IVM check).
             bundle = build_prompt(
                 combined_text, ram_contexts, self.system_prompt, use_nonce=not skip_nonce
             )
 
             messages = [{"role": "system", "content": bundle.system_prompt}]
-            # Add history (up to last 5 messages to avoid blowing up context window)
+            # History (capped above) to bound the context window.
             for msg in history:
                 messages.append({"role": msg.role, "content": msg.content})
 
-            # Add current
             messages.append({"role": "user", "content": bundle.user_turn})
 
-            # Prepare RAM evaluation
             premise = self.ram_service.build_premise(ram_contexts)
 
-            # Emit retrieved context so downstream consumers (e.g. Subset D
-            # dataset generation) can capture the source passages used for
-            # generation, and so the frontend can render it in a collapsible
-            # "view RAG context" panel. This is emitted as a single NDJSON
-            # event before streaming begins, and the same payload is
-            # persisted alongside the assistant message below so it
-            # survives a page refresh.
+            # Emit the retrieved context as one NDJSON event before streaming,
+            # for the frontend's collapsible "view RAG context" panel and for
+            # downstream consumers; the same payload is persisted with the
+            # assistant message so it survives a refresh.
             #
-            # "content" is a flat join of all chunk texts and MUST keep this
-            # exact shape: app/thesis/_eval/_dataset_gen/build_subset_d.py
-            # reads it verbatim as the RAM ground-truth retrieved_context.
-            # "chunks" is the richer, per-source structure the chat UI uses
-            # to pair each chunk's page/section with its own text (rather
-            # than a page list followed by one disconnected text blob).
+            # "content" is a flat join of chunk texts and MUST keep this shape
+            # (build_subset_d.py reads it verbatim as RAM ground truth);
+            # "chunks" is the per-source structure the chat UI renders.
             context_payload = {
                 "content": "\n\n".join(ctx.text for ctx in ram_contexts),
                 "chunks": [
@@ -509,14 +415,13 @@ class ChatService:
             }
             yield json.dumps({"type": "context", **context_payload}) + "\n"
 
-            # We buffer the stream by sentence to evaluate each complete sentence
+            # Buffer the stream by sentence to assess each complete proposition.
             buffer = ""
             final_output = ""
-            # Accumulates contiguous Markdown table row propositions until a
-            # non-table-row proposition ends the block (see
-            # _handle_complete_proposition). Local to this call — never
-            # instance state, since ChatService may be reused across
-            # concurrent requests.
+            # Accumulates contiguous table-row propositions until a non-row
+            # proposition ends the block (see _handle_complete_proposition).
+            # Local to this call — never instance state, since ChatService may
+            # be reused across concurrent requests.
             table_rows: List[Tuple[str, str]] = []
 
             # 6. Stream and Assess
@@ -529,11 +434,11 @@ class ChatService:
 
             async for chunk in stream:
                 buffer += chunk
-                # Check if we hit a boundary that likely ends a proposition
+                # On a likely proposition boundary, flush all but the trailing
+                # incomplete fragment.
                 if any(punct in chunk for punct in [". ", "? ", "! ", "\n", ", yang ", ", dan ", ", karena ", ", sehingga "]):
                     propositions = self._split_propositions(buffer)
                     if len(propositions) > 1:
-                        # Process all but the last incomplete fragment
                         for prop, sep in propositions[:-1]:
                             async for out in self._handle_complete_proposition(
                                 prop, sep, ram_contexts=ram_contexts, premise=premise,
@@ -544,7 +449,7 @@ class ChatService:
 
                         buffer = propositions[-1][0]
 
-            # Process any remaining buffer through the same row/prose dispatch.
+            # Flush any remaining buffer through the same row/prose dispatch.
             if buffer.strip():
                 for prop, sep in self._split_propositions(buffer.strip()):
                     async for out in self._handle_complete_proposition(
@@ -554,10 +459,9 @@ class ChatService:
                         final_output += out
                         yield json.dumps({"type": "chunk", "content": out}) + "\n"
 
-            # If the answer ended while still inside a table (the last
-            # streamed content was table rows, so no trailing prose
-            # proposition ever arrived to trigger the flush inside
-            # _handle_complete_proposition), assess and flush it now.
+            # If the answer ended inside a table (last content was rows, so no
+            # trailing prose proposition triggered the flush), assess and flush
+            # the accumulated block now.
             if table_rows:
                 table_text = "\n".join(row for row, _ in table_rows)
                 table_rows.clear()
@@ -567,9 +471,8 @@ class ChatService:
                     final_output += out
                     yield json.dumps({"type": "chunk", "content": out}) + "\n"
 
-            # Record assistant message, alongside the RAG context/sources
-            # used to generate it so the frontend can restore the "view RAG
-            # context" panel after a page refresh.
+            # Persist the assistant message with its RAG context/sources so the
+            # frontend can restore the "view RAG context" panel after a refresh.
             await self.chat_repo.create_message(
                 session_id, "assistant", final_output, raw_content=final_output,
                 context=context_payload["content"], sources=context_payload["chunks"],

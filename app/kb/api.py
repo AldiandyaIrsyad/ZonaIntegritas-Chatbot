@@ -184,11 +184,10 @@ async def search_knowledge_base(
 ) -> List[SearchResultItem]:
     """Search the knowledge base for contexts relevant to a query.
 
-    Returns hybrid (dense + sparse with RRF fusion) search results by default.
-    Set ``mode`` to ``dense`` or ``sparse`` for ablation experiments, and
-    ``rerank=false`` to compare the fusion strategies themselves rather than
-    three reranked variants of them (Experiment 2, M10).
-    Used by the chat pipeline and the retrieval evaluation script (Experiment 2).
+    Returns hybrid (dense + sparse, RRF fusion) results by default. Set ``mode``
+    to ``dense``/``sparse`` and ``rerank=false`` for ablations comparing the
+    fusion strategies themselves rather than reranked variants. Used by the chat
+    pipeline and the retrieval evaluation script.
     """
     contexts = await search_service.search(
         query=q, top_k=top_k, session_id=session_id, mode=mode, rerank=rerank

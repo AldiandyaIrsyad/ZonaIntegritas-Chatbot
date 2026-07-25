@@ -1,41 +1,25 @@
 """Build the external held-out evaluation slices for Exp1a.
 
-Why a second test set exists
-----------------------------
-Subset B's ``hidden_instruction`` rows are stylistically narrow: a large share
-carry an explicit bracketed marker, and most of the rest follow a single
-"ordinary request + connector + harmful instruction" shape. A classifier
-fine-tuned on synthetic Indonesian data can score near-perfectly on that by
-learning the connector rather than the attack, and no metric computed on Subset
-B alone would reveal it.
-
-So the fine-tuned model is also scored on data it cannot have learned the style
-of: the **official test split** of a public, human-written prompt-injection
-corpus, which no part of B-Train draws from. Two slices are produced — the
-English original, and an Indonesian translation, since the deployed system
-serves Indonesian.
+Subset B's ``hidden_instruction`` rows are stylistically narrow, so a
+classifier fine-tuned on synthetic Indonesian data can score near-perfectly by
+learning the style rather than the attack. The fine-tuned model is therefore
+also scored on data it cannot have learned the style of: the **official test
+split** of a public, human-written prompt-injection corpus, which no part of
+B-Train draws from. Two slices are produced — the English original, and an
+Indonesian translation, since the deployed system serves Indonesian.
 
 The interpretation rule is fixed in advance, so it cannot be chosen after
 seeing the numbers:
 
 - Improves on Subset B **and** the held-out slices → the Indonesian adaptation
   claim holds.
-- Improves on Subset B **only** → what was measured is style-matching, and that
-  is what the results chapter must say.
+- Improves on Subset B **only** → what was measured is style-matching.
 
-Translation independence
-------------------------
-B-Train's translated rows and this slice's translated rows must not come from
-the same model, or "translationese" becomes a feature shared by train and test
-— reintroducing, in a subtler form, exactly the leakage the held-out set is
-meant to rule out. The default translator here is a different lab from
-B-Train's default generator, and the builder refuses to run if the two match.
-
-Usage:
-    python -m app.thesis._eval._dataset_gen.build_heldout_eval \\
-        --output-en data/heldout_injection_en.csv \\
-        --output-id data/heldout_injection_id.csv \\
-        [--sample 600] [--resume]
+Translation independence: B-Train's translated rows and this slice's
+translated rows must not come from the same model, or "translationese" becomes
+a feature shared by train and test. The default translator here is a different
+lab from B-Train's default generator, and the builder refuses to run if the
+two match.
 """
 
 from __future__ import annotations
@@ -70,30 +54,24 @@ logger = structlog.get_logger(__name__)
 FIELDNAMES = ["query", "label", "attack_type"]
 
 # The held-out source. Its official train split feeds B-Train; only the test
-# split is read here, so the two are disjoint by construction rather than by
-# a deduplication pass that could silently under-match.
+# split is read here, so the two are disjoint by construction rather than by a
+# deduplication pass that could silently under-match.
 HELDOUT_DATASET = "xTRam1/safe-guard-prompt-injection"
 HELDOUT_SPLIT = "test"
 TEXT_FIELD = "text"
 LABEL_FIELD = "label"
 MALICIOUS_VALUES = {1, "1"}
 
-# A different lab from DEFAULT_BTRAIN_GENERATOR — see "Translation
-# independence" above.
+# A different lab from DEFAULT_BTRAIN_GENERATOR (translation independence).
 DEFAULT_TRANSLATE_MODEL = "mistralai/mistral-small-3.2-24b-instruct"
 
 
 def load_heldout_english(sample: int, seed: int) -> List[Dict[str, str]]:
     """Load the public test split and normalise it to Subset B's schema.
 
-    Args:
-        sample: Rows to keep per class (0 keeps everything). Sampling is
-            balanced, because an imbalanced external set would let the majority
-            class drive the headline accuracy.
-        seed: Sampling seed.
-
-    Returns:
-        Rows with ``query``, ``label`` and ``attack_type``.
+    ``sample`` is rows to keep per class (0 keeps everything); sampling is
+    balanced, because an imbalanced external set would let the majority class
+    drive the headline accuracy.
     """
     try:
         from datasets import load_dataset
@@ -154,14 +132,6 @@ def assert_disjoint_from_training(
     repeat rows across splits, and an unchecked "held out" claim is not
     evidence.
 
-    Args:
-        rows: Held-out rows.
-        b_train_path: Path to B-Train, if it has been built yet.
-        subset_b_path: Path to Subset B.
-
-    Returns:
-        Overlap counts per file.
-
     Raises:
         AssertionError: If any held-out row appears in the training data.
     """
@@ -195,19 +165,7 @@ async def build_heldout_eval(
     resume: bool = False,
     skip_translation: bool = False,
 ) -> None:
-    """Build the English and Indonesian held-out evaluation slices.
-
-    Args:
-        settings: Settings carrying the translation model.
-        output_en: Destination for the English slice.
-        output_id: Destination for the Indonesian slice.
-        b_train_path: B-Train CSV, for the disjointness assertion.
-        subset_b_path: Subset B CSV, for the disjointness assertion.
-        sample: Rows to keep (0 = all), balanced across classes.
-        seed: Sampling seed.
-        resume: Continue an interrupted translation run.
-        skip_translation: Build only the English slice.
-    """
+    """Build the English and Indonesian held-out evaluation slices."""
     rows = load_heldout_english(sample, seed)
     overlap_report = assert_disjoint_from_training(rows, b_train_path, subset_b_path)
 
@@ -258,7 +216,7 @@ async def build_heldout_eval(
                         continue
                     # Label and subtype carry over untouched: translation must
                     # preserve intent, so a translated attack is still an
-                    # attack. Anything else would silently relabel the set.
+                    # attack.
                     row = {
                         "query": text,
                         "label": source_row["label"],

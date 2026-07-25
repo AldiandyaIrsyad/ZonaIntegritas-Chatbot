@@ -6,12 +6,11 @@ comparison plus the pre-registered verdict.
 
 Why locally rather than in a notebook
 -------------------------------------
-Training here removes a class of error that a hosted notebook cannot. Measured
-on this checkpoint, ``transformers`` 4.57.1 and 5.9.0 disagree on 8 of Subset
-B's 160 rows — attack detection moves from 0.3500 to 0.4250 on a library
-upgrade alone. Training and evaluating in the same environment that serves the
-model makes that impossible by construction, and the run becomes reproducible
-from the repository rather than from an uploaded copy of the data.
+Training and evaluating in the same environment that serves the model removes a
+class of error a hosted notebook cannot: library-version drift between the
+training runtime and the serving runtime changes attack-detection scores on the
+same checkpoint, so a locally trained-and-evaluated run is reproducible from the
+repository rather than from an uploaded copy of the data.
 
 It also fits. Full fine-tune of a 278M-parameter model (86M encoder plus a
 251k-token embedding table) with dynamic padding: B-Train's median row is 29
@@ -73,8 +72,7 @@ TRAIN_MAX_LENGTH = 256
 # Evaluation truncates at the model's full context, matching the deployed guard.
 # Training and evaluation limits are deliberately independent: capping training
 # length is a memory decision, but capping EVALUATION length would change the
-# reported numbers — measured here, it moved held-out EN recall from 0.4667 to
-# 0.4533 — and the figures must describe the system as actually served.
+# reported numbers, and the figures must describe the system as actually served.
 EVAL_MAX_LENGTH = 512
 
 # Pinned, and asserted after training. The deployed client treats index 1 as the
@@ -138,9 +136,6 @@ def assert_held_out(train: pd.DataFrame, eval_sets: Sequence[Tuple[pd.DataFrame,
 
 def load_frames(data_dir: Path) -> Tuple[pd.DataFrame, List[Tuple[pd.DataFrame, str]], Optional[pd.DataFrame]]:
     """Load the training set, the evaluation sets, and the policy annotation.
-
-    Args:
-        data_dir: Directory holding the generated CSVs.
 
     Returns:
         (training frame, [(frame, name), ...], optional override annotation).
@@ -332,9 +327,9 @@ def print_verdict(baseline: List[EvalResult], finetuned: List[EvalResult]) -> st
 
     # Recall alone is trivially maximised by predicting "malicious" for
     # everything, so a recall-only rule would call a collapsed classifier a
-    # success — it did exactly that on the first run here, reporting victory for
-    # a model whose false-positive rate had gone from 0.0000 to 0.7333. The rule
-    # therefore requires a *balanced* improvement: F1 up and accuracy not down.
+    # success — reporting victory for a model whose false-positive rate had
+    # risen from 0.0000 toward 0.7333. The rule therefore requires a *balanced*
+    # improvement: F1 up and accuracy not down.
     improved = {
         r.dataset: (r.f1 > before[r.dataset].f1 and r.accuracy >= before[r.dataset].accuracy)
         for r in finetuned

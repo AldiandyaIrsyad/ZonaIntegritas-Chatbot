@@ -1,15 +1,11 @@
 """PyMuPDF-based image extraction and drawing analysis.
 
-This module provides a fallback VLM enricher that uses PyMuPDF (fitz) to
-analyse visual elements without an actual Vision-Language Model. It
-detects drawings (vector graphics), text annotations, and image regions
-on each page, producing a heuristic text description.
-
-This is the "text-only fallback" strategy — it doesn't call any external
-API, making it suitable for offline or privacy-sensitive deployments.
-The descriptions are less rich than a true VLM but preserve the structural
-information (e.g. "This page contains a flowchart with 12 drawing elements
-and 3 text annotations").
+A fallback VLM enricher that uses PyMuPDF (fitz) to analyse visual elements
+without an actual Vision-Language Model — detecting drawings (vector graphics),
+text annotations, and image regions per page to produce a heuristic text
+description. This "text-only fallback" calls no external API (suitable for
+offline/privacy-sensitive deployments); descriptions are less rich than a true
+VLM but preserve structural information.
 """
 
 from __future__ import annotations
@@ -22,18 +18,15 @@ import fitz  # PyMuPDF
 
 logger = structlog.get_logger(__name__)
 
-# Thresholds for drawing-density-based flowchart detection
-# A page with many vector drawings (lines, rectangles, curves) likely
-# contains a flowchart or diagram.
+# Drawing-density threshold for flowchart detection: a page with many vector
+# drawings (lines, rectangles, curves) likely holds a flowchart or diagram.
 FLOWCHART_DRAWING_THRESHOLD = 10
 
 
 class PyMuPDFImageExtractor:
-    """Extracts images and analyses drawings from PDF pages using PyMuPDF.
-
-    This class is used by the :class:`FallbackVLMClient` to provide
-    text-only heuristic descriptions of visual elements when no VLM is
-    available.
+    """Extracts images and analyses drawings from PDF pages using PyMuPDF. Used
+    by :class:`FallbackVLMClient` for text-only heuristic descriptions when no
+    VLM is available.
     """
 
     def __init__(self) -> None:
@@ -46,16 +39,8 @@ class PyMuPDFImageExtractor:
         output_dir: str,
         dpi: int = 150,
     ) -> Optional[str]:
-        """Render a PDF page as a PNG image.
-
-        Args:
-            pdf_path: Path to the source PDF file.
-            page_number: 1-indexed page number to render.
-            output_dir: Directory to save the rendered image.
-            dpi: Resolution for the rendered image.
-
-        Returns:
-            Path to the saved PNG file, or None if extraction failed.
+        """Render a PDF page as a PNG image. Returns the saved PNG path, or
+        None if extraction failed.
         """
         try:
             os.makedirs(output_dir, exist_ok=True)
@@ -89,23 +74,14 @@ class PyMuPDFImageExtractor:
         pdf_path: str,
         page_number: int,
     ) -> dict:
-        """Analyse vector drawings and text annotations on a page.
+        """Analyse vector drawings and text annotations on a page, to detect
+        flowcharts and annotated screenshots by counting drawing primitives and
+        text blocks.
 
-        Used to detect flowcharts and annotated screenshots by counting
-        drawing primitives (lines, rectangles, curves) and text blocks.
-
-        Args:
-            pdf_path: Path to the source PDF file.
-            page_number: 1-indexed page number to analyse.
-
-        Returns:
-            Dictionary with keys:
-            - ``drawing_count``: Number of vector drawing primitives.
-            - ``text_block_count``: Number of text blocks on the page.
-            - ``image_count``: Number of embedded raster images.
-            - ``has_flowchart``: True if drawing density suggests a flowchart.
-            - ``has_annotations``: True if there are short text blocks
-              (likely annotations on a diagram).
+        Returns a dict with ``drawing_count``, ``text_block_count``,
+        ``image_count``, ``has_flowchart`` (drawing density suggests a
+        flowchart), and ``has_annotations`` (short text blocks, likely diagram
+        annotations).
         """
         try:
             doc = fitz.open(pdf_path)

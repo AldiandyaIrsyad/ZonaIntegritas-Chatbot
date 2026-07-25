@@ -1,20 +1,9 @@
 """Evaluation metrics for the thesis experiments.
 
-Implements all 11 metrics defined in skripsi §3.4:
-    - Accuracy (§3.4.1)
-    - Precision (§3.4.2)
-    - Recall (§3.4.3)
-    - F1-Score (§3.4.4)
-    - False Positive Rate (§3.4.5)
-    - Hit Rate@k (§3.4.6)
-    - Mean Reciprocal Rank (§3.4.7)
-    - BERTScore (§3.4.8)
-    - Faithfulness (§3.4.9)
-    - Abstention Accuracy (§3.4.10)
-    - Cohen's Kappa (§3.4.11)
-
-All metrics include bootstrap confidence intervals (resampling 1000×) or
-Wilson intervals for binary proportions, as required by §3.4.
+Implements Accuracy, Precision, Recall, F1, False Positive Rate, Hit Rate@k,
+Mean Reciprocal Rank, BERTScore, Faithfulness, Abstention Accuracy, and Cohen's
+Kappa. Point estimates are paired with bootstrap confidence intervals
+(resampling 1000×) or Wilson intervals for binary proportions.
 """
 
 from __future__ import annotations
@@ -31,14 +20,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 @dataclass(frozen=True)
 class BinaryMetrics:
-    """Confusion-matrix-derived metrics for binary classification.
-
-    Attributes:
-        tp: True positives.
-        fp: False positives.
-        tn: True negatives.
-        fn: False negatives.
-    """
+    """Confusion-matrix-derived metrics for binary classification (tp/fp/tn/fn)."""
 
     tp: int = 0
     fp: int = 0
@@ -52,32 +34,32 @@ class BinaryMetrics:
 
     @property
     def accuracy(self) -> float:
-        """Proportion of correct predictions (§3.4.1)."""
+        """Proportion of correct predictions."""
         n = self.total
         return (self.tp + self.tn) / n if n else 0.0
 
     @property
     def precision(self) -> float:
-        """Proportion of positive predictions that are correct (§3.4.2)."""
+        """Proportion of positive predictions that are correct."""
         denom = self.tp + self.fp
         return self.tp / denom if denom else 0.0
 
     @property
     def recall(self) -> float:
-        """Proportion of actual positives found (§3.4.3)."""
+        """Proportion of actual positives found."""
         denom = self.tp + self.fn
         return self.tp / denom if denom else 0.0
 
     @property
     def f1(self) -> float:
-        """Harmonic mean of precision and recall (§3.4.4)."""
+        """Harmonic mean of precision and recall."""
         p, r = self.precision, self.recall
         denom = p + r
         return 2 * p * r / denom if denom else 0.0
 
     @property
     def fpr(self) -> float:
-        """False Positive Rate — proportion of negatives misclassified (§3.4.5)."""
+        """False Positive Rate — proportion of negatives misclassified."""
         denom = self.fp + self.tn
         return self.fp / denom if denom else 0.0
 
@@ -88,12 +70,7 @@ def compute_binary_metrics(
 ) -> BinaryMetrics:
     """Compute binary classification metrics from prediction/ground-truth lists.
 
-    Args:
-        predictions: Model predictions (True = positive class).
-        ground_truths: Ground-truth labels (True = positive class).
-
-    Returns:
-        BinaryMetrics with tp/fp/tn/fn counts.
+    Both sequences use True = positive class.
 
     Raises:
         ValueError: If lengths mismatch or lists are empty.
@@ -129,15 +106,10 @@ def hit_rate_at_k(
     relevant_doc_ids: Sequence[str],
     k: int,
 ) -> float:
-    """Compute Hit Rate@k for a single query (§3.4.6).
+    """Compute Hit Rate@k for a single query.
 
-    Args:
-        retrieved_doc_ids: Ordered list of retrieved document IDs.
-        relevant_doc_ids: Ground-truth relevant document IDs.
-        k: Cutoff rank.
-
-    Returns:
-        1.0 if any relevant doc appears in top-k, else 0.0.
+    Returns 1.0 if any relevant doc appears in the top-``k`` of
+    ``retrieved_doc_ids``, else 0.0.
     """
     if not relevant_doc_ids:
         return 1.0
@@ -150,15 +122,9 @@ def reciprocal_rank_at_k(
     relevant_doc_ids: Sequence[str],
     k: int,
 ) -> float:
-    """Compute Reciprocal Rank@k for a single query (§3.4.7).
+    """Compute Reciprocal Rank@k for a single query.
 
-    Args:
-        retrieved_doc_ids: Ordered list of retrieved document IDs.
-        relevant_doc_ids: Ground-truth relevant document IDs.
-        k: Cutoff rank.
-
-    Returns:
-        1/rank of first relevant hit within top-k, or 0.0.
+    Returns 1/rank of the first relevant hit within the top-``k``, or 0.0.
     """
     if not relevant_doc_ids:
         return 1.0
@@ -173,14 +139,7 @@ def reciprocal_rank_at_k(
 class RetrievalMetrics:
     """Aggregated retrieval metrics over all queries.
 
-    Attributes:
-        hit_rate_at_1: Mean Hit Rate@1.
-        hit_rate_at_3: Mean Hit Rate@3.
-        hit_rate_at_5: Mean Hit Rate@5.
-        mrr_at_1: Mean Reciprocal Rank@1.
-        mrr_at_3: Mean Reciprocal Rank@3.
-        mrr_at_5: Mean Reciprocal Rank@5.
-        query_count: Number of queries evaluated.
+    Mean Hit Rate@k and MRR@k for k ∈ {1, 3, 5}, plus ``query_count``.
     """
 
     hit_rate_at_1: float
@@ -197,11 +156,8 @@ def compute_retrieval_metrics(
 ) -> RetrievalMetrics:
     """Compute aggregated Hit Rate@k and MRR@k for k ∈ {1, 3, 5}.
 
-    Args:
-        results_per_query: List of (retrieved_doc_ids, relevant_doc_ids) tuples.
-
-    Returns:
-        RetrievalMetrics with mean scores.
+    ``results_per_query`` is a list of (retrieved_doc_ids, relevant_doc_ids)
+    tuples.
     """
     if not results_per_query:
         return RetrievalMetrics(0, 0, 0, 0, 0, 0, 0)
@@ -238,11 +194,8 @@ def compute_retrieval_metrics(
 class MultiClassMetrics:
     """Per-class precision/recall/F1 + macro averages + Cohen's Kappa.
 
-    Attributes:
-        labels: Ordered list of class labels.
-        per_class: Dict mapping label → (precision, recall, f1).
-        confusion: 2D confusion matrix (rows = true, cols = predicted).
-        cohen_kappa: Cohen's Kappa agreement (§3.4.11).
+    ``per_class`` maps label → (precision, recall, f1); ``confusion`` is a 2D
+    matrix with rows = true, cols = predicted.
     """
 
     labels: List[str]
@@ -289,12 +242,7 @@ def compute_multiclass_metrics(
     """Compute per-class P/R/F1, confusion matrix, and Cohen's Kappa.
 
     Args:
-        predictions: Predicted labels.
-        ground_truths: Ground-truth labels.
         labels: Optional fixed label ordering. If None, sorted unique labels.
-
-    Returns:
-        MultiClassMetrics with all computed values.
 
     Raises:
         ValueError: If lengths mismatch or lists are empty.
@@ -343,16 +291,7 @@ def cohen_kappa(
     ground_truths: Sequence[str],
     labels: Sequence[str],
 ) -> float:
-    """Compute Cohen's Kappa agreement (§3.4.11).
-
-    Args:
-        predictions: Predicted labels.
-        ground_truths: Ground-truth labels.
-        labels: Label set.
-
-    Returns:
-        Cohen's Kappa value in [-1, 1].
-    """
+    """Compute Cohen's Kappa agreement over ``labels``; value in [-1, 1]."""
     n = len(predictions)
     if n == 0:
         return 0.0
@@ -385,18 +324,13 @@ def cohen_kappa(
 def faithfulness(
     sentence_labels: Sequence[str],
 ) -> float:
-    """Compute Faithfulness — proportion of supported sentences (§3.4.9).
+    """Compute Faithfulness — proportion of supported sentences.
 
-    Maps 4-label Subset D annotations to the faithfulness formula:
-    S_supported / S_verifiable, where S_verifiable excludes 'no_source_needed'.
-
-    Args:
-        sentence_labels: NLI/annotation labels per sentence. Expected values:
-            'supported', 'partially_supported', 'not_supported', 'no_source_needed'.
-            Also accepts NLI labels: 'entailment', 'neutral', 'contradiction'.
-
-    Returns:
-        Faithfulness score in [0, 1].
+    Maps 4-label Subset D annotations to S_supported / S_verifiable, where
+    S_verifiable excludes 'no_source_needed'. Accepts the annotation labels
+    ('supported', 'partially_supported', 'not_supported', 'no_source_needed')
+    and the NLI labels ('entailment', 'neutral', 'contradiction'). Returns a
+    score in [0, 1].
     """
     supported_map = {
         "supported": True,
@@ -426,14 +360,11 @@ def abstention_accuracy(
     abstained: Sequence[bool],
     out_of_domain_total: int,
 ) -> float:
-    """Compute Abstention Accuracy (§3.4.10).
+    """Compute Abstention Accuracy.
 
-    Args:
-        abstained: Boolean list — True if the system correctly refused/warned.
-        out_of_domain_total: Total number of out-of-domain queries.
-
-    Returns:
-        Proportion of correctly abstained queries.
+    ``abstained`` marks, per query, whether the system correctly refused/warned;
+    returns the share of the ``out_of_domain_total`` queries correctly
+    abstained.
     """
     if out_of_domain_total == 0:
         return 0.0
@@ -441,17 +372,10 @@ def abstention_accuracy(
 
 
 def token_jaccard_similarity(text_a: str, text_b: str) -> float:
-    """Compute token-level Jaccard similarity between two strings.
+    """Compute token-level Jaccard similarity between two strings, in [0, 1].
 
-    NOTE: not used as Experiment 3's baseline anymore — see
-    token_containment_similarity below. Kept for other callers/tests.
-
-    Args:
-        text_a: First text.
-        text_b: Second text.
-
-    Returns:
-        Jaccard similarity in [0, 1].
+    Not used as Experiment 3's baseline — see ``token_containment_similarity``.
+    Kept for other callers/tests.
     """
     tokens_a = set(text_a.lower().split())
     tokens_b = set(text_b.lower().split())
@@ -469,28 +393,18 @@ def token_containment_similarity(text_a: str, text_b: str) -> float:
     ``|tokens(text_a) ∩ tokens(text_b)| / |tokens(text_a)|`` — unlike
     Jaccard, the denominator is only ``text_a``'s own vocabulary, not the
     union with ``text_b``. This matters for Experiment 3's baseline, where
-    ``text_a`` is a ~20-token sentence and ``text_b`` is a 4,000-22,000
-    token retrieved context: with Jaccard, the union term is dominated by
-    the huge premise almost regardless of overlap, so similarity values
-    for this pairing are compressed into roughly [0, 0.1] — below any
-    reachable threshold, making the Jaccard baseline degenerate into a
-    constant classifier (measured: max Jaccard 0.069-0.114 across Subset D
-    /D-Hard, both below the 0.15 contradiction threshold it used — see
-    writing/overhaul.md M6). Containment instead asks "how much
-    of the sentence's own vocabulary appears in the context", which stays
-    meaningful regardless of the size mismatch (measured mean ~0.88,
-    genuine spread from 0.0 to 1.0 on the same data).
+    ``text_a`` is a ~20-token sentence and ``text_b`` is a 4,000-22,000 token
+    retrieved context: with Jaccard the union term is dominated by the huge
+    premise almost regardless of overlap, so similarity values for this pairing
+    are compressed into roughly [0, 0.1] — below any reachable threshold,
+    degenerating the Jaccard baseline into a constant classifier. Containment
+    instead asks how much of the sentence's own vocabulary appears in the
+    context, which stays meaningful regardless of the size mismatch.
 
-    Args:
-        text_a: The shorter text whose coverage is being measured (e.g.
-            the sentence/hypothesis).
-        text_b: The reference text it's checked against (e.g. the
-            retrieved context/premise).
-
-    Returns:
-        Containment coefficient in [0, 1]. Returns 1.0 if ``text_a`` is
-        empty (vacuously contained), matching token_jaccard_similarity's
-        empty/empty convention.
+    ``text_a`` is the shorter text whose coverage is measured (the
+    sentence/hypothesis); ``text_b`` is the reference it's checked against (the
+    retrieved context/premise). Returns 1.0 if ``text_a`` is empty (vacuously
+    contained), matching ``token_jaccard_similarity``'s empty/empty convention.
     """
     tokens_a = set(text_a.lower().split())
     if not tokens_a:
@@ -506,34 +420,24 @@ def bert_score_f1(
     references: Sequence[str],
     model_type: str = "indobenchmark/indobert-base-p1",
 ) -> Tuple[float, float, float, List[float]]:
-    """Compute BERTScore F1 between candidate and reference texts (§3.4.8).
+    """Compute BERTScore F1 between candidate and reference texts.
 
     Uses the ``bert-score`` Python package. ``model_type`` defaults to an
     IndoBERT checkpoint that isn't in bert-score's built-in ``model2layers``
-    registry (a fixed list of checkpoints it has official per-layer
-    calibration for) — calling ``score()`` with an unlisted model_type and
-    no explicit ``num_layers`` raises a bare ``KeyError`` inside the package
-    rather than falling back to anything, so this looks the layer count up
-    from the model's own config when it's not in that registry.
+    registry (the checkpoints it has official per-layer calibration for) —
+    calling ``score()`` with an unlisted model_type and no explicit
+    ``num_layers`` raises a bare ``KeyError`` inside the package rather than
+    falling back, so this looks the layer count up from the model's own config
+    when it's not in that registry.
 
-    Args:
-        candidates: Generated texts.
-        references: Ground-truth reference texts.
-        model_type: HuggingFace model for contextual embeddings.
-
-    Returns:
-        Tuple of (precision, recall, f1, f1_per_example) — the first three
-        are corpus means; ``f1_per_example`` is the per-candidate F1 score
-        list (same order as ``candidates``), so callers needing a bootstrap
-        CI can resample this array directly instead of re-invoking the
-        model per resample (see exp4_end_to_end/run.py's
-        ``compute_e2e_metrics`` — a 1000-iteration bootstrap that used to
-        call this function per-iteration, reloading the model and rerunning
-        inference 1000 times, took minutes; resampling this array is
-        near-instant). Returns ``(0.0, 0.0, 0.0, [])`` only if the
-        ``bert-score`` package itself isn't installed (``pip install
-        bert-score``) — a zero here otherwise means the environment is
-        missing the dependency, not that the generated text scored zero.
+    Returns (precision, recall, f1, f1_per_example): the first three are corpus
+    means; ``f1_per_example`` is the per-candidate F1 list (same order as
+    ``candidates``), so callers needing a bootstrap CI can resample this array
+    directly instead of re-invoking the model per resample (see
+    exp4_end_to_end/run.py's ``compute_e2e_metrics``). Returns
+    ``(0.0, 0.0, 0.0, [])`` only if the ``bert-score`` package isn't installed
+    (``pip install bert-score``) — a zero here means the environment is missing
+    the dependency, not that the generated text scored zero.
     """
     if len(candidates) != len(references):
         raise ValueError("Length mismatch between candidates and references.")
@@ -548,18 +452,17 @@ def bert_score_f1(
         config = AutoConfig.from_pretrained(model_type)
         num_layers = bs_utils.model2layers.get(model_type, config.num_hidden_layers)
 
-        # indobert-base-p1's tokenizer_config.json (like indo-roberta-indonli
-        # earlier — see nli_client.py) never sets model_max_length, so HF
-        # defaults it to a ~10^30 sentinel. bert-score's own get_tokenizer()
-        # loads the tokenizer fresh via transformers.AutoTokenizer with no
-        # override, and the current transformers Rust tokenizer backend
-        # can't convert that sentinel to a C int when truncation is enabled,
-        # crashing with "OverflowError: int too big to convert". Patch
-        # AutoTokenizer.from_pretrained *inside bert_score.utils's own
-        # namespace* (the only place it's called from) for the duration of
-        # this call, clamping model_max_length to this model's real
-        # position-embedding limit — bert-score exposes no hook to pass a
-        # pre-configured tokenizer in.
+        # indobert-base-p1's tokenizer_config.json never sets model_max_length,
+        # so HF defaults it to a ~10^30 sentinel. bert-score's own
+        # get_tokenizer() loads the tokenizer fresh via
+        # transformers.AutoTokenizer with no override, and the current
+        # transformers Rust tokenizer backend can't convert that sentinel to a C
+        # int when truncation is enabled, crashing with "OverflowError: int too
+        # big to convert". Patch AutoTokenizer.from_pretrained *inside
+        # bert_score.utils's own namespace* (the only place it's called from)
+        # for the duration of this call, clamping model_max_length to this
+        # model's real position-embedding limit — bert-score exposes no hook to
+        # pass a pre-configured tokenizer in.
         max_position = getattr(config, "max_position_embeddings", 512)
         _orig_from_pretrained = AutoTokenizer.from_pretrained
 
@@ -600,11 +503,7 @@ def bert_score_f1(
 class CI:
     """Confidence interval for a point estimate.
 
-    Attributes:
-        point: Point estimate.
-        lower: Lower bound.
-        upper: Upper bound.
-        method: Method used ('bootstrap' or 'wilson').
+    ``method`` is 'bootstrap' or 'wilson'.
     """
 
     point: float
@@ -623,17 +522,8 @@ def bootstrap_ci(
     """Compute bootstrap confidence interval for a statistic.
 
     Resamples with replacement ``n_resamples`` times and computes the
-    statistic on each resample. Returns the percentile interval.
-
-    Args:
-        values: Sample values.
-        n_resamples: Number of bootstrap resamples (default 1000).
-        confidence: Confidence level (default 0.95).
-        statistic: 'mean' or 'median'.
-        seed: Random seed for reproducibility.
-
-    Returns:
-        CI with point estimate and bounds.
+    statistic ('mean' or 'median') on each resample; returns the percentile
+    interval.
     """
     if not values:
         return CI(0.0, 0.0, 0.0)
@@ -674,16 +564,7 @@ def wilson_interval(
     total: int,
     confidence: float = 0.95,
 ) -> CI:
-    """Compute Wilson score interval for a binomial proportion.
-
-    Args:
-        successes: Number of successes.
-        total: Total trials.
-        confidence: Confidence level (default 0.95).
-
-    Returns:
-        CI with point estimate and Wilson bounds.
-    """
+    """Compute Wilson score interval for a binomial proportion."""
     if total == 0:
         return CI(0.0, 0.0, 0.0, method="wilson")
 
@@ -707,14 +588,7 @@ def wilson_interval(
 
 
 def _z_from_alpha(alpha: float) -> float:
-    """Approximate z-score from alpha using common values.
-
-    Args:
-        alpha: Significance level (1 - confidence).
-
-    Returns:
-        Approximate z-score.
-    """
+    """Approximate z-score from alpha (significance level, 1 - confidence)."""
     table = {0.10: 1.6449, 0.05: 1.9600, 0.01: 2.5758, 0.001: 3.2905}
     return table.get(round(alpha, 4), 1.96)
 
@@ -728,15 +602,7 @@ def bootstrap_binary_ci(
 ) -> CI:
     """Bootstrap CI for a binary classification metric.
 
-    Args:
-        predictions: Model predictions.
-        ground_truths: Ground-truth labels.
-        metric: One of 'accuracy', 'precision', 'recall', 'f1', 'fpr'.
-        n_resamples: Number of bootstrap resamples.
-        seed: Random seed.
-
-    Returns:
-        CI for the requested metric.
+    ``metric`` is one of 'accuracy', 'precision', 'recall', 'f1', 'fpr'.
     """
     if not predictions:
         return CI(0.0, 0.0, 0.0)

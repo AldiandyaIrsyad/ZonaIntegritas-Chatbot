@@ -2,20 +2,15 @@
 
 Evaluates all three production IVM relevance/OOD backends
 (``app/thesis/ivm/checkers.py``) against Subset C (boundary relevance
-queries), plus a keyword-overlap baseline — a 4-way comparison instead of
-the earlier 2-way (baseline vs LLM-judge) table.
+queries), plus a keyword-overlap baseline — a 4-way comparison.
 
-Skripsi §3.3.2, Tabel 3.10.
-
-Backends under test (all reused directly from production, not
-reimplemented — see writing/overhaul.md M13):
+Backends under test (all reused directly from production):
     1. ``llm_judge``: LLMJudgeRelevanceChecker wrapping the production
        LLMJudge (app/thesis/ivm/judge.py) — same prompt, same
-       max_tokens=400, same last-word parse the production system uses.
-       The previous version of this script used its own ad hoc prompt,
-       10-token budget, and first-substring parse, which (per §4.6.3 of
-       the thesis) a reasoning model's chain-of-thought preamble defeats —
-       so it was not actually testing the component the system ships.
+       max_tokens=400, same last-word parse the production system uses. A
+       reasoning model's chain-of-thought preamble defeats a first-substring
+       parse or a tiny token budget, so the production budget and last-word
+       parse are load-bearing and must be the ones tested.
     2. ``similarity_threshold``: SimilarityThresholdRelevanceChecker,
        thresholding the top retrieval score — no LLM call.
     3. ``nli_entailment``: NliEntailmentRelevanceChecker, thresholding NLI
@@ -28,8 +23,8 @@ production (``ood_similarity_threshold=0.02``, ``ood_nli_entailment_threshold
 KB's actual score distribution; ``--similarity-threshold``/``--nli-threshold``
 let a calibration sweep be run instead of trusting the placeholder.
 
-Metrics (§3.4): Accuracy, Precision, Recall, F1, FPR + bootstrap CI.
-Reported overall and per subtype.
+Metrics: Accuracy, Precision, Recall, F1, FPR + bootstrap CI, reported overall
+and per subtype.
 
 Usage:
     python -m app.thesis._eval.exp1b_relevance.run \\
@@ -66,8 +61,7 @@ from app.thesis._eval._shared.repeats import repeat_passes, self_agreement
 # `out_of_domain` verdict: the LLM-judge is a hosted model that fails closed
 # (an exception is treated as irrelevant), which is right in production but
 # would let an API outage masquerade as an out-of-domain prediction and inflate
-# FPR here — the same defect corrected for Exp1a's baseline. The deterministic
-# checkers cannot error this way and do not use this.
+# FPR here. The deterministic checkers cannot error this way and do not use this.
 IN_DOMAIN = "in_domain"
 OUT_OF_DOMAIN = "out_of_domain"
 ERRORED = "errored"
@@ -114,12 +108,6 @@ def _title_tokens(title: str) -> List[str]:
     Strips the leading document code / "N Tahun YYYY" prefix and the
     " - "-separated code segment, lowercases, and drops stopwords and short
     tokens.
-
-    Args:
-        title: Raw document title.
-
-    Returns:
-        Content tokens (lowercase, >2 chars, non-stopword).
     """
     cleaned = _DOC_CODE_RE.sub("", title)
     cleaned = _DOC_YEAR_RE.sub("", cleaned)
@@ -144,10 +132,6 @@ def derive_jdih_lexicon(
     deliberately excluded because they reduce to generic legal/administrative
     vocabulary that the out-of-domain near-miss queries also use.
 
-    Args:
-        titles: KB document titles.
-        min_doc_freq: Minimum number of distinct titles a bigram must appear in.
-
     Returns:
         The lexicon (anchors + qualifying bigrams).
     """
@@ -164,11 +148,7 @@ def derive_jdih_lexicon(
 async def fetch_kb_titles(api_url: str) -> List[str]:
     """Fetch all KB document titles from the admin listing.
 
-    Args:
-        api_url: Base URL of the running application.
-
-    Returns:
-        List of document titles (empty on error — the caller falls back to anchors).
+    Returns an empty list on error — the caller falls back to anchors.
     """
     try:
         async with httpx.AsyncClient(base_url=api_url, timeout=30.0) as client:
@@ -183,13 +163,7 @@ async def fetch_kb_titles(api_url: str) -> List[str]:
 
 @dataclass
 class SubtypeResult:
-    """Metrics for a single subtype.
-
-    Attributes:
-        subtype: Subtype name.
-        metrics: Binary classification metrics.
-        accuracy_ci: Bootstrap CI for accuracy.
-    """
+    """Metrics for a single subtype."""
 
     subtype: str
     metrics: BinaryMetrics
@@ -207,8 +181,7 @@ async def retrieve_contexts_detailed(
     Returns per-chunk text and score (not just concatenated text) so all
     three IRelevanceChecker backends can be driven identically to
     production's ``RelevanceService`` — SimilarityThresholdRelevanceChecker
-    needs ``context_scores``, which the earlier version of this function
-    discarded (M20 in writing/overhaul.md).
+    needs ``context_scores``.
 
     ``top_k=8`` matches production's ``RERANK_TOP_K``
     (app/kb/application/search_service.py) — the number of chunks the
@@ -222,12 +195,6 @@ async def retrieve_contexts_detailed(
     which ``/api/kb/search`` cannot provide (``kb/ ⇏ chat/``). The keyword and
     centroid backends do not call this function, so HyDE only moves the three
     retrieval-dependent backends (judge/similarity/nli).
-
-    Args:
-        api_url: Base URL of the running application.
-        query: Search query.
-        top_k: Number of contexts to retrieve.
-        hyde: Route through the HyDE-on chat retrieval endpoint.
 
     Returns:
         Tuple of (chunk texts, chunk scores), same order, same length.
@@ -264,23 +231,16 @@ async def run_llm_judge(
     """Run the production LLMJudgeRelevanceChecker over Subset C, once.
 
     Reuses ``app/thesis/ivm/judge.py``'s ``LLMJudge`` directly (via the
-    production ``LLMJudgeRelevanceChecker`` wrapper) instead of a
-    duplicated ad hoc prompt/parser, so this experiment tests the actual
-    component the system ships — including its ``max_tokens=400`` budget
-    and last-word parse, both load-bearing for reasoning models (§4.6.3;
-    M13 in writing/overhaul.md).
+    production ``LLMJudgeRelevanceChecker`` wrapper) rather than a duplicated
+    ad hoc prompt/parser, so this experiment tests the actual component the
+    system ships — including its ``max_tokens=400`` budget and last-word
+    parse, both load-bearing for reasoning models.
 
     Returns an **outcome per row** rather than a bool: an API failure is
     recorded as ``ERRORED`` and excluded from the metrics downstream, instead
     of being folded into ``out_of_domain``. In production the judge fails
     closed (an exception blocks the query), which is correct there; scoring it
     as a genuine out-of-domain verdict would turn an outage into a measurement.
-
-    Args:
-        checker: Production LLMJudgeRelevanceChecker instance.
-        api_url: Base URL for KB search.
-        dataset: List of Subset C rows.
-        top_k: Number of contexts to retrieve per query.
 
     Returns:
         One outcome per row: ``IN_DOMAIN``, ``OUT_OF_DOMAIN`` or ``ERRORED``.
@@ -312,10 +272,6 @@ def scoreable(
     assigned a class, and counted so the reader knows how much of the set the
     figures rest on.
 
-    Args:
-        outcomes: Per-row outcome constants.
-        dataset: Rows, aligned with ``outcomes``.
-
     Returns:
         (predictions as is_in_domain, ground truths as is_in_domain, errored count).
     """
@@ -346,14 +302,7 @@ async def run_similarity_threshold(
     placeholder that needs empirical calibration, which is exactly what
     this experiment (run with --similarity-threshold swept) provides.
 
-    Args:
-        checker: Production SimilarityThresholdRelevanceChecker instance.
-        api_url: Base URL for KB search.
-        dataset: List of Subset C rows.
-        top_k: Number of contexts to retrieve per query.
-
-    Returns:
-        List of predictions (True = relevant/in-domain).
+    Returns predictions with True = relevant/in-domain.
     """
     predictions: List[bool] = []
     for row in dataset:
@@ -373,16 +322,7 @@ async def run_nli_entailment(
 
     Thresholds the Indonesian NLI model's entailment_score between the
     query (hypothesis) and joined retrieved context (premise), reusing the
-    same EvalNLIClient Exp3/Exp4 use.
-
-    Args:
-        checker: Production NliEntailmentRelevanceChecker instance.
-        api_url: Base URL for KB search.
-        dataset: List of Subset C rows.
-        top_k: Number of contexts to retrieve per query.
-
-    Returns:
-        List of predictions (True = relevant/in-domain).
+    same EvalNLIClient Exp3/Exp4 use. Returns predictions (True = in-domain).
     """
     predictions: List[bool] = []
     for row in dataset:
@@ -403,9 +343,6 @@ async def fetch_corpus_dense_vectors(
     measures against. Read-only: the eval never writes to the store.
 
     Args:
-        host: Qdrant host.
-        port: Qdrant HTTP port.
-        collection: Collection name.
         limit: Safety cap on rows scrolled.
 
     Returns:
@@ -450,7 +387,6 @@ async def run_centroid(
         corpus_vectors: Corpus dense embeddings, shape (n, d).
         query_vectors: Subset C query embeddings, shape (m, d), same order as
             the dataset.
-        threshold: Decision boundary (see ``centroid.is_in_domain``).
         metric: ``cosine`` or ``mahalanobis``.
         shrinkage: Covariance shrinkage for the Mahalanobis precision matrix.
 
@@ -478,14 +414,7 @@ def run_keyword_overlap_baseline(
     terms from ``lexicon`` (substring match). The lexicon is passed in rather
     than referenced as a global so the baseline runs against the reproducible,
     KB-derived set (``derive_jdih_lexicon``) instead of a hand-authored list.
-
-    Args:
-        dataset: List of Subset C rows.
-        lexicon: The keyword lexicon (KB-derived bigrams + institutional anchors).
-        threshold: Minimum number of lexicon matches for relevance.
-
-    Returns:
-        List of predictions (True = relevant/in-domain).
+    Returns predictions (True = relevant/in-domain).
     """
     predictions: List[bool] = []
     for row in dataset:
@@ -499,15 +428,7 @@ def compute_per_subtype(
     predictions: List[bool],
     dataset: List[SubsetCRow],
 ) -> List[SubtypeResult]:
-    """Compute metrics per subtype.
-
-    Args:
-        predictions: Model predictions (True = in-domain).
-        dataset: Subset C rows.
-
-    Returns:
-        List of SubtypeResult, one per subtype.
-    """
+    """Compute metrics per subtype (predictions: True = in-domain)."""
     by_subtype: Dict[str, List[Tuple[bool, bool]]] = defaultdict(list)
     for pred, row in zip(predictions, dataset):
         gt = row.label == "in_domain"
@@ -539,14 +460,12 @@ def compute_by_agreement(
     divided. Reported separately for exactly that reason.
 
     Args:
-        predictions: Model predictions (True = in-domain).
-        dataset: Subset C rows.
         strict_threshold: Generation-time acceptance threshold.
 
     Returns:
         Mapping of "strict"/"contested" -> metrics, with None where the slice
-        is empty (e.g. a dataset generated before ``panel_yes`` existed, whose
-        rows all read as strict).
+        is empty (e.g. a dataset without a ``panel_yes`` column, whose rows all
+        read as strict).
     """
     slices: Dict[str, List[Tuple[bool, bool]]] = {"strict": [], "contested": []}
     for pred, row in zip(predictions, dataset):
@@ -572,10 +491,6 @@ def print_report(
     """Print a formatted evaluation report.
 
     Args:
-        system_name: Name of the system being evaluated.
-        overall: Overall binary metrics.
-        overall_ci: Bootstrap CI for overall accuracy.
-        per_subtype: Per-subtype results.
         by_agreement: Optional strict/contested split from
             ``compute_by_agreement``.
     """
@@ -595,9 +510,8 @@ def print_report(
     if per_subtype:
         # Only Accuracy and FPR (not Precision/Recall/F1, which are
         # mathematically undefined for Subset C's single-class subtypes,
-        # e.g. off_topic is 100% out_of_domain — see M15 in
-        # writing/overhaul.md). n is shown explicitly since some
-        # subtypes are small (near_miss_government is n=6) and a subtype
+        # e.g. off_topic is 100% out_of_domain). n is shown explicitly since
+        # some subtypes are small (near_miss_government is n=6) and a subtype
         # accuracy shouldn't be read as a stable rate at that size.
         print(f"\n  Per Subtype:")
         print(f"  {'Subtype':<25} {'n':>5} {'Acc':>8} {'FPR':>8}")
@@ -623,11 +537,7 @@ def print_report(
 
 
 async def async_main(args: argparse.Namespace) -> None:
-    """Async entry point for Experiment 1b.
-
-    Args:
-        args: Parsed command-line arguments.
-    """
+    """Async entry point for Experiment 1b."""
     try:
         dataset = load_subset_c(args.dataset)
     except FileNotFoundError as exc:
@@ -693,9 +603,9 @@ async def async_main(args: argparse.Namespace) -> None:
         print("\nSkipping LLM-as-Judge (--skip-llm-judge)")
     else:
         try:
-            # session_id is accepted and ignored by the client (C6 measured it
-            # does nothing for caching); the provider is pinned instead so the
-            # judge is not silently rerouted to a different upstream mid-run.
+            # session_id is accepted and ignored by the client (it does nothing
+            # for caching); the provider is pinned instead so the judge is not
+            # silently rerouted to a different upstream mid-run.
             llm_client = get_llm_client_from_env(model=args.judge_model or None)
         except ValueError as e:
             print(f"\nSkipping LLM-as-Judge: {e}", file=sys.stderr)
@@ -776,7 +686,7 @@ async def async_main(args: argparse.Namespace) -> None:
             compute_by_agreement(preds["nli_entailment"], dataset, args.strict_threshold),
         )
 
-    # --- 5. centroid / Mahalanobis (Metode 4, offline, no LLM call) ---
+    # --- 5. centroid / Mahalanobis (offline, no LLM call) ---
     if args.skip_centroid:
         print("\nSkipping centroid (--skip-centroid)")
     else:
@@ -930,7 +840,7 @@ def main() -> None:
     parser.add_argument(
         "--skip-centroid",
         action="store_true",
-        help="Skip the centroid/Mahalanobis backend (Metode 4)",
+        help="Skip the centroid/Mahalanobis backend",
     )
     parser.add_argument(
         "--centroid-metric",

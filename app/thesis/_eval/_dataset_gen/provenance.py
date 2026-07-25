@@ -1,15 +1,8 @@
 """Provenance sidecars for generated evaluation subsets.
 
 Every generated subset gets a ``<output>.meta.json`` recording which panel,
-generator, and settings produced it.
-
-Why this exists: the committed subsets carry no record of how they were built.
-``logs/`` holds no dataset-generation logs, and the CSVs have no metadata
-columns, so the panel that validated ``data/subset_a.csv`` cannot be
-reconstructed from the repository — it can only be asserted from memory. That
-matters because the panel has changed more than once (see the swap history in
-``config.py``), which makes "all subsets were validated by the same ≥4/5 panel"
-an unverifiable claim in the thesis rather than a checkable one.
+generator, and settings produced it, so "all subsets were validated by the
+same ≥4/5 panel" is a checkable claim rather than one asserted from memory.
 
 The sidecar is written next to the CSV and is cheap enough to produce on every
 run, including aborted ones.
@@ -31,11 +24,7 @@ logger = structlog.get_logger(__name__)
 
 
 def _git_sha() -> Optional[str]:
-    """Return the current git commit SHA, or None outside a repo.
-
-    Returns:
-        The short SHA, or None if git is unavailable or this is not a checkout.
-    """
+    """Return the current git commit SHA, or None outside a repo."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -58,18 +47,8 @@ def write_provenance(
 ) -> Path:
     """Write a ``.meta.json`` sidecar describing how a subset was generated.
 
-    Args:
-        output_path: Path of the subset CSV this describes. The sidecar is
-            written alongside it with the ``.csv`` suffix replaced.
-        subset: Subset identifier, e.g. "a", "b", "c", "d", "d_hard".
-        settings: The settings the run actually used — recorded verbatim, so a
-            sidecar reflects the live ``.env`` rather than the code defaults.
-        row_count: Number of rows written to the CSV.
-        extra: Per-builder fields (sampling seed, per-document caps, source
-            subsets, KB document count, ...).
-
-    Returns:
-        Path to the written sidecar.
+    ``settings`` is recorded verbatim, so a sidecar reflects the live ``.env``
+    rather than the code defaults.
     """
     meta: Dict[str, Any] = {
         "subset": subset,

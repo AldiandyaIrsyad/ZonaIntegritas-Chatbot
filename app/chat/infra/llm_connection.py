@@ -1,15 +1,10 @@
 """LLM gateway connection adapter.
 
-Infra adapter for the chat bounded context. Wraps the OpenAI Python SDK's
-async client to talk to any OpenAI-compatible backend (vLLM, Ollama,
-OpenRouter, etc.).
-
-Fulfills:
-    - ``app/chat/domain/interfaces.py::ILLMConnection`` (chat generation)
-    - ``app/thesis/ivm/interfaces.py::ILLMJudgeConnection`` (judge LLM —
-      the same adapter satisfies this narrower port)
-
-Wired in: ``app/chat/dependency.py::get_llm_connection``.
+Wraps the OpenAI Python SDK's async client for any OpenAI-compatible backend
+(vLLM, Ollama, OpenRouter, etc.). Satisfies both
+``app/chat/domain/interfaces.py::ILLMConnection`` (chat generation) and the
+narrower ``app/thesis/ivm/interfaces.py::ILLMJudgeConnection`` (judge LLM).
+Wired in ``app/chat/dependency.py::get_llm_connection``.
 """
 
 from typing import AsyncIterator, Optional, List, Dict
@@ -23,10 +18,7 @@ logger = structlog.get_logger(__name__)
 
 
 class LLMConnection(ILLMConnection):
-    """Async streaming adapter for an OpenAI-compatible LLM backend.
-
-    Fulfills: ``app/chat/domain/interfaces.py::ILLMConnection``.
-    """
+    """Async streaming adapter for an OpenAI-compatible LLM backend."""
 
     def __init__(
         self,
@@ -34,16 +26,9 @@ class LLMConnection(ILLMConnection):
         api_key: Optional[SecretStr] = None,
         default_headers: Optional[Dict[str, str]] = None,
     ) -> None:
-        """Configure the underlying ``AsyncOpenAI`` client.
-
-        Args:
-            base_url: Base URL of the OpenAI-compatible backend. ``None``
-                falls back to the OpenAI SDK's own default.
-            api_key: API key/secret for the backend. If omitted, a dummy
-                placeholder token is used (fine for backends like Ollama
-                that don't check it).
-            default_headers: Extra HTTP headers sent with every request
-                (e.g. an OpenRouter attribution header).
+        """Configure the underlying ``AsyncOpenAI`` client. ``base_url=None``
+        uses the SDK default; an omitted ``api_key`` falls back to a dummy
+        token (fine for backends like Ollama that don't check it).
         """
         resolved_key = api_key.get_secret_value() if api_key else "ollama-dummy-token"
         self._client = AsyncOpenAI(
@@ -61,23 +46,12 @@ class LLMConnection(ILLMConnection):
     def _suppress_thinking(model: str, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
         """Disable Qwen3's thinking mode via the ``/no_think`` soft switch.
 
-        OpenRouter's ``reasoning={"enabled": False}`` is silently ignored for
-        Qwen3 on the served providers (measured: ``content`` returns empty and
-        the whole answer arrives in the ``reasoning`` field), so the
-        content-empty fallback in ``stream_chat``/``generate`` would stream a
-        1000+ char English chain-of-thought preamble as the answer — the
-        contamination Exp4 measured at 63–93%. Qwen3's documented soft switch,
-        the literal ``/no_think`` token appended to the prompt, is what actually
-        disables it. Scoped to ``qwen`` models so a stray control token never
-        reaches a backend that would echo it verbatim.
-
-        Args:
-            model: The target model id.
-            messages: The chat messages about to be sent.
-
-        Returns:
-            The messages, with ``/no_think`` appended to the last user turn for
-            Qwen models; unchanged otherwise.
+        ``reasoning={"enabled": False}`` is ignored for Qwen3 on the served
+        providers (``content`` comes back empty, the answer lands in
+        ``reasoning``), so the content-empty fallback would stream a long
+        English chain-of-thought as the answer. Appending the literal
+        ``/no_think`` token is what actually disables it. Scoped to ``qwen``
+        models so a control token never reaches a backend that would echo it.
         """
         if "qwen" not in model.lower():
             return messages
@@ -99,19 +73,10 @@ class LLMConnection(ILLMConnection):
     ) -> AsyncIterator[str]:
         """Stream a chat completion, handling reasoning models.
 
-        Reasoning models (e.g. Gemini 2.5 Flash, GLM 5.2) may return
-        `content: null` with the actual text in a `reasoning` field.
-        We disable reasoning via `extra_body` when possible and fall
-        back to the `reasoning` delta when `content` is absent.
-
-        Args:
-            model: Model identifier.
-            messages: Chat messages.
-            max_tokens: Maximum tokens for the response.
-            temperature: Sampling temperature.
-
-        Yields:
-            Response text chunks.
+        Reasoning models may return ``content: null`` with the text in a
+        ``reasoning`` field; reasoning is disabled via ``extra_body`` where
+        possible, with a fallback to the ``reasoning`` delta when ``content``
+        is absent. Yields response text chunks.
         """
         logger.debug("chat.llm.stream_start", model=model, message_count=len(messages), max_tokens=max_tokens, temperature=temperature)
         messages = self._suppress_thinking(model, messages)
@@ -156,20 +121,9 @@ class LLMConnection(ILLMConnection):
         max_tokens: int,
         temperature: float = 0.0,
     ) -> str:
-        """Generate a complete (non-streaming) chat completion.
-
-        Used for tasks requiring the full response before proceeding
-        (e.g. HyDE hypothetical document generation). Uses ``stream=False``
-        on the same AsyncOpenAI client.
-
-        Args:
-            model: Model identifier.
-            messages: Chat messages.
-            max_tokens: Maximum tokens for the response.
-            temperature: Sampling temperature.
-
-        Returns:
-            The full response text.
+        """Generate a complete (non-streaming) chat completion and return the
+        full text. For tasks needing the whole response before proceeding (e.g.
+        HyDE generation); uses ``stream=False`` on the same client.
         """
         logger.debug(
             "chat.llm.generate_start",

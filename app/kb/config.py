@@ -50,11 +50,11 @@ class KBStorageSettings(BaseSettings):
 @lru_cache
 def get_storage_settings() -> KBStorageSettings: return KBStorageSettings()
 
-# KB only cares about Infinity's embedding and reranking features
+# KB only uses Infinity's reranking (embeddings run in-process via BGEM3).
 class KBInfinitySettings(BaseSettings):
-    """Infinity server settings as seen from the KB context — only the
-    reranking model/toggle is actually used here (embeddings run in-process
-    via ``BGEM3Embeddings`` instead, see that module's docstring)."""
+    """Infinity server settings for the KB context — only the reranking
+    model/toggle is used here; embeddings run in-process via ``BGEM3Embeddings``.
+    """
 
     base_url: str = Field(default="http://127.0.0.1:7997")
     embedding_model: str = Field(default="BAAI/bge-m3")
@@ -69,20 +69,17 @@ def get_infinity_settings() -> KBInfinitySettings: return KBInfinitySettings()
 class BGEM3Settings(BaseSettings):
     """Configuration for the in-process BGE-M3 dense+sparse embedder.
 
-    Replaces Infinity for embeddings specifically — Infinity's own model
-    list documents BAAI/bge-m3 as dense-only ("no sparse"), so this uses
-    BAAI's own FlagEmbedding.BGEM3FlagModel instead, which actually computes
-    sparse (lexical-weight) vectors alongside dense ones.
+    Used instead of Infinity for embeddings because Infinity serves
+    BAAI/bge-m3 as dense-only; BAAI's own FlagEmbedding.BGEM3FlagModel also
+    computes the sparse (lexical-weight) vectors hybrid search needs.
     """
 
     model: str = Field(default="BAAI/bge-m3")
     device: str = Field(
         default="cuda",
-        description="'cuda' or 'cpu'. Fall back to 'cpu' if the GPU doesn't "
-        "have enough free VRAM alongside Infinity's other loaded models — "
-        "ingestion throughput is bottlenecked by external API calls "
-        "(Unstructured Cloud parsing, VLM), not embedding, so CPU is a "
-        "reasonable fallback.",
+        description="'cuda' or 'cpu'. Fall back to 'cpu' if the GPU lacks free "
+        "VRAM alongside Infinity's models — ingestion is bottlenecked by "
+        "external API calls (Unstructured parsing, VLM), not embedding.",
     )
     use_fp16: bool = Field(default=True)
     batch_size: int = Field(default=12)
@@ -95,15 +92,11 @@ def get_bge_m3_settings() -> BGEM3Settings: return BGEM3Settings()
 class VLMSettings(BaseSettings):
     """Configuration for Vision-Language Model enrichment of visual elements.
 
-    Supports three modes:
-    - ``cloud``: Use a cloud VLM API (OpenRouter: Gemini, GPT-4o).
-    - ``local``: Use a local VLM via Ollama (LLaVA, Qwen-VL).
-    - ``fallback``: No VLM — use PyMuPDF drawing analysis for text-only
-      heuristic descriptions of figures.
-
-    When VLM enrichment fails or is disabled, figure elements are either
-    described heuristically (fallback mode) or skipped (text remains empty
-    and the element is filtered out by the chunker).
+    Three modes: ``cloud`` (OpenRouter: Gemini, GPT-4o), ``local`` (Ollama:
+    LLaVA, Qwen-VL), or ``fallback`` (no VLM — PyMuPDF drawing analysis for
+    text-only heuristic figure descriptions). When enrichment fails or is
+    disabled, figures are described heuristically (fallback) or skipped (empty
+    text, filtered out by the chunker).
     """
 
     mode: str = Field(

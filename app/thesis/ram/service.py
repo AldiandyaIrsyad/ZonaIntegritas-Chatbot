@@ -1,13 +1,9 @@
-"""
-RAM Service — Response Assessment Module
+"""RAM Service — Response Assessment Module.
 
 Validates LLM sentences against KB RAG context using NLI.
 
 Usage:
-    # Build premise once per request (expensive concatenation done once)
-    premise = ram_service.build_premise(contexts)
-
-    # Call per sentence inside the streaming generator
+    premise = ram_service.build_premise(contexts)  # once per request
     result = await ram_service.assess_sentence(sentence, premise, contexts)
     if result.label == "contradiction":
         sentence += " *(contradictive)*"
@@ -28,42 +24,30 @@ LABEL_NEUTRAL = "neutral"
 LABEL_ENTAILMENT = "entailment"
 LABEL_CONTRADICTION = "contradiction"
 
-# How many contexts to include in the premise (prevents exceeding NLI max_length).
-# Matches app.kb.application.search_service.RERANK_TOP_K: search_service
-# already cross-encoder-reranks candidates down to its top 8 before any
-# sibling/cross-ref hydration is appended, so this constant should cover the
-# full query-relevant primary set (not truncate within it), while still
-# excluding the lower-relevance sibling/cross-ref tail by default.
+# Contexts included in the premise (bounds NLI input length). Matches
+# search_service.RERANK_TOP_K: candidates are already reranked to their top 8
+# before sibling/cross-ref hydration, so this covers the full query-relevant
+# primary set while excluding the lower-relevance tail.
 MAX_PREMISE_CONTEXTS = 8
 
 # Max length of the evidence snippet surfaced in citation tooltips.
 EVIDENCE_SNIPPET_MAX_CHARS = 140
 
 # Reranked candidate windows tried per sentence before falling back to the
-# first candidate's (possibly neutral) verdict. Bounded at 2 rather than a
-# larger N: assess_sentence runs synchronously inline in the chat streaming
-# loop (awaited before the next token chunk is yielded), so each extra NLI
-# call adds directly to perceived per-sentence latency. In the common case
-# (top-1 window is a confident match) only 1 NLI call is made; the 2nd is
-# only spent when the top-1 result is neutral or low-confidence.
+# first candidate's verdict. Bounded at 2 because assess_sentence runs inline
+# in the streaming loop, so each extra NLI call adds per-sentence latency; the
+# 2nd window is only spent when the top-1 result is neutral/low-confidence.
 NLI_CANDIDATE_WINDOWS = 2
 
-# Minimum dominant-label score for a candidate window's NLI result to
-# short-circuit the search (skip trying further candidate windows). Only
-# gates ENTAILMENT short-circuiting — see NLI_CONTRADICTION_THRESHOLD for
-# the (higher) bar CONTRADICTION must clear before it can be surfaced.
+# Minimum dominant-label score to short-circuit the window search. Gates only
+# ENTAILMENT — CONTRADICTION must clear the higher NLI_CONTRADICTION_THRESHOLD.
 NLI_CONFIDENCE_THRESHOLD = 0.5
 
-# Minimum contradiction_score for a candidate window's NLI result to be
-# surfaced as a "Contradiction" citation badge. Set higher than
-# NLI_CONFIDENCE_THRESHOLD deliberately: a false "Contradiction" badge shown
-# to the end user is far more costly to trust than a missed "Supported"
-# badge, and general-purpose NLI models (e.g. indo-roberta-indonli) are
-# prone to flagging negation/conditional lexical cues as contradictions
-# even when the two statements are logically consistent (e.g. an "only
-# responsible if paid" clause vs. a "not responsible if unpaid" clause of
-# the same legal article — complementary framings of one rule, not a
-# contradiction). Recalibrate against real logged scores once available.
+# Minimum contradiction_score to surface a "Contradiction" badge. Deliberately
+# higher than NLI_CONFIDENCE_THRESHOLD: a false "Contradiction" costs more
+# trust than a missed "Supported", and general NLI models flag negation/
+# conditional cues as contradictions even for logically consistent statements
+# (e.g. complementary "if paid"/"if unpaid" clauses of one article).
 NLI_CONTRADICTION_THRESHOLD = 0.7
 
 
@@ -81,35 +65,22 @@ def _sanitize_snippet(text: str, max_len: int = EVIDENCE_SNIPPET_MAX_CHARS) -> s
 
 
 class RAMService:
-    """
-    Response Assessment Module Service.
+    """Response Assessment Module service.
 
     Builds a premise from retrieved KB contexts and validates LLM-generated
-    sentences against it via NLI. Designed to be called per-sentence inside
-    the streaming generator in ChatService.
+    sentences against it via NLI, called per-sentence inside ChatService's
+    streaming generator. When disabled (``enabled=False``), ``assess_sentence``
+    returns a neutral result immediately (zero model calls).
 
-    When NLI is disabled (nli_enabled=False), assess_sentence returns a
-    neutral result immediately — zero overhead, zero model calls.
-
-    Depends only on the ``INLIModel``/``IRerankerModel`` Protocols, so it
-    stays part of the infra-free ``thesis`` research core (see
-    ``docs/02-arsitektur.md`` §2.2). Wired in
+    Depends only on the ``INLIModel``/``IRerankerModel`` Protocols, keeping it
+    in the infra-free ``thesis`` research core. Wired in
     ``app/chat/dependency.py::get_ram_service``.
-
-    Args:
-        nli_model (INLIModel): The NLI inference client.
-        reranker_model (IRerankerModel): The reranker client for exact premise extraction.
-        enabled (bool, optional): Whether NLI assessment is enabled. Defaults to True.
     """
 
     def __init__(self, nli_model: INLIModel, reranker_model: IRerankerModel, enabled: bool = True):
-        """Args:
-            nli_model: NLI backend used to check sentence-vs-context entailment.
-            reranker_model: Reranker used to find the exact candidate window
-                within the top contexts before running NLI (see
-                ``assess_sentence``).
-            enabled: When False, ``assess_sentence`` short-circuits to a
-                neutral result with zero model calls.
+        """``nli_model`` checks sentence-vs-context entailment; ``reranker_model``
+        finds the exact candidate window within the top contexts before NLI.
+        ``enabled=False`` short-circuits ``assess_sentence`` to a neutral result.
         """
         self.nli_model = nli_model
         self.reranker_model = reranker_model
@@ -148,16 +119,11 @@ class RAMService:
         premise: str,
         contexts: List[RetrievedContext],
     ) -> NLIResult:
-        """Run NLI on a single sentence (proposition) against the most relevant KB premise chunk.
-        Uses a reranker with sliding windows to find the exact sub-chunk first, then runs NLI against it.
-
-        Args:
-            sentence (str): A complete sentence from the LLM's response (hypothesis).
-            premise (str): The concatenated KB context string (legacy, not used for NLI).
-            contexts (List[RetrievedContext]): The retrieved contexts to reverse map against.
-
-        Returns:
-            NLIResult: NLIResult with canonical label and confidence scores.
+        """Run NLI on one sentence (hypothesis) against the most relevant KB
+        chunk. A reranker with sliding windows first locates the exact
+        sub-chunk, then NLI runs against it. ``premise`` is a legacy argument
+        (not used for NLI). Returns an ``NLIResult`` with canonical label and
+        confidence scores.
         """
         if not self.enabled:
             return NLIResult(
@@ -182,13 +148,12 @@ class RAMService:
             
             for ctx in top_contexts:
                 if ctx.content_type == "table":
-                    # Row-group windows that repeat the header + separator
-                    # row in every window — prose sentence-splitting would
-                    # treat each row as its own "sentence" and lose the
-                    # header after the first window (see split_table_windows
-                    # docstring). Falls through to the prose path below only
-                    # if ctx.text isn't a parseable Markdown table (e.g. raw
-                    # HTML left over from a failed ingest-time conversion).
+                    # Row-group windows repeat the header + separator in every
+                    # window; prose splitting would treat each row as a
+                    # "sentence" and drop the header after the first window.
+                    # Falls through to the prose path only if ctx.text isn't a
+                    # parseable Markdown table (e.g. raw HTML from a failed
+                    # ingest-time conversion).
                     table_windows = split_table_windows(ctx.text, rows_per_window=3, row_step=2)
                     if table_windows:
                         for window in table_windows:
@@ -197,14 +162,13 @@ class RAMService:
                                 window_to_ctx.append(ctx)
                         continue
 
-                # Split into sentence-like units for windowing (guards
-                # against markdown list markers being mistaken for
-                # sentence ends; see text_utils.split_sentences).
+                # Sentence-like units for windowing (split_sentences guards
+                # against markdown list markers being read as sentence ends).
                 sentences = [
                     s if s.endswith((".", "?", "!")) else s + "."
                     for s in split_sentences(ctx.text)
                 ]
-                # Group into windows of 3 sentences with 1 sentence overlap
+                # Windows of 3 sentences with 1-sentence overlap.
                 if not sentences:
                     windows.append(ctx.text)
                     window_to_ctx.append(ctx)
@@ -214,17 +178,16 @@ class RAMService:
                 step = 2
                 for i in range(0, max(1, len(sentences)), step):
                     window = " ".join(sentences[i:i + window_size])
-                    if len(window) > 20: # skip tiny fragments
+                    if len(window) > 20:  # skip tiny fragments
                         windows.append(window)
                         window_to_ctx.append(ctx)
             
             if not windows:
                 return NLIResult(label=LABEL_NEUTRAL, entailment_score=0.5, contradiction_score=0.0)
 
-            # Rerank windows against the hypothesis sentence — take the top-N
-            # candidates rather than just the single best match, since the
-            # reranker's #1 pick isn't always the window the NLI model finds
-            # entailing (see NLI_CANDIDATE_WINDOWS).
+            # Rerank windows against the hypothesis and take the top-N
+            # candidates, not just the best match: the reranker's #1 isn't
+            # always the window NLI finds entailing (see NLI_CANDIDATE_WINDOWS).
             rerank_results = await self.reranker_model.rerank(
                 query=sentence,
                 documents=windows,
@@ -238,15 +201,13 @@ class RAMService:
         if not candidate_idxs:
             return NLIResult(label=LABEL_NEUTRAL, entailment_score=0.5, contradiction_score=0.0)
 
-        # Try each candidate window in rerank order. A confident ENTAILMENT
-        # short-circuits immediately (a single supporting window is enough).
-        # A confident CONTRADICTION does NOT short-circuit — it's held while
-        # the remaining candidates are checked, so a spurious contradiction
-        # from one window (e.g. an exception clause) can't pre-empt a valid
-        # entailment from another window (e.g. the general rule it qualifies)
-        # that simply reranked lower. If no candidate entails and no held
-        # contradiction clears NLI_CONTRADICTION_THRESHOLD, falls back to the
-        # top-ranked candidate's raw result rather than dropping the citation.
+        # Try each candidate in rerank order. A confident ENTAILMENT
+        # short-circuits (one supporting window is enough). A confident
+        # CONTRADICTION is held, not short-circuited, so a spurious
+        # contradiction from one window (e.g. an exception clause) can't
+        # pre-empt a valid entailment from another (e.g. the rule it qualifies)
+        # that reranked lower. If nothing entails and no held contradiction
+        # clears the threshold, fall back to the top candidate's raw result.
         fallback: Optional[tuple] = None
         best_contradiction: Optional[tuple] = None
         for idx in candidate_idxs:
@@ -291,19 +252,17 @@ class RAMService:
             else:
                 return NLIResult(label=LABEL_NEUTRAL, entailment_score=0.5, contradiction_score=0.0)
 
-        # The fallback branch above can carry through a raw CONTRADICTION
-        # label that never cleared NLI_CONTRADICTION_THRESHOLD (only
-        # best_contradiction is pre-gated by it) — _format_citation renders
-        # whatever label reaches it without re-checking the score, so
-        # downgrade a sub-threshold contradiction to neutral here rather
-        # than surfacing a low-confidence "Contradiction" badge to the user.
+        # The fallback can carry a raw CONTRADICTION that never cleared the
+        # threshold (only best_contradiction is pre-gated). _format_citation
+        # renders whatever label reaches it, so downgrade a sub-threshold
+        # contradiction to neutral rather than surfacing a low-confidence badge.
         if (
             chosen_result.label == LABEL_CONTRADICTION
             and chosen_result.contradiction_score < NLI_CONTRADICTION_THRESHOLD
         ):
             chosen_result = dataclasses.replace(chosen_result, label=LABEL_NEUTRAL)
 
-        # NLIResult is frozen, use dataclasses.replace to attach metadata
+        # NLIResult is frozen; use dataclasses.replace to attach metadata.
         return dataclasses.replace(
             chosen_result,
             source_title=chosen_ctx.source_title,

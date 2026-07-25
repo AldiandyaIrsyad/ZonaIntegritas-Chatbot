@@ -1,11 +1,9 @@
 """Postgres repository adapter for the chat bounded context.
 
-Infra adapter implementing the chat domain's persistence port. Persists
-:class:`Session` and :class:`Message` ORM entities via the shared
-async SQLAlchemy session from ``app/shared/db.py``.
-
-Fulfills: ``app/chat/domain/interfaces.py::IChatRepository``.
-Wired in: ``app/chat/dependency.py::get_chat_repo``.
+Persists :class:`Session` and :class:`Message` ORM entities via the shared
+async SQLAlchemy session from ``app/shared/db.py``. Fulfills
+``app/chat/domain/interfaces.py::IChatRepository``; wired in
+``app/chat/dependency.py::get_chat_repo``.
 """
 
 from typing import Any, Dict, List, Optional
@@ -19,18 +17,11 @@ from app.chat.domain.interfaces import IChatRepository
 
 
 class PostgresChatRepository(IChatRepository):
-    """Database operations for the chat domain.
+    """Database operations for the chat domain."""
 
-    Fulfills: ``app/chat/domain/interfaces.py::IChatRepository``.
-    """
-    
     def __init__(self, db: AsyncSession):
-        """Wrap a request-scoped async SQLAlchemy session.
-
-        Args:
-            db: The shared async session (see ``app/shared/db.py``);
-                lifecycle (commit/rollback) is managed by the caller's
-                request scope, not by this repository.
+        """Wrap a request-scoped async session. Commit/rollback is managed by
+        the caller's request scope, not here.
         """
         self.db = db
 

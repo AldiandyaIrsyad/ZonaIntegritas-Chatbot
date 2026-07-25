@@ -1,13 +1,10 @@
 """HyDE (Hypothetical Document Embeddings) query expander.
 
-This adapter implements :class:`app.kb.domain.interfaces.IQueryExpander`
-using an :class:`app.chat.domain.interfaces.ILLMConnection` to generate a
-hypothetical answer document for a given user query. The generated document
-is then embedded (instead of the raw query) to improve retrieval recall.
-
-Dependency rule compliance:
-    - ``chat/infra`` may import ``chat/domain`` and ``kb/domain`` (Protocols).
-    - It does NOT import ``kb/application`` or ``kb/infra``.
+Implements :class:`app.kb.domain.interfaces.IQueryExpander` using an
+:class:`app.chat.domain.interfaces.ILLMConnection` to generate a hypothetical
+answer document for a query, which is then embedded (instead of the raw query)
+to improve retrieval recall. Imports only ``chat/domain`` and ``kb/domain``
+Protocols, never ``kb/application`` or ``kb/infra``.
 """
 
 import asyncio
@@ -21,9 +18,9 @@ from app.kb.domain.interfaces import IKBRepository, IQueryExpander
 
 logger = structlog.get_logger(__name__)
 
-# Module-level (not per-instance) TTL cache for the KB grounding context —
+# Module-level (not per-instance) TTL cache for the KB grounding context:
 # ``get_query_expander`` builds a fresh HyDEExpander per request, so an
-# instance-level cache would never survive between requests.
+# instance-level cache wouldn't survive between requests.
 _kb_context_cache: Dict[str, object] = {"text": "", "expires_at": 0.0}
 _kb_context_lock = asyncio.Lock()
 
@@ -31,10 +28,9 @@ _kb_context_lock = asyncio.Lock()
 class HyDEExpander(IQueryExpander):
     """Generates a hypothetical document for HyDE retrieval.
 
-    Uses an LLM to produce a short answer-like paragraph for the user's
-    query. The paragraph is semantically closer to the knowledge-base
-    documents than the question phrasing, so embedding it yields better
-    vector search recall.
+    Uses an LLM to produce a short answer-like paragraph for the query; being
+    semantically closer to the KB documents than the question phrasing,
+    embedding it yields better vector recall.
     """
 
     def __init__(
@@ -51,23 +47,11 @@ class HyDEExpander(IQueryExpander):
     ) -> None:
         """Initialize the HyDE expander.
 
-        Args:
-            llm: An LLM connection supporting non-streaming ``generate()``.
-            model: Model identifier to use for generation.
-            prompt_template: Prompt template containing ``{query}`` placeholder.
-            system_prompt: System message setting the domain/register the
-                generated hypothetical document should imitate. May contain
-                a ``{kb_context}`` placeholder (see ``kb_repo``).
-            max_tokens: Max tokens for the hypothetical document.
-            temperature: Sampling temperature (0.0 = deterministic).
-            kb_repo: Optional KB repository used to ground the prompt with
-                the actual document titles/descriptions in this KB (fills
-                the ``{kb_context}`` placeholder). If ``None``, the
-                placeholder resolves to an empty string.
-            context_max_docs: Max number of active documents to list in the
-                grounding context.
-            context_refresh_seconds: TTL for the module-level grounding
-                context cache.
+        ``prompt_template`` must contain a ``{query}`` placeholder;
+        ``system_prompt`` may contain ``{kb_context}``, filled from ``kb_repo``
+        (active document titles/descriptions) when provided, else empty.
+        ``context_refresh_seconds`` is the TTL of the module-level grounding
+        cache.
         """
         self._llm = llm
         self._model = model
@@ -88,8 +72,8 @@ class HyDEExpander(IQueryExpander):
             return _kb_context_cache["text"]
 
         async with _kb_context_lock:
-            # Re-check after acquiring the lock — another request may have
-            # already refreshed it while we were waiting.
+            # Re-check after acquiring the lock; another request may have
+            # refreshed it while we waited.
             if time.monotonic() < _kb_context_cache["expires_at"]:
                 return _kb_context_cache["text"]
 
@@ -106,13 +90,8 @@ class HyDEExpander(IQueryExpander):
             return text
 
     async def expand(self, query: str) -> str:
-        """Generate a hypothetical answer document for the query.
-
-        Args:
-            query: The user's raw search query.
-
-        Returns:
-            A hypothetical answer paragraph to be embedded for retrieval.
+        """Generate a hypothetical answer paragraph for the query, to be
+        embedded for retrieval.
         """
         if not query.strip():
             return ""

@@ -1,24 +1,21 @@
 """Per-page classification for the hybrid PDF processing pipeline.
 
-Each page is independently classified into a :class:`PageType` based on
-the ratio of visual-garbage elements detected by the Unstructured parser.
-This enables the :class:`IngestWorker` to route visual-heavy pages (SOP
-flowcharts, diagrams) to VLM full-page extraction while keeping
-text-rich and table-rich pages in the standard Unstructured pipeline.
+Each page is independently classified into a :class:`PageType` from the ratio
+of visual-garbage elements the parser detected, so :class:`IngestWorker` can
+route visual-heavy pages (SOP flowcharts, diagrams) to VLM full-page extraction
+while keeping text-rich and table-rich pages in the standard pipeline.
 
-Design rationale:
-- Classification is page-scoped, not document-scoped, so mixed documents
-  (e.g. SOPs with formal-text cover pages AND flowchart body pages) are
-  handled correctly without any per-document label.
-- ``VISUAL`` classification replaces the Unstructured output entirely.
-  ``TABLE_RICH`` only transforms table elements in-place. A page can be
-  both ``TABLE_RICH`` and ``TEXT_RICH`` simultaneously.
-- Garbage detection uses only "text length ≤ 3 chars" — simpler and more
-  robust than pattern-matching on repeated characters, which has too many
-  edge cases in OCR output.
+Design:
+- Page-scoped, not document-scoped, so mixed documents (formal-text cover pages
+  plus flowchart body pages) are handled without any per-document label.
+- ``VISUAL`` replaces the parser output entirely; ``TABLE_RICH`` only
+  transforms table elements in place. A page can be both ``TABLE_RICH`` and
+  ``TEXT_RICH``.
+- Garbage detection keys on text length and alnum density — simpler and more
+  robust than pattern-matching repeated characters, which has too many OCR
+  edge cases.
 
-This module is pure Python (no infra imports), compliant with the
-``thesis/`` purity rule.
+Pure Python (no infra imports), per the ``thesis/`` purity rule.
 """
 
 from __future__ import annotations
@@ -33,16 +30,12 @@ from app.thesis.chunking.models import ContentType, ParsedElement
 class PageType(str, Enum):
     """The dominant structural type of a PDF page.
 
-    Attributes:
-        TEXT_RICH: Page is primarily narrative text, titles, list items.
-            Unstructured output is used as-is.
-        TABLE_RICH: Page contains one or more well-formed HTML tables.
-            Tables are converted to Markdown; other elements kept as-is.
-        VISUAL: Page is dominated by images/figures with garbage or empty
-            OCR output (flowcharts, SOP diagrams, scanned images).
-            Unstructured output is discarded; VLM renders the full page.
-        MIXED: Page has both substantive text and visual elements but does
-            not qualify as VISUAL. Treated as TEXT_RICH with table conversion.
+    TEXT_RICH: primarily narrative text/titles/list items (parser output used
+    as-is). TABLE_RICH: has well-formed HTML tables (converted to Markdown;
+    other elements kept). VISUAL: dominated by images/figures with garbage or
+    empty OCR (flowcharts, diagrams, scans) — parser output discarded, VLM
+    renders the full page. MIXED: substantive text plus visual elements but not
+    VISUAL — treated as TEXT_RICH with table conversion.
     """
 
     TEXT_RICH = "text_rich"
@@ -53,18 +46,10 @@ class PageType(str, Enum):
 
 @dataclass(frozen=True)
 class PageClassification:
-    """Classification result for a single PDF page.
-
-    Attributes:
-        page_number: 1-indexed page number.
-        page_type: The dominant structural type of this page.
-        element_count: Total number of Unstructured elements on this page.
-        image_count: Number of Image/Figure elements on this page.
-        table_count: Number of Table elements on this page.
-        text_element_count: Number of text-type elements (Title, Narrative, etc.).
-        garbage_image_count: Number of image elements with empty or ≤3-char text.
-        image_ratio: image_count / element_count (0.0–1.0).
-        garbage_ratio: garbage_image_count / image_count (0.0–1.0), 0 if no images.
+    """Classification result for a single PDF page: its 1-indexed number,
+    dominant :class:`PageType`, element/image/table/text counts, the count of
+    garbage (empty/short-text) image elements, and the derived ``image_ratio``
+    (image/element) and ``garbage_ratio`` (garbage/image, 0 if no images).
     """
 
     page_number: int
@@ -91,26 +76,24 @@ _VISUAL_ELEMENT_TYPES = frozenset({"Image", "Figure"})
 # Element types that count as "table" for classification
 _TABLE_ELEMENT_TYPES = frozenset({"Table"})
 
-# Maximum text length for an image element to be considered "garbage" OCR
-# output purely on length (empty strings, single-char noise like "L"/"6",
-# 2-3 char OCR fragments like "qp").
+# Max text length for an image element to count as "garbage" OCR purely on
+# length (empty strings, single-char noise like "L"/"6", 2-3 char fragments).
 _GARBAGE_TEXT_MAX_LEN = 3
 
 # For longer-but-still-short OCR text, also flag as garbage when it's mostly
 # non-alphanumeric (e.g. "~   ~if ~!11" from a misread letterhead/seal) —
-# catches noise up to this length that _GARBAGE_TEXT_MAX_LEN alone misses,
-# without misclassifying short-but-legitimate OCR text (page numbers, short
-# captions), which is predominantly alphanumeric.
+# catches noise the length check misses without misclassifying short legitimate
+# text (page numbers, short captions), which is predominantly alphanumeric.
 _GARBAGE_DENSITY_MAX_LEN = 20
 _GARBAGE_MIN_ALNUM_RATIO = 0.5
 
 
 def _is_garbage_ocr_text(text: str) -> bool:
-    """Heuristic garbage-OCR detector for a single image/figure element's text.
+    """Heuristic garbage-OCR detector for one image/figure element's text.
 
-    Combines a pure length check (very short text is always garbage) with a
-    length-and-density check (longer-but-still-short text that's mostly
-    non-alphanumeric, e.g. OCR noise from a misread letterhead).
+    Combines a length check (very short text is always garbage) with a
+    length-and-density check (short text that's mostly non-alphanumeric, e.g.
+    OCR noise from a misread letterhead).
     """
     stripped = text.strip()
     if len(stripped) <= _GARBAGE_TEXT_MAX_LEN:
@@ -127,20 +110,15 @@ DEFAULT_IMAGE_RATIO_THRESHOLD = 0.5
 DEFAULT_GARBAGE_RATIO_THRESHOLD = 0.7
 
 # A page whose PDF-native text layer is at or below this many characters is
-# treated as scan-only regardless of Unstructured's element-level garbage
-# ratio. This catches a failure mode the garbage-ratio check structurally
-# can't: Unstructured's own OCR pass over a scan-only page sometimes emits
-# its noisy output as separate NarrativeText/UncategorizedText elements
-# (mis-read but real-word-shaped text, e.g. "PNRIMA PENGHARGAAN..." for
-# "PENERIMA PENGHARGAAN...") rather than as the Image element's own text.
-# Those fragments are too long and too alphanumeric-dense to ever trip
-# ``_is_garbage_ocr_text`` (by design — see its docstring), so they inflate
-# text_element_count and dilute image_ratio below threshold, keeping a truly
-# scan-only page out of VISUAL. A near-empty native text layer is a much
-# more direct signal: PyMuPDF's ``page.get_text()`` reads the PDF's actual
-# embedded text objects, which is near-zero if and only if the page is
-# genuinely a scanned image with no real text layer underneath, independent
-# of how Unstructured happened to chunk its OCR guesswork.
+# treated as scan-only regardless of the element-level garbage ratio. This
+# catches a failure mode the garbage-ratio check structurally can't: the
+# parser's OCR pass over a scan-only page sometimes emits its noisy output as
+# separate NarrativeText/UncategorizedText elements (mis-read but real-word-
+# shaped text) rather than as the Image element's own text. Those fragments are
+# too long and alnum-dense to trip ``_is_garbage_ocr_text``, so they inflate
+# text_element_count and dilute image_ratio below threshold. A near-empty native
+# text layer (PyMuPDF's ``page.get_text()``) is a more direct signal — near-zero
+# iff the page is genuinely a scanned image with no real text layer.
 NATIVE_TEXT_LEN_THRESHOLD = 30
 
 # Prompt for VLM full-page extraction (Indonesian output)

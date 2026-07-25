@@ -1,17 +1,7 @@
 """Evaluator panel for dataset generation.
 
-Implements the 5-model majority voting panel defined in skripsi §3.2.1c.
-Each panel member independently evaluates a draft item at temperature 0.0.
-An item is accepted if ≥4/5 members agree.
-
-Usage:
-    panel = EvaluatorPanel(settings)
-    verdict = await panel.evaluate(
-        prompt="Is this question answerable from the given context? Answer YES or NO.",
-        context="Context: ... Question: ...",
-    )
-    if verdict.accepted:
-        ...
+5-model majority voting panel. Each member independently evaluates a draft
+item at temperature 0.0. An item is accepted if ≥4/5 members agree.
 """
 
 from __future__ import annotations
@@ -31,12 +21,11 @@ from app.thesis._eval._dataset_gen.config import DatasetGenSettings
 logger = structlog.get_logger(__name__)
 
 # How many consecutive verdicts may have EVERY member fail before the panel
-# gives up. A failed call is counted as NO, so during a sustained provider
-# outage every candidate is "rejected" and a builder would burn its whole batch
-# budget generating nothing, then exit successfully with a silently short
-# dataset — worse than crashing, because the result looks like data. Transient
-# blips are already absorbed by the per-call retry in app/shared/retry.py, so
-# reaching this many total failures in a row means the API is genuinely down.
+# gives up. A failed call counts as NO, so during a sustained outage every
+# candidate is "rejected" and a builder would burn its batch budget generating
+# nothing, then exit successfully with a silently short dataset. Transient
+# blips are absorbed by the per-call retry in app/shared/retry.py, so reaching
+# this many total failures in a row means the API is genuinely down.
 MAX_CONSECUTIVE_TOTAL_FAILURES = 3
 
 
@@ -45,7 +34,7 @@ class PanelUnavailableError(RuntimeError):
 
     Signals "stop and try again later", not "this item is bad". Builders let
     this propagate so the run halts with whatever it has already written to
-    disk, which ``--resume`` can then continue from.
+    disk, which ``--resume`` can continue from.
     """
 
 
@@ -53,14 +42,9 @@ class PanelUnavailableError(RuntimeError):
 class PanelVote:
     """A single panel member's vote.
 
-    Attributes:
-        model: Model identifier.
-        vote: The raw vote text from the model.
-        parsed: Parsed binary verdict (True = YES/accept, False = NO/reject).
-        provider: The upstream provider OpenRouter actually routed to, when
-            reported. Recorded so "the panel was consistent" is a checkable
-            claim rather than an assumption — a slug can be served by several
-            providers at different quantizations.
+    ``provider`` records the upstream OpenRouter routed to, so "the panel was
+    consistent" is checkable — a slug can be served by several providers at
+    different quantizations.
     """
 
     model: str
@@ -71,13 +55,7 @@ class PanelVote:
 
 @dataclass(frozen=True)
 class LabelVote:
-    """A single panel member's label vote.
-
-    Attributes:
-        model: Model identifier.
-        vote: The raw vote text from the model.
-        label: Parsed label string (lowercased), or empty if unparseable.
-    """
+    """A single panel member's label vote."""
 
     model: str
     vote: str
@@ -86,15 +64,7 @@ class LabelVote:
 
 @dataclass(frozen=True)
 class LabelVerdict:
-    """Aggregated label verdict from the evaluator panel.
-
-    Attributes:
-        votes: List of individual label votes.
-        label_counts: Mapping of label -> count.
-        accepted_label: The majority label if >= threshold agreed, else None.
-        accepted: True if a label reached the acceptance threshold.
-        acceptance_threshold: The threshold used.
-    """
+    """Aggregated label verdict from the evaluator panel."""
 
     votes: List[LabelVote]
     label_counts: Dict[str, int]
@@ -107,16 +77,9 @@ class LabelVerdict:
 class PanelVerdict:
     """Aggregated verdict from the evaluator panel.
 
-    Attributes:
-        votes: List of individual panel votes.
-        yes_count: Number of YES votes.
-        no_count: Number of NO votes.
-        accepted: True if yes_count >= acceptance_threshold.
-        acceptance_threshold: The threshold used.
-        error_count: How many members failed to return a usable vote (after
-            retries) and were counted as NO. Non-zero means part of this
-            verdict reflects infrastructure rather than the item — see the
-            indeterminate-verdict warning in ``evaluate``.
+    ``error_count`` is how many members failed to return a usable vote (after
+    retries) and were counted as NO. Non-zero means part of this verdict
+    reflects infrastructure rather than the item.
     """
 
     votes: List[PanelVote]
@@ -132,9 +95,6 @@ class EvaluatorPanel:
 
     Each model independently evaluates a prompt at temperature 0.0.
     An item is accepted if ≥ ``acceptance_threshold`` models vote YES.
-
-    Args:
-        settings: DatasetGenSettings with API key and model list.
     """
 
     def __init__(self, settings: DatasetGenSettings) -> None:
@@ -151,23 +111,18 @@ class EvaluatorPanel:
         # least one real vote.
         self._consecutive_total_failures = 0
         # Models whose reasoning cannot be disabled — for these we omit
-        # reasoning:{enabled:false} (sending it would error). All panel models
-        # in the default cost-conscious set support disabling reasoning, so this
-        # is empty; add a slug here only if OpenRouter rejects the flag for it.
+        # reasoning:{enabled:false} (sending it would error). Add a slug here
+        # only if OpenRouter rejects the flag for it.
         self._reasoning_mandatory: set[str] = set()
 
     def _track_total_failure(self, error_count: int, panel_size: int) -> None:
         """Trip the circuit breaker after repeated complete panel failures.
 
-        Args:
-            error_count: Members that failed to return a usable vote.
-            panel_size: Members polled.
-
         Raises:
             PanelUnavailableError: After MAX_CONSECUTIVE_TOTAL_FAILURES
-                consecutive verdicts in which every member failed. The point is
-                to stop the run rather than let an outage masquerade as a long
-                sequence of rejected candidates.
+                consecutive verdicts in which every member failed — stops the
+                run rather than letting an outage masquerade as rejected
+                candidates.
         """
         if panel_size and error_count == panel_size:
             self._consecutive_total_failures += 1
@@ -196,18 +151,9 @@ class EvaluatorPanel:
         """Build the OpenRouter request payload for a panel model.
 
         Conditionally includes ``reasoning: {enabled: false}`` for models
-        that support disabling reasoning. Models with mandatory reasoning
-        (e.g. Gemini 3.1 Pro Preview) are sent without the parameter.
-
-        Args:
-            model: Model identifier.
-            messages: Chat messages.
-            max_tokens: Maximum tokens for the response.
-            session_id: Accepted for call-site compatibility but NOT sent —
-                see the measurement note below.
-
-        Returns:
-            Request payload dict.
+        that support disabling reasoning. ``session_id`` is accepted for
+        call-site compatibility but NOT sent — caching is automatic and
+        prefix-driven, so the field makes no difference.
         """
         payload: Dict[str, object] = {
             "model": model,
@@ -218,18 +164,10 @@ class EvaluatorPanel:
         if model not in self._reasoning_mandatory:
             payload["reasoning"] = {"enabled": False}
 
-        # ``session_id`` is deliberately NOT added to the payload. It was
-        # introduced on the belief that it enabled OpenRouter's provider-side
-        # prompt caching, and a cost claim rested on that. Measured directly
-        # (2026-07-22, gemini-2.5-flash, 6 identical ~2.4k-token calls per
-        # condition on a fresh prefix, session_id condition run FIRST so it
-        # could not inherit a warm cache): 3/6 cache hits with it, 2/6
-        # without. Caching is automatic and prefix-driven; the field makes no
-        # difference, and OpenRouter silently drops parameters it does not
-        # recognise, so it never errored. Reproduce with
-        # ``preflight.py --check-session-id``.
-        #
-        # What does help is keeping the varying part of the prompt LAST so the
+        # ``session_id`` is deliberately NOT added to the payload. Caching is
+        # automatic and prefix-driven; the field makes no difference, and
+        # OpenRouter silently drops parameters it does not recognise. What
+        # does help is keeping the varying part of the prompt LAST so the
         # shared prefix stays byte-identical (already done by the callers),
         # and pinning the provider below.
 
@@ -251,17 +189,7 @@ class EvaluatorPanel:
         context: str = "",
         session_id: Optional[str] = None,
     ) -> PanelVerdict:
-        """Evaluate a draft item using the full panel.
-
-        Args:
-            prompt: Evaluation prompt (instructions for the panel).
-            context: The draft item to evaluate (appended to prompt).
-            session_id: Optional OpenRouter sticky-routing session id (see
-                ``_build_payload``).
-
-        Returns:
-            PanelVerdict with individual votes and acceptance decision.
-        """
+        """Evaluate a draft item using the full panel."""
         tasks = [
             self._evaluate_single(model, prompt, context, session_id)
             for model in self._models
@@ -294,8 +222,7 @@ class EvaluatorPanel:
         # A failed call becomes a NO, so enough failures force a rejection no
         # matter what the item says — with 5 members and a threshold of 4, two
         # errors cap the achievable score at 3/5. That is infrastructure noise
-        # entering the dataset as a content decision, and it is invisible in
-        # the CSV afterwards. Retries (see _evaluate_single) absorb transient
+        # entering the dataset as a content decision. Retries absorb transient
         # 429/5xx, so reaching this warning means the errors outlived them.
         if error_count and error_count > len(panel_votes) - self._threshold:
             logger.warning(
@@ -334,17 +261,7 @@ class EvaluatorPanel:
         context: str,
         session_id: Optional[str] = None,
     ) -> PanelVote:
-        """Evaluate with a single panel model.
-
-        Args:
-            model: Model identifier.
-            prompt: Evaluation prompt.
-            context: Draft item context.
-            session_id: Optional OpenRouter sticky-routing session id.
-
-        Returns:
-            PanelVote with the model's verdict.
-        """
+        """Evaluate with a single panel model."""
         messages = [
             {
                 "role": "system",
@@ -379,14 +296,7 @@ class EvaluatorPanel:
 
     @staticmethod
     def _parse_yes_no(text: str) -> bool:
-        """Parse a YES/NO response from the model.
-
-        Args:
-            text: Raw model response.
-
-        Returns:
-            True if YES, False if NO or ambiguous.
-        """
+        """Parse a YES/NO response. True if YES, False if NO or ambiguous."""
         text_upper = text.upper().strip()
         # Check for explicit YES
         if re.search(r'\bYES\b', text_upper):
@@ -406,24 +316,13 @@ class EvaluatorPanel:
     ) -> LabelVerdict:
         """Evaluate a draft item by assigning a label (majority voting).
 
-        Each panel model independently assigns one of ``valid_labels`` to the
-        item. The item is accepted if >= ``acceptance_threshold`` models agree
-        on the *same* label. This is used by Subset D where each sentence must
-        be labeled (supported / partially_supported / not_supported /
-        no_source_needed) rather than voted YES/NO.
+        Each panel model independently assigns one of ``valid_labels``. The
+        item is accepted if >= ``acceptance_threshold`` models agree on the
+        *same* label. Used by Subset D for sentence-level labeling.
 
         Args:
-            prompt: Evaluation prompt (instructions for the panel).
-            context: The draft item to evaluate (appended to prompt).
-            valid_labels: Allowed label strings (case-insensitive matching).
-            session_id: Optional OpenRouter sticky-routing session id — pass
-                the same id (e.g. derived from the question id) for every
-                sentence of one question so the shared
-                Question/Full-Response/Context prefix can be cached by the
-                upstream provider across all per-sentence calls.
-
-        Returns:
-            LabelVerdict with per-model votes and the majority label.
+            session_id: Pass the same id for every sentence of one question so
+                the shared prefix can be cached across per-sentence calls.
         """
         tasks = [
             self._evaluate_label_single(model, prompt, context, valid_labels, session_id)
@@ -455,8 +354,7 @@ class EvaluatorPanel:
         # A member that errored produces an empty label, so a total outage
         # yields no labels at all and every sentence looks unlabelable. Same
         # circuit breaker as the binary path — stop rather than silently
-        # producing a short dataset. Counted on empty labels rather than on
-        # exceptions alone, since an empty parse is equally unusable here.
+        # producing a short dataset.
         self._track_total_failure(
             sum(1 for v in label_votes if not v.label), len(label_votes)
         )
@@ -494,18 +392,7 @@ class EvaluatorPanel:
         valid_labels: List[str],
         session_id: Optional[str] = None,
     ) -> LabelVote:
-        """Assign a label to an item with a single panel model.
-
-        Args:
-            model: Model identifier.
-            prompt: Evaluation prompt.
-            context: Draft item context.
-            valid_labels: Allowed label strings.
-            session_id: Optional OpenRouter sticky-routing session id.
-
-        Returns:
-            LabelVote with the model's assigned label.
-        """
+        """Assign a label to an item with a single panel model."""
         labels_str = ", ".join(valid_labels)
         messages = [
             {
@@ -536,15 +423,7 @@ class EvaluatorPanel:
 
     @staticmethod
     def _parse_label(text: str, valid_labels: List[str]) -> str:
-        """Parse a label response from the model.
-
-        Args:
-            text: Raw model response.
-            valid_labels: Allowed label strings (case-insensitive).
-
-        Returns:
-            The matched label (lowercased), or empty string if no match.
-        """
+        """Parse a label response. Returns the matched label or empty string."""
         text_lower = text.lower().strip()
         # Normalize: remove quotes, punctuation, whitespace
         text_clean = re.sub(r'["\'.!,;:]', '', text_lower).strip()
@@ -559,14 +438,8 @@ class EvaluatorPanel:
     def _extract_content(data: Dict[str, object]) -> str:
         """Extract text content from an OpenRouter chat completion response.
 
-        Handles reasoning models that may return ``content: null`` with the
-        actual text in a ``reasoning`` field.
-
-        Args:
-            data: Parsed JSON response from OpenRouter.
-
-        Returns:
-            The response text (stripped).
+        Handles reasoning models that return ``content: null`` with the text
+        in a ``reasoning`` field.
         """
         message = data.get("choices", [{}])[0].get("message", {})
         content = message.get("content")

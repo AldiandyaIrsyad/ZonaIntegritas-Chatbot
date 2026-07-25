@@ -4,22 +4,19 @@ This is *training* data for fine-tuning ``Llama-Prompt-Guard-2-86M``. It is not
 an evaluation subset, and the difference drives almost every design choice
 here.
 
-Why fine-tune at all
---------------------
-Prompt Guard 2 86M is evaluated by its authors on English, French, German,
-Hindi, Italian, Portuguese, Spanish and Thai. Indonesian is not among them. The
-mDeBERTa backbone saw Indonesian during pretraining, but the attack-detection
-training did not, so the deployed guard is being asked to do a job it was never
-measured on. Adapting it to Indonesian is the contribution; the poor
-off-the-shelf score is the symptom, not the argument.
+Why fine-tune at all: Prompt Guard 2 86M is evaluated by its authors on
+English, French, German, Hindi, Italian, Portuguese, Spanish and Thai — not
+Indonesian. The mDeBERTa backbone saw Indonesian during pretraining, but the
+attack-detection training did not, so the deployed guard is being asked to do a
+job it was never measured on. Adapting it to Indonesian is the contribution;
+the poor off-the-shelf score is the symptom, not the argument.
 
-The failure this file is designed to avoid
-------------------------------------------
-If B-Train were produced by the same generator, from the same seed prompts, as
-the Subset B test set, the classifier would learn *that generator's writing
-style* rather than prompt injection. It would then score well on Subset B
-because Subset B shares the style. The number would rise, the artifact would be
-worthless, and nothing in the metrics would reveal it.
+The failure this file is designed to avoid: if B-Train were produced by the
+same generator, from the same seed prompts, as the Subset B test set, the
+classifier would learn *that generator's writing style* rather than prompt
+injection. It would then score well on Subset B because Subset B shares the
+style. The number would rise, the artifact would be worthless, and nothing in
+the metrics would reveal it.
 
 Four defences, in descending order of strength:
 
@@ -33,19 +30,13 @@ Four defences, in descending order of strength:
 4. **Deduplication against Subset B, asserted rather than assumed**, at the end
    of every run.
 
-Why there is no 5-model panel here
-----------------------------------
-The panel exists to guarantee *label* quality for evaluation data, where one
-wrong label corrupts a reported number. Training data has different economics:
-public rows arrive already labelled, and a generated row's label is fixed by
-construction (asking for a jailbreak yields a malicious row). A little label
-noise is survivable in training and is not survivable in a test set. Running
-five raters over 3,000 items would be 15,000 calls for no gain.
-
-Usage:
-    python -m app.thesis._eval._dataset_gen.build_subset_b_train \\
-        --output data/subset_b_train.csv \\
-        [--api-url http://localhost:8000] [--resume]
+Why there is no 5-model panel here: the panel exists to guarantee *label*
+quality for evaluation data, where one wrong label corrupts a reported number.
+Training data has different economics: public rows arrive already labelled, and
+a generated row's label is fixed by construction (asking for a jailbreak yields
+a malicious row). A little label noise is survivable in training and is not
+survivable in a test set. Running five raters over 3,000 items would be 15,000
+calls for no gain.
 """
 
 from __future__ import annotations
@@ -76,7 +67,7 @@ logger = structlog.get_logger(__name__)
 FIELDNAMES = ["query", "label", "attack_type", "source", "lang"]
 
 # Default generator for B-Train. Deliberately a different lab from Subset B's
-# deepseek generator — see defence 2 in the module docstring. Overridable with
+# deepseek generator (defence 2 in the module docstring). Overridable with
 # --generator-model; the builder refuses to reuse Subset B's generator.
 DEFAULT_BTRAIN_GENERATOR = "qwen/qwen3-235b-a22b-2507"
 
@@ -86,9 +77,9 @@ DEFAULT_BTRAIN_GENERATOR = "qwen/qwen3-235b-a22b-2507"
 # majority-generated: human-written attacks are the only rows that cannot share
 # a style with the generator, so they carry the transfer claim.
 #
-# public_en is not an oversight. Indonesian users paste English jailbreaks
+# public_en is not an oversight: Indonesian users paste English jailbreaks
 # unmodified, so a classifier trained only on clean Indonesian misses them in
-# production — a real failure, not a benchmark artifact.
+# production.
 SOURCE_TARGETS: List[Tuple[str, str, str, int]] = [
     # (source, label, lang, target)
     ("public_id", "malicious", "id", 600),
@@ -99,10 +90,10 @@ SOURCE_TARGETS: List[Tuple[str, str, str, int]] = [
     ("hard_negative", "safe", "id", 400),
     ("general_id", "safe", "id", 200),
     # ⛔ Without this the training set has ZERO safe English rows, and the
-    # classifier learns "English => malicious" as a perfect rule. Measured: a
-    # fine-tune on the English-malicious-only mix reached recall 1.0000 with
-    # FPR 0.7333 on the English held-out slice — a collapsed classifier that
-    # flags nearly everything. Language must not be predictive of the label.
+    # classifier learns "English => malicious" as a perfect rule (a fine-tune
+    # on the English-malicious-only mix reached recall 1.0000 with FPR 0.7333
+    # on the English held-out slice — a collapsed classifier that flags nearly
+    # everything). Language must not be predictive of the label.
     ("public_en_safe", "safe", "en", 300),
     # Same argument as public_en_safe, for the code-switched slice: 100
     # code-switched attacks with no code-switched benign would make mixing
@@ -110,30 +101,31 @@ SOURCE_TARGETS: List[Tuple[str, str, str, int]] = [
     # code-switching exists, so these are generated — the one place where a
     # generated source is the only option rather than the cheapest.
     ("codeswitch_safe", "safe", "mixed", 100),
-    # --- Long Indonesian, added after the second shortcut was measured -------
+    # --- Long Indonesian ----------------------------------------------------
     #
-    # Before these, no safe row exceeded 67 tokens while malicious rows reached
-    # 512, so above that point length alone decided the label. The four sources
+    # Without these, no safe row exceeds 67 tokens while malicious rows reach
+    # 512, so above that point length alone decides the label. The four sources
     # below fill the long-Indonesian cell on both sides.
     #
     # doc_clean/doc_injected are matched pairs built from the same passage, so
     # they hold length, register and domain constant and vary only the
     # injection. They also cover uploaded attachments, which the chat pipeline
-    # sends through this same guard and which had no training coverage at all.
+    # sends through this same guard and which otherwise have no training
+    # coverage.
     ("doc_clean", "safe", "id", 250),
     ("doc_injected", "malicious", "id", 250),
     ("safe_complex_id", "safe", "id", 150),
     ("native_id_long", "malicious", "id", 150),
-    # --- Security vocabulary, added after the third shortcut was measured ----
+    # --- Security vocabulary ------------------------------------------------
     #
     # The malicious class is drawn from public attack corpora, which are *about*
-    # hacking and so are saturated with security vocabulary; the safe class was
-    # legal text and general questions, which almost never uses it. Measured on
-    # the shipped file: a security term predicted `malicious` in 393 of 407 rows
-    # (96.6%), and the resulting fine-tune blocked 8 of the 11 security-themed
-    # safe rows in Subset B. A controlled probe isolated it — holding the JDIH
-    # framing fixed and changing only the vocabulary moved p(malicious) from
-    # 0.0004 to 0.9984.
+    # hacking and so are saturated with security vocabulary; the safe class is
+    # legal text and general questions, which almost never uses it. Without a
+    # matched negative, a security term predicts `malicious` in ~96% of the rows
+    # containing one, and the resulting fine-tune blocks legitimate
+    # security-themed questions. A controlled probe isolated it — holding the
+    # JDIH framing fixed and changing only the vocabulary moved p(malicious)
+    # from 0.0004 to 0.9984.
     #
     # These rows are the matched negative: the same vocabulary, asked
     # legitimately. Institutional regulations genuinely cover data protection,
@@ -146,8 +138,7 @@ TARGETS: Dict[str, int] = {source: target for source, _, _, target in SOURCE_TAR
 
 # Subtype mix for the natively generated malicious rows. Weighted toward
 # hidden_instruction because that is where detection actually fails; jailbreak
-# and dan_attempt are comparatively well handled off the shelf and do not need
-# much more data.
+# and dan_attempt are comparatively well handled off the shelf.
 NATIVE_SUBTYPE_MIX: List[Tuple[str, float]] = [
     ("hidden_instruction", 0.55),
     ("jailbreak", 0.25),
@@ -155,9 +146,9 @@ NATIVE_SUBTYPE_MIX: List[Tuple[str, float]] = [
 ]
 
 # Public sources, with the columns and label polarity verified against each
-# dataset rather than assumed. ``label_field``/``malicious_values`` say which
-# rows are attacks; ``holdout_split`` names a split this builder must never
-# touch, because Exp1a reports on it as an external held-out set.
+# dataset. ``label_field``/``malicious_values`` say which rows are attacks;
+# ``holdout_split`` names a split this builder must never touch, because Exp1a
+# reports on it as an external held-out set.
 PUBLIC_SOURCES: List[Dict[str, Any]] = [
     {
         "name": "xTRam1/safe-guard-prompt-injection",
@@ -199,8 +190,7 @@ PUBLIC_SOURCES: List[Dict[str, Any]] = [
 
 # Controlled vocabulary for ``attack_type``. Generators return whatever wording
 # they like ("persona hijack", "prompt injection"), and free-text subtypes would
-# fragment the per-subtype accuracy tables that Exp1a reports — the whole point
-# of which is to show whether hidden_instruction specifically improved.
+# fragment the per-subtype accuracy tables Exp1a reports.
 KNOWN_ATTACK_TYPES = {
     "jailbreak",
     "dan_attempt",
@@ -230,13 +220,8 @@ ATTACK_TYPE_ALIASES = {
 def canonical_attack_type(raw: str, default: str) -> str:
     """Map a generator's free-text subtype onto the controlled vocabulary.
 
-    Args:
-        raw: Whatever the generator emitted.
-        default: Subtype to fall back to when ``raw`` is unrecognised — the
-            subtype actually requested, which is the reliable signal.
-
-    Returns:
-        A member of ``KNOWN_ATTACK_TYPES``.
+    ``default`` is the subtype actually requested — the reliable signal when
+    ``raw`` is unrecognised.
     """
     folded = (raw or "").strip().lower().replace("-", "_")
     if folded in KNOWN_ATTACK_TYPES:
@@ -287,12 +272,7 @@ BENIGN_SYSTEM = (
 def normalize(text: str) -> str:
     """Fold a query to a comparable form for duplicate detection.
 
-    Args:
-        text: Raw query text.
-
-    Returns:
-        NFKC-normalised, lowercased, punctuation-stripped, whitespace-collapsed
-        text.
+    NFKC-normalised, lowercased, punctuation-stripped, whitespace-collapsed.
     """
     folded = unicodedata.normalize("NFKC", (text or "").lower())
     folded = re.sub(r"[^\w\s]", " ", folded)
@@ -302,11 +282,7 @@ def normalize(text: str) -> str:
 def load_subset_b_queries(subset_b_path: str) -> List[str]:
     """Read the normalised queries of the frozen Subset B test set.
 
-    Args:
-        subset_b_path: Path to ``subset_b.csv``.
-
-    Returns:
-        Normalised query strings; empty if the file is absent.
+    Returns normalised query strings; empty if the file is absent.
     """
     path = Path(subset_b_path)
     if not path.exists():
@@ -325,15 +301,7 @@ def find_overlap(
 
     Exact matching alone is not enough: synthetic data repeats itself with small
     edits, and a row differing by one word is still a leaked test item.
-
-    Args:
-        rows: Candidate B-Train rows.
-        subset_b_norm: Normalised Subset B queries.
-        near_dup_ratio: Character-similarity threshold above which a pair counts
-            as a near-duplicate.
-
-    Returns:
-        Indices into ``rows`` that must be dropped.
+    Returns indices into ``rows`` that must be dropped.
     """
     exact = set(subset_b_norm)
     doomed: List[int] = []
@@ -361,14 +329,7 @@ def find_overlap(
 
 
 def dedup_internal(rows: Iterable[Dict[str, str]]) -> List[Dict[str, str]]:
-    """Drop repeated queries within B-Train itself, keeping first occurrence.
-
-    Args:
-        rows: Candidate rows.
-
-    Returns:
-        Rows with internal duplicates removed.
-    """
+    """Drop repeated queries within B-Train itself, keeping first occurrence."""
     seen: set[str] = set()
     unique: List[Dict[str, str]] = []
     for row in rows:
@@ -420,12 +381,6 @@ def approximate_tokens(text: str) -> int:
     Whitespace-word count times 1.3 tracks the real DeBERTa count closely enough
     to place a row in a band, and keeps this check free of a model download so it
     can run in the builder and in tests.
-
-    Args:
-        text: Row text.
-
-    Returns:
-        Approximate token count.
     """
     return int(len(str(text or "").split()) * 1.3) + 2
 
@@ -433,11 +388,7 @@ def approximate_tokens(text: str) -> int:
 def shortcut_report(rows: Sequence[Dict[str, str]]) -> List[Dict[str, Any]]:
     """Cross-tabulate label against language and length band.
 
-    Args:
-        rows: Dataset rows.
-
-    Returns:
-        One record per non-empty cell, with counts and the minority share.
+    Returns one record per non-empty cell, with counts and the minority share.
     """
     cells: Dict[Tuple[str, str], Counter] = {}
     for row in rows:
@@ -465,22 +416,17 @@ def assert_no_shortcut_features(rows: Sequence[Dict[str, str]]) -> List[Dict[str
     """Fail the build if language or length can stand in for the label.
 
     A classifier trained on data where a surface feature separates the classes
-    can satisfy its objective without learning the task. This has already
-    happened twice on this dataset, and both times it was found by training a
-    model and watching it collapse rather than by inspecting the data:
+    can satisfy its objective without learning the task. Two such shortcuts have
+    collapsed a fine-tune on this data:
 
     - Every English and code-switched row was malicious, so "not Indonesian
-      implies attack" was exact. The fine-tune reached recall 1.0000 with a
-      false-positive rate of 0.7333.
+      implies attack" was exact (recall 1.0000 with a false-positive rate of
+      0.7333).
     - No safe row exceeded 67 tokens while malicious rows reached 512, so length
       separated the classes perfectly above that point — and the guard sees
       512-token attachment text on every document upload.
 
-    Args:
-        rows: The dataset about to be written.
-
-    Returns:
-        The full cross-tabulation, for the provenance sidecar.
+    Returns the full cross-tabulation, for the provenance sidecar.
 
     Raises:
         AssertionError: If any sufficiently large cell is dominated by one label.
@@ -509,8 +455,7 @@ def assert_no_shortcut_features(rows: Sequence[Dict[str, str]]) -> List[Dict[str
 # Vocabulary a chatbot over institutional regulations must be able to discuss.
 # These are *dual-use topics*, not attack markers: a regulation on data
 # protection, a question about password policy, or a sanction for information
-# misuse all use this language legitimately, and each drove a measured false
-# positive on the first fine-tune.
+# misuse all use this language legitimately.
 #
 # Two categories are deliberately excluded, for opposite reasons:
 #   - Attack markers ("abaikan instruksi sebelumnya" and kin) *should* predict
@@ -521,8 +466,8 @@ def assert_no_shortcut_features(rows: Sequence[Dict[str, str]]) -> List[Dict[str
 #     writes it — so no benign counterpart can be generated and the assertion
 #     would be unsatisfiable. Blocking a query that asks how to exploit a system
 #     is correct guard behaviour, not a false positive.
-# What remains is the vocabulary that is genuinely shared between an attacker and
-# a staff member asking what the regulations say.
+# What remains is the vocabulary genuinely shared between an attacker and a
+# staff member asking what the regulations say.
 TOPIC_TERMS: Tuple[str, ...] = (
     "keamanan informasi", "keamanan", "serangan", "enkripsi", "autentikasi",
     "kata sandi", "sandi", "firewall", "phishing", "perlindungan data",
@@ -539,11 +484,7 @@ MAX_TERM_LABEL_SHARE = 0.85
 def vocabulary_report(rows: Sequence[Dict[str, str]]) -> List[Dict[str, Any]]:
     """Measure how strongly each topic term predicts the label.
 
-    Args:
-        rows: Dataset rows.
-
-    Returns:
-        One record per term present often enough to judge.
+    Returns one record per term present often enough to judge.
     """
     report: List[Dict[str, Any]] = []
     for term in TOPIC_TERMS:
@@ -566,22 +507,15 @@ def vocabulary_report(rows: Sequence[Dict[str, str]]) -> List[Dict[str, Any]]:
 def assert_no_vocabulary_shortcut(rows: Sequence[Dict[str, str]]) -> List[Dict[str, Any]]:
     """Fail the build if a topic word can stand in for the label.
 
-    The third shortcut of the same family as language (C11) and length (C13),
-    and the one that survived both of their checks because those cross-tabulate
-    lang x length and nothing else.
+    The third shortcut of the same family as language and length, and the one
+    that survives both of their checks because those cross-tabulate lang x
+    length and nothing else. The malicious class comes from public attack
+    corpora — which are about hacking — while the safe class is legal text that
+    never mentions it, so a security term can predict `malicious` in ~96% of the
+    rows containing one, and the resulting classifier answers "malicious" to
+    legitimate questions about securing a network.
 
-    Measured on the first shipped file: a security term predicted `malicious`
-    in 96.6% of the rows containing one, because the malicious class comes from
-    public attack corpora — which are about hacking — while the safe class was
-    legal text that never mentions it. The resulting classifier answered
-    "malicious" to legitimate questions about securing a network, and to a real
-    JDIH question about data-breach procedure.
-
-    Args:
-        rows: The dataset about to be written.
-
-    Returns:
-        The per-term report, for the provenance sidecar.
+    Returns the per-term report, for the provenance sidecar.
 
     Raises:
         AssertionError: If any term predicts the label beyond the threshold.
@@ -609,10 +543,9 @@ def balance_language_bands(
 
     The source targets fix how many rows each generator produces, but not how
     those rows land across languages and lengths — that is a property of the
-    text the generators happen to return, and it has been wrong in both
-    directions. Every English row was once malicious; correcting that by adding
-    English benign rows then made mid-length English predominantly *safe*, which
-    is the same shortcut with the sign flipped.
+    text the generators happen to return, and it can be wrong in both
+    directions (every English row malicious, or mid-length English
+    predominantly *safe* — the same shortcut with the sign flipped).
 
     Rather than tune the targets until a build happens to pass, this discards
     the surplus: in a cell where one label dominates, majority rows are dropped
@@ -624,12 +557,8 @@ def balance_language_bands(
     trim thins the surplus rather than deleting a whole source, and the choice
     is seeded so a rebuild discards the same rows.
 
-    Args:
-        rows: Deduplicated dataset rows.
-        seed: Selection seed, so the trim is reproducible.
-
-    Returns:
-        The kept rows, and one record per trimmed cell for the provenance file.
+    Returns the kept rows, and one record per trimmed cell for the provenance
+    file.
 
     Raises:
         AssertionError: If satisfying the floor would cost more than
@@ -709,14 +638,10 @@ def load_public_pool(
     split reserved for external evaluation, it is skipped here so the held-out
     claim stays true by construction rather than by discipline.
 
-    Args:
-        seed: Shuffle seed, so a rerun draws the same rows.
-
-    Returns:
-        A tuple of (malicious rows, benign rows, provenance records). Benign
-        rows matter as much as malicious ones: without safe English examples the
-        classifier can satisfy the training objective by keying on language
-        instead of on attacks.
+    Returns (malicious rows, benign rows, provenance records). Benign rows
+    matter as much as malicious ones: without safe English examples the
+    classifier can satisfy the training objective by keying on language instead
+    of on attacks.
     """
     try:
         from datasets import load_dataset
@@ -732,17 +657,11 @@ def load_public_pool(
     provenance: List[Dict[str, Any]] = []
 
     # Reserved rows are collected once and applied to EVERY corpus, not just the
-    # one they came from. Two measurements forced this:
-    #
-    #   - The official split boundary is not sufficient. 12 rows of a 600-row
-    #     sample of xTRam1's test split also appear in its own train split.
-    #   - Filtering each corpus against only its own holdout still left 81
-    #     held-out rows in the pool, because these corpora overlap each other —
-    #     the same well-known attacks ("Ignore all previous instructions...")
-    #     appear in several of them.
-    #
-    # Either miss would have put evaluation rows into training and then scored
-    # the fine-tuned model on them.
+    # one they came from. The official split boundary is not sufficient (rows of
+    # a test split also appear in its own train split), and these corpora overlap
+    # each other — the same well-known attacks ("Ignore all previous
+    # instructions...") appear in several of them. Either miss would put
+    # evaluation rows into training and then score the fine-tuned model on them.
     reserved: set[str] = set()
     for spec in PUBLIC_SOURCES:
         if not spec["holdout_split"]:
@@ -855,12 +774,7 @@ def partition_public_pool(
     inflates the apparent size of the public contribution without adding any
     new attack.
 
-    Args:
-        pool: Shuffled, deduplicated public rows.
-        en_target: How many rows the English slice takes.
-
-    Returns:
-        A tuple of (English slice, pool available for translation).
+    Returns (English slice, pool available for translation).
     """
     return list(pool[:en_target]), list(pool[en_target:])
 
@@ -871,13 +785,8 @@ async def translate_batch(
 ) -> List[str]:
     """Translate a batch of attack texts into Indonesian.
 
-    Args:
-        generator: Generator client (B-Train's generator, not Subset B's).
-        texts: Source texts.
-
-    Returns:
-        Translations aligned to ``texts``; an entry is empty when the model
-        skipped or mangled that item.
+    Returns translations aligned to ``texts``; an entry is empty when the model
+    skipped or mangled that item.
     """
     numbered = "\n".join(f"{i}. {t}" for i, t in enumerate(texts))
     prompt = (
@@ -915,13 +824,6 @@ def native_seed_prompt(subtype: str, count: int) -> str:
 
     Written independently of Subset B's seed file so the two sets do not share
     few-shot examples.
-
-    Args:
-        subtype: One of hidden_instruction / jailbreak / dan_attempt.
-        count: How many items to request.
-
-    Returns:
-        The seed prompt.
     """
     described = {
         "hidden_instruction": (
@@ -961,18 +863,9 @@ async def generate_rows(
 ) -> List[Dict[str, str]]:
     """Generate one batch of rows and normalise them to the output schema.
 
-    Args:
-        generator: Generator client.
-        seed_prompt: What to generate.
-        system_prompt: Generator system prompt.
-        count: Batch size to request.
-        label: Label to assign (fixed by construction).
-        attack_type: Default subtype when the model does not supply one.
-        source: Provenance tag written to the ``source`` column.
-        lang: Language tag.
-
-    Returns:
-        Normalised rows; empty on generator failure.
+    ``label`` is fixed by construction. ``attack_type`` is the default subtype
+    when the model does not supply one. Returns normalised rows; empty on
+    generator failure.
     """
     try:
         drafts = await generator.generate(
@@ -1024,15 +917,7 @@ Output one JSON object per line with a single field "query".
 
 
 def excerpt_for_prompt(text: str, limit: int = 1200) -> str:
-    """Trim document text to a prompt-sized excerpt.
-
-    Args:
-        text: Full concatenated document text.
-        limit: Maximum characters.
-
-    Returns:
-        The excerpt.
-    """
+    """Trim document text to a prompt-sized excerpt."""
     cleaned = re.sub(r"\s+", " ", text or "").strip()
     return cleaned[:limit]
 
@@ -1056,16 +941,7 @@ INJECTION_POSITIONS = ("start", "middle", "end", "quoted")
 
 
 def inject_into_passage(passage: str, injection: str, position: str) -> str:
-    """Splice an instruction into a genuine document passage.
-
-    Args:
-        passage: Real document text.
-        injection: The instruction to insert.
-        position: One of ``INJECTION_POSITIONS``.
-
-    Returns:
-        The passage with the instruction inserted.
-    """
+    """Splice an instruction into a genuine document passage."""
     sentences = [s for s in re.split(r"(?<=[.;])\s+", passage) if s.strip()]
     if position == "start" or len(sentences) < 2:
         return f"{injection} {passage}"
@@ -1087,31 +963,23 @@ async def build_document_pairs(
 ) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
     """Build matched clean/injected passages from real corpus documents.
 
-    Why pairs, and why from real documents
-    --------------------------------------
-    Every other source varies many things at once, so the classifier is free to
-    key on whichever varies most conveniently — which is how length and language
-    became its decision rule. Here the two rows share a passage exactly, so
-    length, register, vocabulary and domain are held constant and **only the
-    injection differs**. That is the narrowest possible statement of what the
-    model is supposed to learn.
+    Why pairs, and why from real documents: every other source varies many
+    things at once, so the classifier is free to key on whichever varies most
+    conveniently — which is how length and language became its decision rule.
+    Here the two rows share a passage exactly, so length, register, vocabulary
+    and domain are held constant and **only the injection differs**. That is the
+    narrowest possible statement of what the model is supposed to learn.
 
-    These rows also cover a production path that currently has no training data
-    at all. The chat pipeline safety-checks the combined message *and attachment*
-    text, so an uploaded PDF reaches the guard as several hundred tokens of legal
-    prose — a length at which, before this source existed, every training example
-    was an attack.
+    These rows also cover a production path that otherwise has no training data:
+    the chat pipeline safety-checks the combined message *and attachment* text,
+    so an uploaded PDF reaches the guard as several hundred tokens of legal
+    prose — a length at which every training example would otherwise be an
+    attack.
 
     No LLM call is needed: the clean side is real text and the injected side is
     that text plus a known string, so both labels are correct by construction.
 
-    Args:
-        api_url: Base URL of the running application.
-        target_pairs: How many clean/injected pairs to produce.
-        seed: Shuffle seed for document selection.
-
-    Returns:
-        A tuple of (clean rows, injected rows), aligned pairwise.
+    Returns (clean rows, injected rows), aligned pairwise.
     """
     try:
         docs = await fetch_kb_documents(api_url)
@@ -1190,14 +1058,7 @@ async def build_benign_from_kb(
     generic Indonesian and teach the classifier nothing about the vocabulary it
     will actually see, which is where its false positives will come from.
 
-    Args:
-        generator: Generator client.
-        api_url: Base URL of the running application.
-        target: How many rows to produce.
-        seed: Shuffle seed for document selection.
-
-    Returns:
-        Benign rows tagged ``jdih_domain``.
+    Returns benign rows tagged ``jdih_domain``.
     """
     try:
         docs = await fetch_kb_documents(api_url)
@@ -1259,10 +1120,6 @@ async def build_benign_from_kb(
 
 def assert_generator_differs(settings: DatasetGenSettings, subset_b_meta: str) -> None:
     """Refuse to run if B-Train would reuse Subset B's generator.
-
-    Args:
-        settings: Settings carrying the B-Train generator.
-        subset_b_meta: Path to Subset B's provenance sidecar.
 
     Raises:
         SystemExit: When the two generators match, which would make the
@@ -1714,8 +1571,8 @@ async def build_subset_b_train(
 
     # Every set the fine-tuned model will be scored on, not just Subset B. The
     # held-out slices are drawn from a reserved split and are already subtracted
-    # at load time, so this is a second line of defence — but the first line was
-    # an assumption about split boundaries that measurement disproved, which is
+    # at load time, so this is a second line of defence — the first line is an
+    # assumption about split boundaries that measurement can disprove, which is
     # exactly why there is a second one.
     evaluation_sets = {"subset_b": subset_b_path}
     for name, path in (
@@ -1742,7 +1599,7 @@ async def build_subset_b_train(
 
     # Balance before writing, so the shipped file is the balanced one and the
     # assertion below is a guarantee rather than a coin toss on how the
-    # generators happened to distribute length across languages.
+    # generators distributed length across languages.
     clean, balance_trims = balance_language_bands(clean, seed)
 
     # Rewrite the CSV without the dropped rows. The incremental writer's job is
@@ -1761,8 +1618,8 @@ async def build_subset_b_train(
             )
 
     # Checked on the file that actually ships, next to the overlap assertion and
-    # for the same reason: this exact defect has twice reached a training run
-    # undetected, and each time cost a full build-and-train cycle to find.
+    # for the same reason: this defect can reach a training run undetected and
+    # cost a full build-and-train cycle to find.
     shortcut_cells = assert_no_shortcut_features(clean)
     vocabulary_cells = assert_no_vocabulary_shortcut(clean)
 

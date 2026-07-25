@@ -18,24 +18,19 @@ from app.kb.application.ingest_worker import IngestWorker
 
 logger = structlog.get_logger(__name__)
 
-# Cap on the on-disk filename's stem (before the UUID prefix/extension are
-# added). Two independent things break on long filenames, both discovered
-# empirically: (1) the local filesystem raises ENAMETOOLONG around 255 bytes
-# for the full path component, and (2) Unstructured Cloud's job API — which
-# receives this same filename, since IngestWorker/UnstructuredClient read it
-# back off disk — silently completes with output_node_files: None (no error
-# at all) once the filename gets long (reproduced at 240 chars; titles in
-# this app's real corpus routinely exceed that). The original filename and
-# title are preserved in PDFDocument.title/description, not lost — only the
-# on-disk/upstream-API-visible name is shortened.
+# Cap on the on-disk filename stem (before the UUID prefix/extension). Long
+# filenames break two ways: the filesystem raises ENAMETOOLONG near 255 bytes,
+# and Unstructured Cloud's job API (which receives this same filename, since
+# the client reads it back off disk) silently returns no output once the name
+# is long. The original name/title are preserved in PDFDocument.title/
+# description; only the on-disk/upstream-visible name is shortened.
 _MAX_FILENAME_STEM_LEN = 60
 
 
 def _safe_upload_filename(original_filename: str) -> str:
-    """Build a short, unique, filesystem- and Unstructured-Cloud-safe
-    filename for on-disk storage. Always UUID-prefixed for uniqueness
-    (previously only the batch path had a prefix, and even that was too
-    weak against long titles)."""
+    """Build a short, unique, filesystem- and Unstructured-Cloud-safe filename
+    for on-disk storage. Always UUID-prefixed for uniqueness.
+    """
     stem, ext = os.path.splitext(original_filename or "upload.pdf")
     ext = ext or ".pdf"
     safe_stem = re.sub(r"[^A-Za-z0-9._-]", "_", stem)[:_MAX_FILENAME_STEM_LEN]
@@ -83,11 +78,9 @@ class KBApplicationService:
     async def upload_pdf(self, title: str, description: str, file: UploadFile, bg_tasks: BackgroundTasks) -> PDFDocument:
         """Save one uploaded PDF to disk, record it, and schedule ingestion.
 
-        Coordinates two systems: the filesystem (saves the file under
-        ``upload_dir`` with a safe name) and ``IKBRepository`` (creates the
-        ``PDFDocument`` row). Vector storage isn't touched here — embedding
-        and upserting into Qdrant happen later, asynchronously, inside
-        ``ingest_worker.ingest_document`` via ``bg_tasks``.
+        Touches the filesystem (safe-named file under ``upload_dir``) and
+        ``IKBRepository`` (the ``PDFDocument`` row). Embedding and Qdrant
+        upsert happen later, asynchronously, in ``ingest_worker.ingest_document``.
         """
         file_path = os.path.join(self.upload_dir, _safe_upload_filename(file.filename))
 
@@ -111,25 +104,13 @@ class KBApplicationService:
         """Upload multiple PDFs and trigger background ingestion for each.
 
         Saved filenames are UUID-prefixed and length-capped (see
-        _safe_upload_filename) to avoid both filesystem ENAMETOOLONG errors
-        and a silent Unstructured Cloud failure mode on long filenames.
-
-        Each file is isolated: on success its PDFDocument row is committed
-        immediately, so a later file's failure (disk full, bad filename,
-        DB error) can't roll back files that already succeeded — previously
-        the whole batch shared one uncommitted transaction, so any failure
-        anywhere in the loop discarded every already-processed file. On
-        failure, the session is rolled back (to clear its errored state) and
-        the loop continues with the next file instead of aborting.
-
-        Args:
-            files: List of uploaded PDF files.
-            titles: List of titles, one per file (matched by index).
-            descriptions: List of descriptions, one per file (matched by index).
-            bg_tasks: FastAPI BackgroundTasks for async ingestion.
+        ``_safe_upload_filename``). Each file is isolated: on success its
+        ``PDFDocument`` row is committed immediately, so a later file's failure
+        can't roll back already-succeeded files. On failure the session is
+        rolled back (clearing its errored state) and the loop continues.
 
         Returns:
-            Tuple of (successfully created PDFDocuments, [{"filename", "error"}, ...]).
+            (successfully created PDFDocuments, [{"filename", "error"}, ...]).
         """
         results: List[PDFDocument] = []
         failures: List[dict[str, str]] = []
@@ -162,8 +143,8 @@ class KBApplicationService:
         """Toggle a document's active flag in both Postgres and Qdrant.
 
         Inactive documents are excluded from retrieval (``hybrid_search``
-        filters on the ``is_active`` payload field), so the flag must be
-        mirrored into the vector store's payload, not just the Postgres row.
+        filters on the ``is_active`` payload), so the flag must be mirrored into
+        the vector store, not just the Postgres row.
         """
         doc = await self.kb_repo.update_pdf_active_status(pdf_id, active)
         if doc:
@@ -171,10 +152,10 @@ class KBApplicationService:
         return doc
 
     async def delete_pdf(self, pdf_id: str) -> bool:
-        """Delete a document across all three systems it lives in: the
-        Postgres row (and cascaded chunks), its vectors in Qdrant, and the
-        PDF file on disk. Returns False without side effects if the document
-        doesn't exist."""
+        """Delete a document across all three systems: the Postgres row (and
+        cascaded chunks), its Qdrant vectors, and the PDF file on disk. Returns
+        False with no side effects if it doesn't exist.
+        """
         doc = await self.kb_repo.get_pdf_by_id(pdf_id)
         if not doc:
             return False

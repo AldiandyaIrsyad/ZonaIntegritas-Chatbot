@@ -4,12 +4,10 @@ Evaluates the full RAG pipeline (IVM → retrieval → generation → RAM) again
 Subset A (RAG QA triplets). Compares against a no-guardrail baseline
 (skip IVM + RAM, same retrieval + generation).
 
-Skripsi §3.3.5, Tabel 3.10.
-
-Metrics (§3.4):
-    - BERTScore F1 (§3.4.8) — answer quality vs ground truth
-    - Faithfulness (§3.4.9) — proportion of supported sentences
-    - Abstention Accuracy (§3.4.10) — correct refusal of out-of-domain queries
+Metrics:
+    - BERTScore F1 — answer quality vs ground truth
+    - Faithfulness — proportion of supported sentences
+    - Abstention Accuracy — correct refusal of out-of-domain queries
 
 Usage:
     python -m app.thesis._eval.exp4_end_to_end.run \\
@@ -66,17 +64,13 @@ CITATION_PATTERN = re.compile(
 
 # Detects an English chain-of-thought preamble at the start of a response
 # that should have been Indonesian-only per CHAT_SYSTEM_PROMPT — a known
-# symptom of LLMConnection.stream_chat's reasoning-delta fallback (see
-# chapter4.md §4.6.3's description of the same mechanism for the relevance
-# judge). Measured on data/results/exp4_end_to_end_qwen3-32b.csv: 48/98
-# full-pipeline and 67/98 baseline responses match this (writing/
-# writing/overhaul.md M1). This is a DETECTOR, not a text-repair tool —
-# there is no structural signal in the NDJSON stream that separates
-# reasoning from real content (confirmed: both are emitted as the same
-# "chunk" event type), so guessing where the real answer starts risks
-# corrupting responses that don't match this pattern. Flagged rows are
-# reported, not silently stripped or dropped, unless --exclude-contaminated
-# is passed.
+# symptom of LLMConnection.stream_chat's reasoning-delta fallback (the same
+# mechanism that affects the relevance judge). This is a DETECTOR, not a
+# text-repair tool — there is no structural signal in the NDJSON stream that
+# separates reasoning from real content (both are emitted as the same "chunk"
+# event type), so guessing where the real answer starts risks corrupting
+# responses that don't match this pattern. Flagged rows are reported, not
+# silently stripped or dropped, unless --exclude-contaminated is passed.
 REASONING_PREAMBLE_PATTERN = re.compile(
     r"^\s*(okay|alright|let(?:'|’)s see|let me|the user is ask|i need to|"
     r"looking at|i should|we need to|hmm)\b",
@@ -87,12 +81,8 @@ REASONING_PREAMBLE_PATTERN = re.compile(
 def detect_reasoning_contamination(text: str) -> bool:
     """Flag a response likely to open with an un-stripped English CoT preamble.
 
-    Args:
-        text: The response text.
-
-    Returns:
-        True if the response opens with a recognized reasoning-preamble
-        phrase (see REASONING_PREAMBLE_PATTERN).
+    Returns True if the response opens with a recognized reasoning-preamble
+    phrase (see REASONING_PREAMBLE_PATTERN).
     """
     return bool(text) and bool(REASONING_PREAMBLE_PATTERN.match(text.strip()))
 
@@ -101,13 +91,10 @@ def strip_citation_markup(text: str) -> str:
     """Remove RAM citation markers from a response before scoring it.
 
     BERTScore should measure similarity of the substantive answer to the
-    reference, not of machine-generated markup — measured citation markup
-    is 49.8-53.0% of full-pipeline response characters (M2 in
-    writing/overhaul.md), while the baseline condition has 0%,
-    so leaving it in made the two conditions' BERTScore not comparable.
-
-    Args:
-        text: Response text, possibly containing citation markers.
+    reference, not of machine-generated markup — citation markup is a large
+    fraction of full-pipeline response characters while the baseline condition
+    has 0%, so leaving it in would make the two conditions' BERTScore not
+    comparable.
 
     Returns:
         Text with citation markers removed, whitespace-collapsed.
@@ -126,15 +113,14 @@ class PipelineResult:
         citations: List of parsed citation tuples (status, score, source, page).
         abstained: Whether the system genuinely refused/warned (an IVM
             block or explicit pipeline rejection — the "error" NDJSON
-            event). Distinct from ``errored`` (M4 in
-            writing/overhaul.md): a request timeout or non-200
-            response used to also set this to True, which credited
-            infrastructure failures as correct out-of-domain refusals.
+            event). Distinct from ``errored``: a request timeout or non-200
+            response is an infrastructure failure, not a correct out-of-domain
+            refusal.
         errored: Whether the request itself failed (timeout, non-200) —
             no verdict from the pipeline either way, so this should not be
             counted as a correct (or incorrect) abstention.
         reasoning_contaminated: Whether the response was flagged by
-            detect_reasoning_contamination (M1) — reported, not acted on
+            detect_reasoning_contamination — reported, not acted on
             automatically; see --exclude-contaminated.
         category: Question category.
         ground_truth: Ground-truth answer.
@@ -143,10 +129,10 @@ class PipelineResult:
             of whether guardrails ran, so faithfulness can be computed
             post-hoc for pipeline runs where RAM didn't run live — see
             compute_posthoc_faithfulness.
-        latency_s: Wall-clock seconds for the streaming request. RQ4 asks
-            about overall performance, and the guardrails cost real time (an
-            IVM judge call plus one NLI call per sentence), so the quality
-            numbers are only half the trade-off without this.
+        latency_s: Wall-clock seconds for the streaming request. The
+            guardrails cost real time (an IVM judge call plus one NLI call per
+            sentence), so the quality numbers are only half the trade-off
+            without this.
     """
 
     question: str
@@ -167,40 +153,39 @@ class E2EMetrics:
 
     Attributes:
         bertscore_f1: BERTScore F1 (answer quality), computed on
-            citation-stripped candidates (M2).
+            citation-stripped candidates.
         bertscore_f1_ci: Bootstrap CI for BERTScore F1.
         faithfulness_score: PRIMARY faithfulness metric — post-hoc NLI
             check over every sentence, computed the same way for both
-            pipeline conditions (M3 in writing/overhaul.md; see
-            compute_posthoc_faithfulness). Populated by the caller
-            (async_main), not by compute_e2e_metrics itself, since it
-            requires an NLI client shared across both conditions.
+            pipeline conditions (see compute_posthoc_faithfulness).
+            Populated by the caller (async_main), not by compute_e2e_metrics
+            itself, since it requires an NLI client shared across both
+            conditions.
         faithfulness_ci: Bootstrap CI for faithfulness_score.
         citation_faithfulness_score: SECONDARY/diagnostic faithfulness —
-            the original citation-marker-based measure. Only meaningful
-            for the full-pipeline condition (RAM only emits citations
-            there); always 0.0 for the no-guardrail baseline since it
-            never produces citations. Kept for comparison, not as the
-            headline number.
+            the citation-marker-based measure. Only meaningful for the
+            full-pipeline condition (RAM only emits citations there); always
+            0.0 for the no-guardrail baseline since it never produces
+            citations. Kept for comparison, not as the headline number.
         citation_faithfulness_ci: Bootstrap CI for citation_faithfulness_score.
         abstention_acc: Abstention accuracy for out-of-domain queries —
             counts only genuine refusals (PipelineResult.abstained), not
-            infra errors (M4).
+            infra errors.
         abstention_ci: Bootstrap CI for abstention accuracy.
         false_refusal_rate: Fraction of IN-DOMAIN queries the system
-            wrongly refused — the counterpart metric M4 adds so
-            "refuse everything" can't score a perfect Abstention Accuracy
-            without visibly costing something here.
+            wrongly refused — the counterpart metric so "refuse everything"
+            can't score a perfect Abstention Accuracy without visibly costing
+            something here.
         false_refusal_ci: Wilson CI for false_refusal_rate.
         error_rate: Fraction of ALL queries where the request itself
             failed (timeout/non-200) rather than returning any verdict.
         contamination_rate: Fraction of in-domain scored responses flagged
-            by detect_reasoning_contamination (M1) — reported for
-            transparency; see --exclude-contaminated.
+            by detect_reasoning_contamination — reported for transparency;
+            see --exclude-contaminated.
         latency_mean_s: Mean wall-clock seconds per query, over non-errored
-            queries. The cost side of RQ4's trade-off: guardrails buy their
-            quality/safety gains with an IVM judge call plus one NLI call per
-            generated sentence.
+            queries. The cost side of the latency trade-off: guardrails buy
+            their quality/safety gains with an IVM judge call plus one NLI
+            call per generated sentence.
         latency_p50_s: Median latency — reported alongside the mean because a
             few slow queries skew the mean badly at this n.
         latency_p95_s: 95th-percentile latency.
@@ -230,11 +215,8 @@ class E2EMetrics:
 def parse_citations(response: str) -> List[Tuple[str, float, str, Optional[int]]]:
     """Parse citation markers from a system response.
 
-    Extracts all citations matching the format:
-        *(STATUS: SCORE; SOURCE; Page N)*
-
-    Args:
-        response: Full system response text.
+    Extracts all citations matching the format
+    ``*(STATUS: SCORE; SOURCE; Page N)*``.
 
     Returns:
         List of (status, score, source, page) tuples.
@@ -254,14 +236,7 @@ def parse_citations(response: str) -> List[Tuple[str, float, str, Optional[int]]
 
 
 def extract_sentence_labels(citations: List[Tuple[str, float, str, Optional[int]]]) -> List[str]:
-    """Map citation statuses to faithfulness labels.
-
-    Args:
-        citations: Parsed citation tuples.
-
-    Returns:
-        List of labels for faithfulness computation.
-    """
+    """Map citation statuses to faithfulness labels."""
     label_map = {
         "Supported": "supported",
         "Contradiction": "not_supported",
@@ -281,9 +256,6 @@ async def run_pipeline(
     """Run the full RAG pipeline on a single query via the chat API.
 
     Args:
-        api_url: Base URL of the running application.
-        row: Subset A row with question and ground truth.
-        session_id: Optional session ID for the chat.
         skip_guardrails: If True, bypass IVM + RAM together (the original
             baseline arm).
         skip_ivm: If set, bypass only the IVM safety/relevance checks.
@@ -327,9 +299,8 @@ async def run_pipeline(
             )
             if resp.status_code != 200:
                 # Infra/HTTP failure, not a pipeline verdict — errored, not
-                # abstained (M4 in writing/overhaul.md: crediting
-                # this as a correct out-of-domain refusal was inflating
-                # Abstention Accuracy on infrastructure noise).
+                # abstained: crediting this as a correct out-of-domain refusal
+                # would inflate Abstention Accuracy on infrastructure noise.
                 return PipelineResult(
                     question=row.question,
                     response="",
@@ -375,7 +346,7 @@ async def run_pipeline(
                 response_text = data.get("content", data.get("response", ""))
         except httpx.TimeoutException:
             # Infra failure, not a pipeline verdict — see the non-200 case
-            # above (M4).
+            # above.
             return PipelineResult(
                 question=row.question,
                 response="",
@@ -409,14 +380,6 @@ async def run_no_guardrail_pipeline(
     Calls the chat endpoint with ``?skip_guardrails=true`` to bypass IVM
     (safety + relevance) and RAM (per-sentence assessment). Retrieval still
     runs so the LLM has context.
-
-    Args:
-        api_url: Base URL of the running application.
-        row: Subset A row.
-        session_id: Optional session ID.
-
-    Returns:
-        PipelineResult.
     """
     return await run_pipeline(api_url, row, session_id, skip_guardrails=True)
 
@@ -429,15 +392,13 @@ def compute_e2e_metrics(
 
     NOTE: this does NOT set the primary faithfulness_score/faithfulness_ci
     — those come from compute_posthoc_faithfulness, run uniformly over
-    both pipeline conditions by the caller (M3 in
-    writing/overhaul.md). This function only populates the
+    both pipeline conditions by the caller. This function only populates the
     citation-based citation_faithfulness_score as a secondary/diagnostic
     number.
 
     Args:
-        results: List of pipeline results.
         exclude_contaminated: If True, drop rows flagged by
-            detect_reasoning_contamination (M1) from the BERTScore
+            detect_reasoning_contamination from the BERTScore
             candidate/reference set. contamination_rate is always computed
             regardless, so the scope of contamination is visible either way.
 
@@ -475,7 +436,7 @@ def compute_e2e_metrics(
         metrics.latency_p50_s = latencies[len(latencies) // 2]
         metrics.latency_p95_s = latencies[min(len(latencies) - 1, int(len(latencies) * 0.95))]
 
-    # --- BERTScore F1 (in-domain only, citation markup stripped — M2) ---
+    # --- BERTScore F1 (in-domain only, citation markup stripped) ---
     if in_domain:
         in_domain_with_response = [r for r in in_domain if r.response]
         metrics.contamination_rate = (
@@ -493,11 +454,10 @@ def compute_e2e_metrics(
         if candidates and references:
             # bert_score_f1 already returns per-example scores (f1_per_example)
             # alongside the corpus mean — bootstrap-resample that array
-            # directly instead of re-invoking the model per resample (the
-            # previous version called bert_score_f1 1000 times here, each
-            # call reloading IndoBERT and rerunning inference over the
-            # resampled batch; this is the same near-instant pattern
-            # Faithfulness and exp3's Cohen's Kappa already use).
+            # directly instead of re-invoking the model per resample (each call
+            # would reload IndoBERT and rerun inference over the resampled
+            # batch; this is the same near-instant pattern Faithfulness and
+            # exp3's Cohen's Kappa use).
             _, _, f1, f1_per_example = bert_score_f1(candidates, references)
             metrics.bertscore_f1 = f1
             metrics.bertscore_f1_ci = bootstrap_ci(f1_per_example, statistic="mean")
@@ -524,7 +484,7 @@ def compute_e2e_metrics(
             metrics.citation_faithfulness_ci = bootstrap_ci(faithfulness_scores, statistic="mean")
 
     # --- Abstention Accuracy (out-of-domain only; errored rows are neither
-    # a correct nor incorrect abstention — see PipelineResult.errored, M4) ---
+    # a correct nor incorrect abstention — see PipelineResult.errored) ---
     if out_of_domain:
         abstained_flags = [r.abstained for r in out_of_domain]
         metrics.abstention_acc = abstention_accuracy(abstained_flags, len(out_of_domain))
@@ -533,8 +493,7 @@ def compute_e2e_metrics(
 
     # --- False Refusal Rate (in-domain only) — counterpart to Abstention
     # Accuracy: a system that refuses everything scores perfectly on
-    # out-of-domain abstention without this metric also visibly costing it
-    # (M4). ---
+    # out-of-domain abstention without this metric also visibly costing it. ---
     if in_domain:
         false_refusals = sum(1 for r in in_domain if r.abstained)
         metrics.false_refusal_rate = false_refusals / len(in_domain)
@@ -549,30 +508,20 @@ async def compute_posthoc_faithfulness(
 ) -> Tuple[float, CI, Dict[str, float]]:
     """Compute the PRIMARY Faithfulness metric via post-hoc NLI checking.
 
-    Originally written only for the no-guardrail baseline (which skips RAM
-    entirely, so citation-based faithfulness is always 0.0/undefined for
-    it — see compute_e2e_metrics's citation_faithfulness_score). Since M3
-    in writing/overhaul.md, this is now called for BOTH pipeline
-    conditions and used as the headline faithfulness_score: the
-    citation-based measure only scores the ~17% of full-pipeline sentences
-    that happened to carry a citation marker (measured on
-    data/results/exp4_end_to_end_qwen3-32b.csv: 4.1 citations / 17.9
-    sentences per response, 31/98 responses with zero citations), while
-    this checks every sentence against the retrieved context directly —
-    the same method for both conditions, over the same denominator, which
-    is what makes the two faithfulness numbers an actual controlled
-    comparison instead of two different measurement tools. Also benefits
-    from the fixed premise-selection in EvalNLIClient (see
-    _shared/clients.py's _select_relevant_chunk — no longer blindly
-    truncating to the first ~10% of a long context).
+    Called for BOTH pipeline conditions and used as the headline
+    faithfulness_score: the citation-based measure only scores the ~17% of
+    full-pipeline sentences that carry a citation marker, while this checks
+    every sentence against the retrieved context directly — the same method
+    for both conditions, over the same denominator, which is what makes the
+    two faithfulness numbers an actual controlled comparison instead of two
+    different measurement tools. Also benefits from the premise-selection in
+    EvalNLIClient (see _shared/clients.py's _select_relevant_chunk, which
+    selects a relevant chunk rather than blindly truncating to the first
+    ~10% of a long context).
 
     No new chat/LLM generation calls — just local Infinity NLI
     classification against each result's already-captured (response,
     retrieved_context) pair.
-
-    Args:
-        results: PipelineResults to score (caller filters to in-domain).
-        nli_client: NLI classifier client.
 
     Returns:
         Tuple of (mean faithfulness score, bootstrap CI, per-question score
@@ -608,11 +557,10 @@ def compute_per_category(
 ) -> Dict[str, Dict[str, Any]]:
     """Break the in-domain scores down by question category.
 
-    RQ4 asks how the system performs answering questions about JDIH documents;
-    Subset A already labels each question factual / procedural / multi-hop, but
-    only the aggregate was ever reported, so "multi-hop questions do worse" was
-    not a statement the results could support or refute. Regroups the
-    already-computed per-row scores rather than recomputing anything.
+    Subset A labels each question factual / procedural / multi-hop, so this
+    shows whether e.g. multi-hop questions do worse rather than reporting only
+    the aggregate. Regroups the already-computed per-row scores rather than
+    recomputing anything.
 
     Args:
         results: Pipeline results for one condition.
@@ -658,12 +606,7 @@ def print_report(
     metrics: E2EMetrics,
     per_category: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
-    """Print a formatted end-to-end evaluation report.
-
-    Args:
-        system_name: Name of the system being evaluated.
-        metrics: Computed end-to-end metrics.
-    """
+    """Print a formatted end-to-end evaluation report."""
     print(f"\n{'=' * 70}")
     print(f"  {system_name}")
     print(f"{'=' * 70}")
@@ -711,13 +654,14 @@ def stratified_sample(
 ) -> List[SubsetARow]:
     """Take ~``limit`` rows spread as evenly as possible across categories.
 
-    The lean RQ4 run (``--limit``) trades the full sweep for a fixed budget,
-    but a blind head-N sample would skew toward whichever category leads the
-    CSV and could drop a category (e.g. out-of-domain) entirely — which would
-    silently disable the abstention metric. This allocates the budget
-    round-robin over the category labels so each keeps representation in both
-    the quantitative anchor and the per-category breakdown. Deterministic in
-    (dataset order, ``seed``): rows are shuffled within each category so the
+    The limited-budget run (``--limit``) trades the full sweep for a fixed
+    budget, but a blind head-N sample would skew toward whichever category
+    leads the CSV and could drop a category (e.g. out-of-domain) entirely —
+    which would silently disable the abstention metric. This allocates the
+    budget round-robin over the category labels so each keeps representation
+    in both the quantitative anchor and the per-category breakdown.
+    Deterministic in (dataset order, ``seed``): rows are shuffled within each
+    category so the
     pick isn't biased by CSV order.
 
     Args:
@@ -761,11 +705,7 @@ def stratified_sample(
 
 
 async def async_main(args: argparse.Namespace) -> None:
-    """Async entry point for Experiment 4.
-
-    Args:
-        args: Parsed command-line arguments.
-    """
+    """Async entry point for Experiment 4."""
     try:
         dataset = load_subset_a(args.dataset)
     except FileNotFoundError as exc:
@@ -778,7 +718,7 @@ async def async_main(args: argparse.Namespace) -> None:
         dataset = stratified_sample(dataset, args.limit, args.seed)
         n_cats = len({r.category for r in dataset})
         print(
-            f"Stratified sample (lean RQ4): {len(dataset)} rows across "
+            f"Stratified sample: {len(dataset)} rows across "
             f"{n_cats} categories (limit={args.limit}, seed={args.seed})"
         )
 
@@ -807,13 +747,13 @@ async def async_main(args: argparse.Namespace) -> None:
         per_row: Dict[str, Dict[str, Any]],
         nli_client: EvalNLIClient,
     ) -> None:
-        """Compute the PRIMARY faithfulness metric for one condition (M3).
+        """Compute the PRIMARY faithfulness metric for one condition.
 
-        Run uniformly for both conditions (not baseline-only, as before) —
-        the full-pipeline's own citation-based faithfulness only covers
-        the ~17% of sentences that happened to carry a citation marker, so
-        it isn't a fair like-for-like comparison against the baseline's
-        faithfulness on its own (see compute_posthoc_faithfulness).
+        Run uniformly for both conditions — the full-pipeline's own
+        citation-based faithfulness only covers the ~17% of sentences that
+        carry a citation marker, so it isn't a fair like-for-like comparison
+        against the baseline's faithfulness on its own (see
+        compute_posthoc_faithfulness).
         """
         in_domain = [r for r in results if r.category not in ("out-of-domain", "out_of_domain")]
         rows_to_score = (
@@ -828,7 +768,7 @@ async def async_main(args: argparse.Namespace) -> None:
     # Guardrail conditions. "full" and "baseline" keep their original names and
     # meaning so runs stay comparable with the committed results; "ivm_only"
     # and "ram_only" are the two cells that let an effect be attributed to one
-    # module instead of to the pair (the word "ganda" in RQ4).
+    # module instead of to the pair.
     ALL_CONDITIONS: Dict[str, Dict[str, bool]] = {
         "full": {"skip_ivm": False, "skip_ram": False},
         "ivm_only": {"skip_ivm": False, "skip_ram": True},
@@ -877,7 +817,7 @@ async def async_main(args: argparse.Namespace) -> None:
             metrics, per_row = compute_e2e_metrics(
                 results, exclude_contaminated=args.exclude_contaminated
             )
-            print(f"Computing {condition} Faithfulness post-hoc (primary metric, M3)...")
+            print(f"Computing {condition} Faithfulness post-hoc (primary metric)...")
             await add_posthoc_faithfulness(results, metrics, per_row, nli_client)
             per_category = compute_per_category(results, per_row)
             print_report(label, metrics, per_category)
@@ -912,11 +852,11 @@ def main() -> None:
     parser.add_argument(
         "--exclude-contaminated",
         action="store_true",
-        help="Exclude responses flagged by detect_reasoning_contamination (M1 in "
-        "writing/overhaul.md — an English chain-of-thought preamble that "
-        "should have been Indonesian) from BERTScore and Faithfulness aggregates. "
-        "Off by default so the default run doesn't silently change which rows are "
-        "scored; contamination_rate is always reported regardless of this flag.",
+        help="Exclude responses flagged by detect_reasoning_contamination (an "
+        "English chain-of-thought preamble that should have been Indonesian) from "
+        "BERTScore and Faithfulness aggregates. Off by default so the default run "
+        "doesn't silently change which rows are scored; contamination_rate is "
+        "always reported regardless of this flag.",
     )
     parser.add_argument(
         "--conditions",
@@ -943,8 +883,8 @@ def main() -> None:
         type=int,
         default=0,
         help="If >0, run on a stratified sample of ~N rows spread evenly across "
-        "question categories (the lean RQ4 run — a small quantitative anchor "
-        "rather than the full sweep). 0 (default) uses the whole dataset.",
+        "question categories (a small quantitative anchor rather than the full "
+        "sweep). 0 (default) uses the whole dataset.",
     )
     parser.add_argument(
         "--seed",

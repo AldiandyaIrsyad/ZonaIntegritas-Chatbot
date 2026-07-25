@@ -5,26 +5,21 @@ the most expensive failure mode in this pipeline: ``EvaluatorPanel`` is
 fail-closed, so a slug that doesn't resolve, a model that rejects
 ``reasoning: {enabled: false}``, or one that returns empty content all become
 a NO vote — and with a ≥4/5 threshold, one such member caps acceptance while
-two reject every candidate outright. Both failures have happened before
-(``gemini-2.5-flash-lite`` returned bare unexplained "NO"s;
-``glm-4.7-flash`` exhausted its budget on hidden reasoning and returned empty
-content), which is why the guidance in ``config.py`` says to verify live
-before a full run. This script is that verification.
+two reject every candidate outright.
 
 Modes:
 
-    # Discover slugs and prices (answers "what is Nemotron 3 Super called?")
+    # Discover slugs and prices
     python -m app.thesis._eval._dataset_gen.preflight --list nemotron
 
     # Verify every configured panel model votes correctly in both directions
     python -m app.thesis._eval._dataset_gen.preflight
 
     # Dump one complete raw response so response-shape assumptions can be
-    # checked against reality rather than from memory
+    # checked against reality
     python -m app.thesis._eval._dataset_gen.preflight --raw
 
-    # Settle whether the `session_id` payload field does anything (see the
-    # caching-claim note in writing/handover_eval_harness_fixes.md)
+    # Settle whether the `session_id` payload field does anything
     python -m app.thesis._eval._dataset_gen.preflight --check-session-id
 """
 
@@ -64,10 +59,6 @@ async def list_models(settings: DatasetGenSettings, needle: str) -> None:
     Use this to resolve a slug from a marketing name before putting it in
     ``panel_models`` — an invalid slug fails closed and silently rejects every
     candidate.
-
-    Args:
-        settings: Dataset generation settings (for API key/base URL).
-        needle: Case-insensitive substring to match against id and name.
     """
     async with _client(settings) as client:
         resp = await client.get("/models")
@@ -111,16 +102,8 @@ async def probe_model(
 ) -> Dict[str, Any]:
     """Send the YES and NO cases to one model and report what came back.
 
-    Args:
-        settings: Dataset generation settings.
-        model: Model slug to probe.
-        reasoning_disabled: Whether to send ``reasoning: {enabled: false}``.
-            Re-probing with this False distinguishes "model is broken" from
-            "model rejects the reasoning flag".
-
-    Returns:
-        Dict with per-case parsed votes, the provider that served the request,
-        and any error encountered.
+    Re-probing with ``reasoning_disabled=False`` distinguishes "model is
+    broken" from "model rejects the reasoning flag".
     """
     out: Dict[str, Any] = {"model": model, "error": None, "provider": None}
 
@@ -166,12 +149,7 @@ async def probe_model(
 
 
 async def run_panel_check(settings: DatasetGenSettings) -> int:
-    """Probe every configured panel model; return a process exit code.
-
-    Returns:
-        0 if every model resolved and voted correctly in both directions,
-        1 otherwise.
-    """
+    """Probe every configured panel model; return 0 if all pass, 1 otherwise."""
     models = settings.panel_model_list
     print(f"Panel: {len(models)} model(s), acceptance threshold "
           f"{settings.acceptance_threshold}/{len(models)}\n")
@@ -225,10 +203,6 @@ async def dump_raw(settings: DatasetGenSettings, model: Optional[str]) -> None:
     ``EvaluatorPanel._evaluate_single`` keeps only the message content, so
     nothing in the pipeline currently observes the provider that served a call
     or whether any prompt caching occurred.
-
-    Args:
-        settings: Dataset generation settings.
-        model: Model to query; defaults to the first configured panel model.
     """
     target = model or settings.panel_model_list[0]
     async with _client(settings) as client:
@@ -255,9 +229,8 @@ async def dump_raw(settings: DatasetGenSettings, model: Optional[str]) -> None:
 def _cached_tokens(data: Dict[str, Any]) -> Optional[int]:
     """Best-effort extraction of a cached-prompt-token count from a response.
 
-    Key names differ between providers and change over time, so this searches
-    rather than assuming one path. Returns None when nothing cache-shaped is
-    present, which is itself the answer to "is caching happening at all?".
+    Key names differ between providers, so this searches rather than assuming
+    one path. Returns None when nothing cache-shaped is present.
     """
     usage = data.get("usage") or {}
     for path in (
@@ -279,19 +252,11 @@ def _cached_tokens(data: Dict[str, Any]) -> Optional[int]:
 async def check_session_id(settings: DatasetGenSettings, model: Optional[str]) -> None:
     """Test whether the ``session_id`` payload field affects caching or routing.
 
-    ``EvaluatorPanel._build_payload`` sends ``session_id`` and a cost claim
-    rests on it, but it is not a parameter this API is known to accept, and
+    ``session_id`` is not a parameter this API is known to accept, and
     OpenRouter drops unsupported parameters silently — so it may be a no-op.
-    Provider-side caching is generally automatic and keyed on the prompt
-    prefix, not on a session, which would make the field unnecessary even if
-    it were accepted.
-
-    Sends a long shared prefix twice in each condition and compares the cached
-    token count on the second call of each pair.
-
-    Args:
-        settings: Dataset generation settings.
-        model: Model to test; defaults to the first configured panel model.
+    Provider-side caching is automatic and keyed on the prompt prefix, not on
+    a session. Sends a long shared prefix twice in each condition and compares
+    the cached token count on the second call of each pair.
     """
     target = model or settings.panel_model_list[0]
 
@@ -343,7 +308,7 @@ async def check_session_id(settings: DatasetGenSettings, model: Optional[str]) -
         return hits
 
     print(f"Testing session_id against {target}\n")
-    # Run session_id FIRST. If it ran second and 'won', that would be
+    # Run session_id FIRST: if it ran second and 'won', that would be
     # indistinguishable from it simply inheriting a warm cache.
     with_hits = await condition("with session_id", "preflight-fixed-session")
     without_hits = await condition("without session_id", None)

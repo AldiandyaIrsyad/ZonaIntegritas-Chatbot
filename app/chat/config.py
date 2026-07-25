@@ -12,24 +12,11 @@ from app.thesis.ivm.judge import (
 class ChatConfig(BaseSettings):
     """Configuration for the Chat module.
 
-    LLM settings read the ``CHAT_LLM_*`` environment variables defined in
-    ``.env`` (e.g. ``CHAT_LLM_API_KEY``, ``CHAT_LLM_BASE_URL``,
-    ``CHAT_LLM_MODEL``) — matching the ``CHAT_`` prefix every other field in
-    this class uses. The ``validation_alias`` for each field maps the
-    canonical env var name to the config attribute so that
-    ``get_chat_config()`` picks up the OpenRouter credentials instead of
-    falling back to the dead Ollama defaults.
-
-    NOTE: prior to this fix, these three fields used a stale ``LLM_*``
-    alias (``LLM_API_KEY``, ``LLM_OPENROUTER_BASE_URL``,
-    ``LLM_OPENROUTER_MODEL``) left over from before the rest of the class
-    was migrated to the ``CHAT_`` prefix — ``.env.example`` and
-    ``docs/11-deployment.md`` had already documented ``CHAT_LLM_*`` as the
-    real variable names, so any ``.env`` written against the docs silently
-    fell back to the dead Ollama defaults instead of erroring. If you have
-    an existing ``.env`` with ``LLM_API_KEY``/``LLM_OPENROUTER_BASE_URL``/
-    ``LLM_OPENROUTER_MODEL``, rename them to ``CHAT_LLM_API_KEY``/
-    ``CHAT_LLM_BASE_URL``/``CHAT_LLM_MODEL``.
+    Every field uses a ``validation_alias`` mapping its canonical env var
+    (``CHAT_*`` / ``INFINITY_*`` / ``PROMPT_GUARD_*``) to the attribute, so
+    ``get_chat_config()`` reads real credentials instead of the dead Ollama
+    defaults. LLM settings read ``CHAT_LLM_BASE_URL`` / ``CHAT_LLM_API_KEY`` /
+    ``CHAT_LLM_MODEL`` — rename any legacy ``LLM_*`` env vars to these.
     """
 
     # LLM Settings
@@ -50,7 +37,7 @@ class ChatConfig(BaseSettings):
     )
     llm_temperature: float = Field(
         default=0.0,
-        description="Sampling temperature for generation (0.0 = deterministic, per skripsi §3.2.1c)",
+        description="Sampling temperature for generation (0.0 = deterministic)",
     )
     system_prompt: str = Field(
         default=DEFAULT_SYSTEM_PROMPT_ID,
@@ -232,9 +219,5 @@ class ChatConfig(BaseSettings):
 
 @lru_cache
 def get_chat_config() -> ChatConfig:
-    """Returns the cached ChatConfig singleton.
-
-    Returns:
-        ChatConfig: The cached settings instance.
-    """
+    """Return the cached :class:`ChatConfig` singleton."""
     return ChatConfig()

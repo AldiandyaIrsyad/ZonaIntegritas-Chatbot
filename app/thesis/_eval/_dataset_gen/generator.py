@@ -1,15 +1,8 @@
 """Dataset generator (DeepSeek by default).
 
 Generates draft items (questions, adversarial inputs, boundary queries, RAM
-sentences) from seed prompts. The generator operates at temperature 0.0 for
-reproducibility. Drafts are then validated by the EvaluatorPanel.
-
-Usage:
-    generator = DatasetGenerator(settings)
-    drafts = await generator.generate(
-        seed_prompt="Generate 10 factual questions about UPI internal legal docs (JDIH)...",
-        count=10,
-    )
+sentences) from seed prompts at temperature 0.0. Drafts are validated by the
+EvaluatorPanel.
 """
 
 from __future__ import annotations
@@ -30,21 +23,9 @@ logger = structlog.get_logger(__name__)
 def parse_json_object(raw: str) -> Optional[Dict[str, Any]]:
     """Recover a single JSON object from a possibly-messy generator reply.
 
-    Robust to the two ways a model breaks a strict JSONL contract: a
-    **pretty-printed multi-line** object (which a line-by-line JSONL parser
-    shreds into non-JSON fragments) and an object wrapped in prose or ```json
-    fences. Extracts the widest brace-balanced span and parses it whole.
-
-    This exists because the earlier per-line parse in the Subset-D question
-    generators silently failed on multi-line JSON — ``draft.parsed`` came back a
-    string, the ``isinstance(dict)`` check dropped every draft, and the generator
-    looped the entire 922-document corpus without producing a question.
-
-    Args:
-        raw: The generator's text reply.
-
-    Returns:
-        The parsed object, or None if no JSON object can be recovered.
+    Robust to pretty-printed multi-line objects and objects wrapped in prose
+    or ```json fences. Extracts the widest brace-balanced span and parses it
+    whole. Returns None if no JSON object can be recovered.
     """
     if not raw or not raw.strip():
         return None
@@ -66,23 +47,14 @@ def parse_json_object(raw: str) -> Optional[Dict[str, Any]]:
 
 @dataclass(frozen=True)
 class GeneratedItem:
-    """A single generated draft item.
-
-    Attributes:
-        raw: Raw model output.
-        parsed: Parsed structured data (dict or string).
-    """
+    """A single generated draft item (raw output + parsed data)."""
 
     raw: str
     parsed: Any
 
 
 class DatasetGenerator:
-    """LLM-based dataset generator (DeepSeek by default).
-
-    Args:
-        settings: DatasetGenSettings with API key and model config.
-    """
+    """LLM-based dataset generator (DeepSeek by default)."""
 
     def __init__(self, settings: DatasetGenSettings) -> None:
         self._settings = settings
@@ -105,13 +77,6 @@ class DatasetGenerator:
 
         Conditionally includes ``reasoning: {enabled: false}`` for models
         that support disabling reasoning.
-
-        Args:
-            messages: Chat messages.
-            max_tokens: Maximum tokens for the response.
-
-        Returns:
-            Request payload dict.
         """
         payload: Dict[str, object] = {
             "model": self._settings.generator_model,
@@ -129,16 +94,7 @@ class DatasetGenerator:
         count: int = 10,
         system_prompt: Optional[str] = None,
     ) -> List[GeneratedItem]:
-        """Generate draft items from a seed prompt.
-
-        Args:
-            seed_prompt: Instructions for what to generate.
-            count: Number of items to generate.
-            system_prompt: Optional system prompt for the generator.
-
-        Returns:
-            List of GeneratedItem.
-        """
+        """Generate draft items from a seed prompt."""
         if system_prompt is None:
             system_prompt = (
                 "You are a dataset generator for a RAG evaluation benchmark. "
@@ -170,14 +126,7 @@ class DatasetGenerator:
 
     @staticmethod
     def _parse_jsonl(text: str) -> List[GeneratedItem]:
-        """Parse JSONL output from the generator.
-
-        Args:
-            text: Raw model output.
-
-        Returns:
-            List of GeneratedItem with parsed JSON.
-        """
+        """Parse JSONL output from the generator into GeneratedItem objects."""
         items: List[GeneratedItem] = []
         # Remove markdown code fences if present
         text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
@@ -208,15 +157,7 @@ class DatasetGenerator:
         prompt: str,
         system_prompt: Optional[str] = None,
     ) -> str:
-        """Generate a single text response (not JSONL).
-
-        Args:
-            prompt: User prompt.
-            system_prompt: Optional system prompt.
-
-        Returns:
-            Raw model response text.
-        """
+        """Generate a single text response (not JSONL)."""
         messages = [
             {"role": "system", "content": system_prompt or "You are a helpful assistant."},
             {"role": "user", "content": prompt},
@@ -234,15 +175,8 @@ class DatasetGenerator:
     def _extract_content(data: Dict[str, Any]) -> str:
         """Extract text content from an OpenRouter chat completion response.
 
-        Handles reasoning models that may return ``content: null`` with the
-        actual text in a ``reasoning`` field. If both are present, prefers
-        ``content``. If both are empty, returns empty string.
-
-        Args:
-            data: Parsed JSON response from OpenRouter.
-
-        Returns:
-            The response text.
+        Handles reasoning models that return ``content: null`` with the text
+        in a ``reasoning`` field. Prefers ``content`` when both are present.
         """
         message = data.get("choices", [{}])[0].get("message", {})
         content = message.get("content")

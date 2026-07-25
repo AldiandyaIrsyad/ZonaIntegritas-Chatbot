@@ -3,10 +3,7 @@
 Evaluates hybrid retrieval (dense + sparse with RRF fusion) against
 dense-only and sparse-only baselines using Subset A (RAG QA triplets).
 
-Skripsi §3.3.3, Tabel 3.10.
-
-Metrics (§3.4): Hit Rate@k (k=1,3,5) and MRR, reported per category
-and overall.
+Metrics: Hit Rate@k (k=1,3,5) and MRR, reported per category and overall.
 
 Usage:
     python -m app.thesis._eval.exp2_retrieval.run \\
@@ -39,13 +36,7 @@ DEFAULT_OUTPUT_CSV = "data/results/exp2_retrieval.csv"
 
 @dataclass
 class CategoryResult:
-    """Retrieval metrics for a single category.
-
-    Attributes:
-        category: Category name.
-        metrics: Aggregated retrieval metrics.
-        sample_count: Number of queries in this category.
-    """
+    """Retrieval metrics for a single category."""
 
     category: str
     metrics: RetrievalMetrics
@@ -73,22 +64,17 @@ async def retrieve(
 
     ``/api/kb/search`` returns CHUNK-level hits, each carrying the doc_id it
     came from — several of the top-k chunks routinely belong to the same
-    document (measured: top-5 averages only ~3.8 unique documents across
-    all three modes, see writing/overhaul.md M9). This function
-    returns the raw chunk-level list; callers computing Hit Rate@k/MRR@k
-    should deduplicate first (see dedup_doc_ids) so "@k" means "top-k
-    distinct documents", matching how the metric is defined in §3.5.6/7,
-    not "top-k chunks that may repeat the same 2-3 documents".
+    document (measured: top-5 averages only ~3.8 unique documents across all
+    three modes). This function returns the raw chunk-level list; callers
+    computing Hit Rate@k/MRR@k should deduplicate first (see dedup_doc_ids) so
+    "@k" means "top-k distinct documents", not "top-k chunks that may repeat
+    the same 2-3 documents".
 
     Args:
-        api_url: Base URL of the running application.
-        query: Search query.
-        top_k: Number of results to retrieve.
-        mode: Retrieval mode ("hybrid", "dense", or "sparse").
-        rerank: Whether the cross-encoder reranker runs. With it on, all
-            three modes are really "mode -> rerank", so the comparison is
-            between reranked variants rather than between the fusion
-            strategies themselves (M10).
+        rerank: Whether the cross-encoder reranker runs. With it on, all three
+            modes are really "mode -> rerank", so the comparison is between
+            reranked variants rather than between the fusion strategies
+            themselves.
 
     Returns:
         List of retrieved doc_ids in ranked (chunk-level) order.
@@ -111,7 +97,7 @@ async def retrieve(
             return [r.get("doc_id", "") for r in results]
     except httpx.HTTPError:
         # A slow/failed HyDE call is a retrieval miss for this one query, not a
-        # run-ending crash — a single ReadTimeout used to kill the whole sweep.
+        # run-ending crash.
         return []
 
 
@@ -121,9 +107,6 @@ def dedup_doc_ids(doc_ids: List[str]) -> List[str]:
     Keeps the first (best-ranked) occurrence of each doc_id and drops
     later repeats, so a document's rank in the deduped list is the best
     rank any of its chunks achieved.
-
-    Args:
-        doc_ids: Chunk-level doc_ids in ranked order (may repeat).
 
     Returns:
         Unique doc_ids in first-occurrence (best-rank) order.
@@ -147,23 +130,16 @@ async def evaluate_mode(
 ) -> Tuple[RetrievalMetrics, List[Tuple[SubsetARow, List[str], List[str]]]]:
     """Evaluate a single retrieval mode over the dataset.
 
-    Deduplicates each query's chunk-level results to unique documents (M9
-    in writing/overhaul.md) before computing Hit Rate@k/MRR@k, so
-    "@k" is measured over document rank, not chunk rank.
-
-    Args:
-        api_url: Base URL of the running application.
-        dataset: List of Subset A rows.
-        mode: Retrieval mode ("hybrid", "dense", or "sparse").
-        top_k: Number of results to retrieve per query.
-        rerank: Whether the cross-encoder reranker runs (M10).
+    Deduplicates each query's chunk-level results to unique documents before
+    computing Hit Rate@k/MRR@k, so "@k" is measured over document rank, not
+    chunk rank.
 
     Returns:
         Tuple of (aggregated RetrievalMetrics computed on deduped doc
         rankings, per-query raw results as (row, raw_chunk_doc_ids,
         deduped_doc_ids) triples — deduped_doc_ids is what metrics were
-        computed from; raw_chunk_doc_ids is kept for CSV transparency and
-        for compute_per_category to regroup without re-querying (M12)).
+        computed from; raw_chunk_doc_ids is kept for CSV transparency and for
+        compute_per_category to regroup without re-querying).
     """
     results_per_query: List[Tuple[List[str], List[str]]] = []
     raw_per_query: List[Tuple[SubsetARow, List[str], List[str]]] = []
@@ -185,13 +161,10 @@ def compute_per_category(
 ) -> List[CategoryResult]:
     """Regroup an already-computed evaluate_mode() pass by category.
 
-    Previously this re-ran every query through the API a second time
-    (evaluate_mode_per_category), so overall and per-category figures came
-    from two independent passes with no guarantee they'd reconcile, and
-    Exp2's API/HyDE cost was doubled for no gain (M12 in
-    writing/overhaul.md). This instead regroups the single pass's
-    raw per-query results, so per-category numbers are guaranteed
-    consistent with the overall figure they're a breakdown of.
+    Regroups the single pass's raw per-query results rather than re-running
+    every query through the API a second time, so per-category numbers are
+    guaranteed consistent with the overall figure they are a breakdown of (and
+    Exp2's API/HyDE cost is not doubled).
 
     Args:
         raw_per_query: The (row, raw_chunk_doc_ids, deduped_doc_ids)
@@ -221,13 +194,7 @@ def print_report(
     overall: RetrievalMetrics,
     per_category: List[CategoryResult],
 ) -> None:
-    """Print a formatted retrieval evaluation report.
-
-    Args:
-        mode_name: Name of the retrieval mode.
-        overall: Overall retrieval metrics.
-        per_category: Per-category results.
-    """
+    """Print a formatted retrieval evaluation report."""
     print(f"\n{'=' * 70}")
     print(f"  Retrieval Mode: {mode_name}")
     print(f"{'=' * 70}")
@@ -257,11 +224,7 @@ def print_report(
 
 
 async def async_main(args: argparse.Namespace) -> None:
-    """Async entry point for Experiment 2.
-
-    Args:
-        args: Parsed command-line arguments.
-    """
+    """Async entry point for Experiment 2."""
     try:
         dataset = load_subset_a(args.dataset)
     except FileNotFoundError as exc:
@@ -270,7 +233,7 @@ async def async_main(args: argparse.Namespace) -> None:
 
     # Filter out out-of-domain rows: they have source_doc_id="NONE" and
     # always score 0 on retrieval, which would pollute the metrics without
-    # providing meaningful signal (Issue 7).
+    # providing meaningful signal.
     in_domain_dataset = [r for r in dataset if r.category != "out-of-domain"]
     skipped = len(dataset) - len(in_domain_dataset)
     print(f"Loaded {len(dataset)} samples from Subset A ({skipped} out-of-domain rows filtered)")
@@ -282,8 +245,9 @@ async def async_main(args: argparse.Namespace) -> None:
     else:
         modes_to_eval = [args.mode]
 
-    # M10: report both, so the table separates "which fusion strategy is
-    # better" from "how much of the difference the reranker was absorbing".
+    # Report both rerank conditions, so the table separates "which fusion
+    # strategy is better" from "how much of the difference the reranker was
+    # absorbing".
     rerank_conditions: List[bool] = {
         "both": [True, False],
         "on": [True],
@@ -361,8 +325,7 @@ def main() -> None:
         choices=["both", "on", "off"],
         help="Cross-encoder reranker condition. With the reranker on, every mode is "
         "really 'mode -> rerank', so the ablation compares reranked variants rather "
-        "than the fusion strategies themselves (M10 in writing/overhaul.md). "
-        "Default 'both' reports each mode twice.",
+        "than the fusion strategies themselves. Default 'both' reports each mode twice.",
     )
     parser.add_argument(
         "--hyde",

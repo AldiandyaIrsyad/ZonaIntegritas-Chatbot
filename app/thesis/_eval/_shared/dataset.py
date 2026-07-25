@@ -1,18 +1,15 @@
 """Dataset loaders for the thesis evaluation subsets.
 
-Loads CSV files matching the column schemas defined in skripsi §3.2.1
-(Tabel 3.3–3.6).
-
-Subset A — RAG QA triplets (Tabel 3.3):
+Subset A — RAG QA triplets:
     question, category, ground_truth_answer, source_doc_id, source_context
 
-Subset B — Adversarial inputs (Tabel 3.4):
+Subset B — Adversarial inputs:
     query, label, attack_type
 
-Subset C — Boundary relevance (Tabel 3.5):
+Subset C — Boundary relevance:
     query, label, subtype
 
-Subset D — RAM ground truth (Tabel 3.6):
+Subset D — RAM ground truth:
     question_id, question, full_response, sentence_id, sentence_text,
     retrieved_context, label, verifier_note
 """
@@ -29,13 +26,8 @@ from typing import List, Optional
 class SubsetARow:
     """A single row from Subset A (RAG QA triplets).
 
-    Attributes:
-        question: User query.
-        category: Question category (factual, procedural, multi-hop, out-of-domain).
-        ground_truth_answer: Reference answer from source documents.
-        source_doc_id: ID of the source document. May hold several
-            pipe-separated IDs — see ``gold_doc_ids``.
-        source_context: Verbatim paragraph from the source document (NONE for out-of-domain).
+    ``source_doc_id`` may hold several pipe-separated IDs — see
+    ``gold_doc_ids``. ``source_context`` is NONE for out-of-domain rows.
     """
 
     question: str
@@ -48,16 +40,12 @@ class SubsetARow:
     def gold_doc_ids(self) -> List[str]:
         """Return the relevant document IDs for retrieval scoring.
 
-        A multi-hop question synthesises several paragraphs and can legitimately
-        have more than one correct source document, but the column holds a
-        single ID, so such a question is scored as a miss whenever retrieval
-        surfaces one of its *other* valid sources (M11 in
-        writing/overhaul.md). Pipe-separated IDs are therefore
-        accepted here; single-ID rows are unaffected.
-
-        Returns:
-            List of gold document IDs — empty for out-of-domain rows, which
-            carry the sentinel "NONE".
+        A multi-hop question can legitimately have more than one correct source
+        document, but the column holds a single ID, so such a question would be
+        scored as a miss whenever retrieval surfaces one of its *other* valid
+        sources. Pipe-separated IDs are therefore accepted here; single-ID rows
+        are unaffected. Empty for out-of-domain rows, which carry the sentinel
+        "NONE".
         """
         raw = (self.source_doc_id or "").strip()
         if not raw or raw.upper() == "NONE":
@@ -69,10 +57,8 @@ class SubsetARow:
 class SubsetBRow:
     """A single row from Subset B (adversarial inputs).
 
-    Attributes:
-        query: Input text.
-        label: 'safe' or 'malicious'.
-        attack_type: Subtype (jailbreak, dan_attempt, hidden_instruction, safe_normal, safe_complex).
+    ``label`` is 'safe' or 'malicious'; ``attack_type`` is the subtype
+    (jailbreak, dan_attempt, hidden_instruction, safe_normal, safe_complex).
     """
 
     query: str
@@ -84,13 +70,8 @@ class SubsetBRow:
 class SubsetCRow:
     """A single row from Subset C (boundary relevance).
 
-    Attributes:
-        query: User query.
-        label: 'in_domain' or 'out_of_domain'.
-        subtype: Subtype for error analysis.
-        panel_yes: How many panel members voted to accept this row's label.
-            Defaults to 0 for CSVs generated before this column existed.
-        panel_size: Panel size at generation time. 0 when unrecorded.
+    ``label`` is 'in_domain' or 'out_of_domain'. ``panel_yes``/``panel_size``
+    record the panel vote at generation time; both default to 0 when unrecorded.
     """
 
     query: str
@@ -103,20 +84,17 @@ class SubsetCRow:
         """Whether the panel fell short of the strict rule on this row.
 
         Subset C's boundary subtypes — ``near_miss_government`` above all —
-        are defined as sitting near the domain edge, so a split panel is
-        information about the boundary rather than evidence of a bad item.
-        Rows admitted one vote below the strict threshold are kept and marked
-        here, so Exp1b can report the strict and contested slices separately
-        instead of pooling them or silently discarding the hard cases.
+        sit near the domain edge, so a split panel is information about the
+        boundary rather than evidence of a bad item. Rows admitted one vote
+        below the strict threshold are kept and marked here, so the strict and
+        contested slices can be reported separately instead of pooled or
+        silently discarded.
 
         Args:
             strict_threshold: The strict acceptance threshold to compare
-                against (the generation-time ``acceptance_threshold``).
-
-        Returns:
-            True if this row was admitted below ``strict_threshold``. Rows
-            with no recorded vote count (older CSVs) are treated as not
-            contested, since they could only have been accepted strictly.
+                against (the generation-time ``acceptance_threshold``). Rows
+                with no recorded vote count are treated as not contested, since
+                they could only have been accepted strictly.
         """
         return 0 < self.panel_yes < strict_threshold
 
@@ -125,27 +103,17 @@ class SubsetCRow:
 class SubsetDRow:
     """A single row from Subset D (RAM ground truth).
 
-    Attributes:
-        question_id: ID linking back to the Subset A question.
-        question: The original question.
-        full_response: Full system response.
-        sentence_id: Index of the sentence within the response.
-        sentence_text: Individual sentence text.
-        retrieved_context: Context retrieved by the system.
-        label: Annotation label (supported, partially_supported, not_supported, no_source_needed).
-        verifier_note: Researcher verification note.
-        construction: How the row was made — ``natural`` (real pipeline output) or
-            ``perturbed`` (a verified counterfactual edit). Empty for legacy files.
-        perturbation_family: The edit strategy for a ``perturbed`` row (e.g.
-            ``factual_flip``); empty otherwise.
-        intended_label: The label a ``perturbed`` row was designed to carry, which
-            the panel then confirmed equals ``label``; empty otherwise.
-        perturbation_of: The parent ``question_id:sentence_id`` a perturbed row was
-            derived from; empty otherwise.
-        difficulty_band: ``easy``/``medium``/``hard`` from how the production NLI
-            verifier fared on the row (a reported slice, not an inclusion gate).
-        split: ``core`` (balanced diagnostic) or ``natural`` (realistic base rate).
-        edit_note: Short description of the perturbation, for auditing.
+    ``label`` is one of supported, partially_supported, not_supported,
+    no_source_needed. The optional slice-metadata fields default to empty:
+    ``construction`` is ``natural`` (real pipeline output) or ``perturbed`` (a
+    verified counterfactual edit); ``perturbation_family`` is the edit strategy
+    for a perturbed row (e.g. ``factual_flip``); ``intended_label`` is the label
+    a perturbed row was designed to carry (panel-confirmed equal to ``label``);
+    ``perturbation_of`` is the parent ``question_id:sentence_id``;
+    ``difficulty_band`` is ``easy``/``medium``/``hard`` from how the production
+    NLI verifier fared (a reported slice, not an inclusion gate); ``split`` is
+    ``core`` (balanced diagnostic) or ``natural`` (realistic base rate);
+    ``edit_note`` describes the perturbation for auditing.
     """
 
     question_id: str
@@ -156,9 +124,8 @@ class SubsetDRow:
     retrieved_context: str
     label: str
     verifier_note: str
-    # Optional slice metadata from the hard rebuild. Absent in legacy 2026-07-19
-    # files, so all default to empty and load via ``.get()`` — Exp3/Exp4 keep
-    # reading the old schema unchanged.
+    # Optional slice metadata. All default to empty and load via ``.get()``, so
+    # files lacking these columns (older schema) still read unchanged.
     construction: str = ""
     perturbation_family: str = ""
     intended_label: str = ""
@@ -171,14 +138,8 @@ class SubsetDRow:
 def _int_or_zero(value: Optional[str]) -> int:
     """Parse an optional CSV cell as an int, defaulting to 0.
 
-    Columns added after a dataset was generated are absent (None) in the older
-    file, and may be blank in a hand-edited one; neither should crash a load.
-
-    Args:
-        value: Raw cell value, or None if the column is absent.
-
-    Returns:
-        The parsed integer, or 0 when missing or unparseable.
+    Absent or blank cells (a column added after a dataset was generated, or a
+    hand-edited blank) must not crash a load.
     """
     try:
         return int(str(value).strip())
@@ -188,12 +149,6 @@ def _int_or_zero(value: Optional[str]) -> int:
 
 def _open_csv(path: str) -> csv.DictReader:
     """Open a CSV file and return a DictReader.
-
-    Args:
-        path: Path to the CSV file.
-
-    Returns:
-        csv.DictReader for the file.
 
     Raises:
         FileNotFoundError: If the file does not exist.
@@ -206,14 +161,7 @@ def _open_csv(path: str) -> csv.DictReader:
 
 
 def load_subset_a(path: str) -> List[SubsetARow]:
-    """Load Subset A (RAG QA triplets) from CSV.
-
-    Args:
-        path: Path to the CSV file.
-
-    Returns:
-        List of SubsetARow records.
-    """
+    """Load Subset A (RAG QA triplets) from CSV."""
     reader = _open_csv(path)
     rows: List[SubsetARow] = []
     for row in reader:
@@ -230,14 +178,7 @@ def load_subset_a(path: str) -> List[SubsetARow]:
 
 
 def load_subset_b(path: str) -> List[SubsetBRow]:
-    """Load Subset B (adversarial inputs) from CSV.
-
-    Args:
-        path: Path to the CSV file.
-
-    Returns:
-        List of SubsetBRow records.
-    """
+    """Load Subset B (adversarial inputs) from CSV."""
     reader = _open_csv(path)
     rows: List[SubsetBRow] = []
     for row in reader:
@@ -252,14 +193,7 @@ def load_subset_b(path: str) -> List[SubsetBRow]:
 
 
 def load_subset_c(path: str) -> List[SubsetCRow]:
-    """Load Subset C (boundary relevance) from CSV.
-
-    Args:
-        path: Path to the CSV file.
-
-    Returns:
-        List of SubsetCRow records.
-    """
+    """Load Subset C (boundary relevance) from CSV."""
     reader = _open_csv(path)
     rows: List[SubsetCRow] = []
     for row in reader:
@@ -276,14 +210,7 @@ def load_subset_c(path: str) -> List[SubsetCRow]:
 
 
 def load_subset_d(path: str) -> List[SubsetDRow]:
-    """Load Subset D (RAM ground truth) from CSV.
-
-    Args:
-        path: Path to the CSV file.
-
-    Returns:
-        List of SubsetDRow records.
-    """
+    """Load Subset D (RAM ground truth) from CSV."""
     reader = _open_csv(path)
     rows: List[SubsetDRow] = []
     for row in reader:
